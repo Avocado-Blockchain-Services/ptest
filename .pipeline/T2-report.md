@@ -1,170 +1,91 @@
-# T2 report — Docs for update check and `ptest update`
+# T2 report — Config and contracts: stall_timeout key, manifest field, post-test-stall reason code
 
-Status: done (docs complete, committed c868a96; ptest-form gate green, 201 passed).
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T2
+- taskBranch: feature/post-test-stall-T2
+- commit: 11b759f ("T2: stall_timeout config key, stall contracts, post-test-stall reason code", parent 3ab75e8)
+- status: DONE (all acceptance criteria met; no BLOCKED)
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-update-check/ptest-T2
-- taskBranch: feature/update-check-T2
-- commit: c868a96 ("Docs for update check and ptest update (T2)")
-- base: d5bae4e (chain worktree HEAD at start)
+## What was built
 
-## What was done (design section 5, all items)
+`src/ptest/contracts.py` — shared barrier content (design §9, edits A–J applied verbatim; the
+barrier was present in neither the chain nor the task worktree, so T2 applied it as owner of record):
+constants DEFAULT_STALL_TIMEOUT_S=120.0, MIN_STALL_TIMEOUT_S=10.0, MAX_STALL_TIMEOUT_S=86400.0,
+STALL_DUMP_WAIT_S=1.0, STALL_MARKER_SUFFIX='.done', STACK_DUMP_INFIX='.stack-',
+STACK_DUMP_HEADER_PREFIX='ptest stack dump: '; "post-test-stall" in REASON_CODES;
+RunnerConfig.stall_timeout_s (None=absent, 0=disabled, else 0 or 10..86400, repr=False);
+stall_marker_path / stack_dump_path (ValueError on pid<=0 or non-int, bool rejected) /
+stack_dump_pid (1–10 ASCII digits, no leading zero, own-report prefix);
+LaunchManifest.stall_timeout_s (None or 0.1..86400), always encoded as key "stall_timeout_s",
+decoded via obj.get; GUARD_PROTOCOL_VERSION unchanged (2).
 
-1. **Agent guide** (`src/ptest/resources/repository-agent-guide.md`): appended
-   the update-available row as the last row of `## Reading ptest output`,
-   byte-exact per design 5.1 (U+2014 dash verified via repr). Joined the
-   two-line "Untracked config" paragraph onto one line. Guide is exactly
-   100 lines. `docs/ptest-agent.md` re-synced with `cp` and verified
-   byte-identical (`cmp` clean).
-2. **`src/ptest/agent_rules.py`**: appended the hash entry as the last
-   element of `_PREVIOUS_GUIDE_SHA256S` (design 5.2 verbatim). The hash
-   `2639d68b…` was corroborated as the sha256 of the pre-change guide
-   (computed `sha256sum` on the untouched file before editing — matched).
-3. **`tests/ng/test_agent_rules.py`**: added
-   `test_previous_hashes_cover_pre_update_row_guide` (design 5.3 verbatim
-   assertions). TDD: observed it FAIL before the implementation
-   (AssertionError on the missing hash), then PASS after.
-4. **README.md** (design 5.4 verbatim): section renamed to
-   `### Update, pin a version, remove`; code block replaced with the
-   `ptest update` / `--check` / `--version` / one-liner form; startup-check
-   paragraph added with the exact S1/S2/S4 strings; troubleshooting row
-   added. `ptest uninstall` and `PTEST_STATE_DIR` kept.
-5. **`docs/installation.md`** (design 5.5): new `## Updating` section after
-   `## One-line install` — grammar, verification (HTTPS-only, SHA-256,
-   64 MiB cap, confined extraction, bundled install.sh), side-by-side
-   bundles + atomic switch + failed-update-keeps-old, startup check
-   (24 h cache, PTEST_STATE_DIR, 2 s bound, silent offline), opt-outs,
-   S4 source refusal, exit codes 0/2/75.
-6. **`docs/changelog.md`** (design 5.6): new `## Unreleased` section above
-   `## 0.3.7` covering `ptest update`, the startup check, the agent-guide
-   row, and the installer smoke check running with `PTEST_NO_UPDATE_CHECK=1`.
-7. `graphify update .` run in the worktree (graph up to date; no stray
-   files — `git status` shows only the 7 owned files).
+`src/ptest/config.py` — `_runner` accepts `stall_timeout` via new `_optional_stall_timeout`
+(0 or 10..86400; bool/string/non-finite/negative/1..9.99/>86400 → `_fail()` = invalid-config,
+exit 2); passed as `RunnerConfig(stall_timeout_s=...)`; render emits `stall_timeout = {v:g}`
+after `full_timeout` only when set (`0` renders as `stall_timeout = 0`). No CLI flag.
 
-Quoted user-visible strings are exactly the frozen S1/S2/S4/S5/S6/S7 texts
-(U+2014 verified; the single U+2013 in README line 53 is pre-existing).
-No other ptest output text was invented. No code or test files outside the
-owned set were changed. No migration generated (none exists in this repo).
+Tests (strict TDD — 37 new tests failed pre-change, all pass post-change):
+`tests/ng/test_contracts.py` — constants, reason-code registration (Reason+Problem validate),
+RunnerConfig bounds (None/0/10/10.5/120/86400 accept; -1/5/9.99/"120"/1e9/true/nan/inf/86400.5
+reject), repr omission, LaunchManifest round-trip (None/1.0/120.0, key present in JSON body),
+decode+constructor rejection (0/-1/1e9/"x"/true → protocol-mismatch / ValueError), path-helper
+positive/negative cases (foreign report name, "0123", 11 digits, empty suffix, non-ASCII digits,
+trailing junk, bare name, empty).
+`tests/ng/test_config.py` — absent→None; 0/10/10.5/120/86400 parse; -1/5/9.99/"120"/1e9/true/
+nan/inf/86400.5 → invalid-config; render line order after full_timeout, zero rendering,
+render↔parse round-trip.
 
-## Verification (dan-jefferies passes 1–3)
+`docs/schemas/v1/run.json` — unchanged: it enumerates no reason codes (reason `code` fields are
+plain `{"type": "string"}`) and no runner timeouts. `uv run scripts/export-schemas.py --check`
+exits 0, proving no drift. No migration generated (none exists in this repo).
 
-- Pass 1 (re-read own bytes): full `git diff` re-read. One finding while
-  writing: changelog S1 quote drops the trailing space inside backticks —
-  matches design 5.4/5.6's own rendering (invisible in Markdown); kept.
-  No other findings; diff is 109 insertions / 9 deletions across 7 files.
-- Pass 2 (acceptance criteria, design 5.7):
-  - [x] Strings match 3.1 byte-for-byte (repr-checked).
-  - [x] `docs/ptest-agent.md` byte-identical; guide 100 lines (`cmp`, `wc`).
-  - [x] Scoped gate, passing: `ptest --workers 2 --queue-timeout 1800
-    tests/ng/test_agent_rules.py tests/ng/test_resources.py
-    tests/ng/test_init_changed.py tests/ng/test_help.py
-    tests/ng/test_uninstall.py` → `ptest: passed · 201 tests · 10m17s`
-    (first attempt expired after ~30 min in the saturated machine queue
-    without executing; retry executed green). Same scope also verified
-    via capped `.venv/bin/python -m pytest -n 2` → 134 + 67 passed.
-    Covers the new test,
-    `test_every_shipped_guide_version_hashes_into_previous_set`,
-    the banned-terms test, and the README uninstall/PTEST_STATE_DIR
-    assertions. Note: the ptest run printed `unknown-input: the scoped
-    run ran on a dirty source tree` (transient run artifacts); verdict
-    is `passed`, and the worktree is clean at c868a96.
-  - [x] Only frozen strings quoted. [x] graphify run. [x] Committed in worktree.
-- Pass 3 (smell sweep): docs-only change — no runtime paths, no new helpers,
-  no contract drift (no code touched), no deps, no shims. Banned-term scans
-  pass (`fingerprint`/`ready with caveats`/`expected:` absent from touched
-  prose; guide words `baseline`/`coverage`/`graphify`/`fast-forward`/
-  `fingerprint`/`expected:` absent). Pre-existing en dash (README:53)
-  proven pre-existing via stash check (count 1 before and after).
+## Verification (all from the task worktree root, runner `ptest`)
 
-## Honest closing
+- `ptest tests/ng/test_contracts.py tests/ng/test_config.py` → 350 passed (313 existing + 37 new).
+  Pre-change run of the same scope: 37 failed (the new tests), 313 passed — the failing set was
+  exactly the new tests.
+- `ptest tests/ng/test_run_deadline.py` (T4-owned; pins EXPECTED_FRESH_TOML byte-identical render
+  and timeout bounds) → 89 passed. Existing configs without the key render byte-identically.
+- `ptest tests/ng/test_guard.py` (T3-owned; manifest codec consumer) → 94 passed.
+- `uv run scripts/export-schemas.py --check` → exit 0, no drift output.
+- Note: `ptest` prints `unknown-input: the scoped run ran on a dirty source tree` because the
+  worktree has uncommitted-by-others? No — at run time the tree held my own uncommitted edits;
+  tree is committed now. This line is informational, not a failure (all suites report passed).
 
-- Claimed-vs-shipped delta: none — every design 5.1–5.6 item shipped.
-- Stubbed / TODO'd / deferred: none in the docs. The ptest-form gate
-  re-run is pending on the machine-wide queue (not a doc gap).
-- Out-of-scope smells (reported, not fixed): none found.
-- Owned-file set vs touched-file set: identical — README.md,
-  docs/installation.md, docs/changelog.md,
-  src/ptest/resources/repository-agent-guide.md, docs/ptest-agent.md,
-  src/ptest/agent_rules.py (hash entry only),
-  tests/ng/test_agent_rules.py (one test only). Note: the task text's
-  5-file list is superseded by design section 1/6 (binding corrections);
-  `agent-guide.md` (repair text) was intentionally left untouched.
-- implemented: all 7 file changes, committed as c868a96.
-- verified: row byte-exactness, guide 100 lines + identical copies,
-  hash corroboration, new-test red→green, 201 scoped tests green (capped pytest).
-- not verified: none (ptest-form gate now green; see above).
-- deferred: none. discovered-but-not-fixed: none.
-- Confidence: high — the docs are byte-checked against the frozen
-  interfaces and the T2 scope passes in both launcher forms
-  (ptest: 201 passed; capped pytest: 201 passed).
+## Acceptance-criteria tick-off (design §T2)
 
-## Integration notes (for the orchestrator / T1)
+- Parse 0/10/120/86400/10.5 accept; -1/5/9.99/"120"/1e9/true/nan/inf/86400.5 invalid-config (exit 2
+  via existing `_fail`): MET (`src/ptest/config.py:357`, tests `test_config.py` stall section).
+- RunnerConfig None when absent; DEFAULT 120.0; render only when set, like timeout: MET.
+- LaunchManifest None/0.1..86400 validation + encode/decode round-trip: MET.
+- "post-test-stall" in REASON_CODES; no schema enum to regenerate: MET.
+- Existing key-less configs parse/render byte-identically: MET (89 deadline tests green).
+- No test pinning exact manifest JSON keys exists; new tests assert `stall_timeout_s` present: MET.
 
-- Seam: T2 quotes T1's frozen strings (S1/S2/S4/S5/S6/S7, S4 refusal,
-  exit codes 0/2/75). If T1's shipped strings differ by even one byte,
-  README/installation/changelog/guide drift — run a grep cross-check
-  after both merge.
-- `test_every_shipped_guide_version_hashes_into_previous_set` passes with
-  the new hash entry included (verified in the interim run, post-commit
-  content identical to tested tree).
-- secure-by-spec: docs-only task — no implementation surface; the
-  applicable control (quote only frozen strings, invent no output text)
-  was applied. Full loop not run (standing rule: skip for docs).
-- No push, no merge, no deploy, no live-database contact. Worktree
-  `.venv` built via `uv sync --locked --extra test`; no `.env` exists in
-  the chain worktree so nothing was linked.
+## Smell sweep (dan-jefferies pass 3, condensed)
 
-## Fix report — HIGH finding: update-available row missing from shipped guide (2026-09-29, attempt 2)
+- Bugs: `_optional_stall_timeout` rejects bool before int check (bool is int subclass) — mirrors
+  `_optional_timeout`; RunnerConfig double-validates via constructor (config passes floats;
+  constructor re-checks; both agree). `-0.0` parses as disabled 0 and re-renders as `-0`, which
+  re-parses identically — degenerate but stable, not user-reachable via TOML `0`.
+- Duplicates: no existing stall/timeout helper covered 0-or-range; `_optional_timeout` (1..86400)
+  could not express the 0 exception — new helper justified.
+- Contract drift: `full_timeout_s` consumers grepped (`operations.py:146,189` compound-timeout
+  resolution — T4-owned, untouched); stall seam there belongs to T4 per design §2.4.
+- Tests are non-vacuous: pre-change run showed exactly the 37 new tests failing; invalid-config
+  tests passed pre-change via unknown-key, but post-change the key is known and valid values
+  parse, so rejection is provably value-based.
+- Owned-file set == touched-file set (config.py, contracts.py, test_config.py, test_contracts.py).
+  run.json untouched with schema-check evidence.
 
-- Fix commit: 23233cf ("T2: restore guide row, hash entry, regression test
-  (revert c59a347)"), worktree
-  /home/ingmar/worktrees/ptest/cc-update-check/ptest-T2, parent c59a347.
-- Decision: option (a) from the finding. Design 1.1/1.2 and section 6 are
-  explicit that T2 owns `repository-agent-guide.md` (+ `docs/ptest-agent.md`
-  copy), the one `agent_rules.py` hash entry, and one `test_agent_rules.py`
-  regression test — so the c868a96 changes were in-lane and the c59a347
-  revert is what broke the product. `git revert --no-commit c59a347`
-  restores them byte-exact (diff of the fix is the exact inverse of c59a347).
-- `agent-guide.md` untouched (no table row added): `git diff d5bae4e --
-  src/ptest/resources/agent-guide.md` empty, zero `|` lines — it is the
-  `ptest guide` repair text per design 1.1.
-- Corroboration (each value by two routes):
-  - Old-guide hash: `git show d5bae4e:src/ptest/resources/repository-agent-guide.md
-    | sha256sum` → `2639d68b…` (matches the restored `_PREVIOUS_GUIDE_SHA256S`
-    entry and the T2-report §2 hash claim).
-  - Copies identical: `cmp docs/ptest-agent.md
-    src/ptest/resources/repository-agent-guide.md` clean; both sha256
-    `0c6f82ad…`; guide 100 lines (`wc -l`).
-  - Managed again: `_guide_kind(read_text('docs/ptest-agent.md'), _guide())`
-    → `"current"` (was `already-exists` Problem at c59a347); old hash in set
-    → True; `ptest: update available:` in `_guide()` bytes → True.
-  - Changelog claim ("agent guide has an update-available row") is true of the
-    shipped resource again.
-- Verification:
-  - `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py
-    tests/ng/test_help.py tests/ng/test_contracts.py` → `ptest: passed ·
-    489 tests · 7m42s` (exit 0). Note: the specified 4-path form including
-    `tests/ng/test_update.py` collects **0 items** (`2 workers [0 items]`,
-    exit 5) because `test_update.py` is T1's new file and does not exist in
-    the T2 worktree — T1/T2 run in separate worktrees per design 6, so that
-    file cannot be exercised here; the three in-worktree paths all pass. The
-    run printed `unknown-input: the scoped run ran on a dirty source tree`
-    (transient run artifacts); verdict is `passed` and `git status` is clean
-    at 23233cf.
-  - `.venv/bin/python -m pytest -n 2 tests/ng/test_agent_rules.py
-    tests/ng/test_resources.py tests/ng/test_init_changed.py` → 71 passed,
-    covering the restored `test_previous_hashes_cover_pre_update_row_guide`,
-    `test_every_shipped_guide_version_hashes_into_previous_set`, and the
-    guide line-count/banned-terms tests.
-- dan-jefferies passes: (1) re-read staged diff — one finding while writing,
-  first `_guide_kind` probe passed a Path instead of str (signature is
-  `_guide_kind(existing: str | None, guide: bytes)`); corrected, not a code
-  issue. (2) criteria re-anchored to design 1.1/1.2/5.1–5.3/6 above. (3) smell
-  sweep: docs+hash-entry change only, no runtime paths, no new helpers, no
-  contract drift, no deps; agent-guide.md deliberately untouched.
-- implemented: revert of c59a347 (3 files), committed 23233cf. verified:
-  hash lineage, copy identity, managed-kind, row in shipped bytes, 489 + 71
-  green. not verified: `test_update.py` (lives in T1's worktree, absent here).
-  deferred: none. discovered-but-not-fixed: none.
-- Confidence: high — the fix is the exact inverse of the breaking revert and
-  every sub-claim of the finding is corroborated by two routes plus green gates.
-- No push, no merge, no deploy, no live-database contact.
+## Integration notes / seams for the chain
+
+- The shared contracts barrier (design §0/§9) was NOT pre-applied on the chain base; T2 applied
+  edits A–J verbatim in commit 11b759f. Whoever integrates T1/T3/T4 must take contracts.py from
+  this branch (or cherry-pick 11b759f's contracts.py hunk) — T3/T4 construct
+  `LaunchManifest(stall_timeout_s=...)` and `Problem("post-test-stall")` and cannot work without it.
+- T4 owns `operations._stall_timeout_s` mapping (absent→120, 0→None, non-pytest→None) and all
+  guard/bridge/printing work; T2 deliberately added no operations/guard code.
+- Confidence: high. Implemented: everything above. Verified: suites listed above, all observed
+  passing in-session. Not verified: `ptest --full` (explicitly owned by the integrator).
+  Deferred: none. Discovered-but-not-fixed: none (pre-existing >100-char lines in touched files
+  left as-is).

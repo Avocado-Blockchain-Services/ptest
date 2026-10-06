@@ -1,69 +1,117 @@
-# T4 report — agent guide row, help, README, changelog
+# T4 report — Operations: stall plumbing, dump printing/cleanup, verdict
 
-- status: DONE (not blocked)
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T4
-- taskBranch: feature/worktree-safe-config-T4
-- commit: 299b3da ("T4: agent guide row, help, README, changelog for config-uncommitted")
-- base: 890e1ee (design commit; T4 ran wave-1, no T1 dependency)
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T4
+- taskBranch: feature/post-test-stall-T4
+- commit: e6ead20 ("T4 operations: stall plumbing, stack-dump print/cleanup, post-test-stall verdict")
+- status: DONE (boxed below; e2e live verification deferred to post-merge by design)
 
-## TDD evidence
+## What shipped (5 files, +927/−4, all T4-owned)
 
-- Red: 4 new tests failed pre-implementation —
-  `ptest --workers 2 --queue-timeout 1800` on the 4 new test IDs →
-  `4 failed in 10.62s` (exit 1), log /tmp/t4-prefail.log.
-- Green (final): `ptest --workers 2 --queue-timeout 1800
-  tests/ng/test_agent_rules.py tests/ng/test_help.py` →
-  `107 passed in 13.75s`, `ptest: passed · 107 tests · 18.6s` (exit 0),
-  log /tmp/t4-post2.log. Re-run after the last source edit (guide
-  paragraph break); no other scope run (design acceptance names exactly
-  these two files).
+- `src/ptest/stack_dumps.py` (new) — `collect` / `emit` / `cleanup` plus
+  `Dump`. Caps: 32 files, 400 lines + 32 KiB per file, 128 KiB total,
+  4096 dir entries. Every printed line via `render.terminal_text`.
+  Controller (header `role=controller`) first, then PID ascending;
+  header-only files skipped; other attempts' names ignored. Refusal:
+  `files.validate_private_file` + `files.read_regular` (symlink, foreign
+  owner, non-regular, wrong mode, hard link never read nor deleted);
+  cleanup unlinks only lstat-regular user-owned files via
+  `files.unlink_if_same`. Header
+  `ptest: stack dumps (<n> processes) — <reason>`; truncation notes start
+  `ptest: stack dump truncated` / `ptest: stack dumps truncated`.
+  stderr only, `print` direct (never `-q`-suppressed), nothing returned
+  into results (N7 structural).
+- `src/ptest/operations.py` — `_stall_timeout_s` seam (non-pytest None;
+  unset 120; 0 None; else value), `_STALL_TIMEOUT_S` ContextVar set/reset
+  around `_run_guard` on the standard path (`effective`) and `_execute_shadow`
+  (`config`), `_launch_guard` passes it into `LaunchManifest` (signature
+  unchanged). `_outcome`: post-test-stall + no user cancel →
+  `(INCOMPLETE, 70, "ptest", None)` ahead of every raw-code branch; cancel
+  falls through to the existing mapping. Frozen rerun suffix via
+  `_stall_reason_message` on standard + shadow reason assembly. Dump
+  printing after reap: kill codes per attempt (a001, a002 in shadow),
+  `guard handoff incomplete` on the early-return path only when nothing
+  printed yet and no user cancel. Cleanup in the outer `finally` (standard)
+  and alongside both `reports.cleanup_report` loops (shadow).
+- `tests/ng/test_stack_dumps.py` (new, 14 tests), `tests/ng/test_run_deadline.py`
+  (+19 tests), `tests/ng/test_post_test_stall_e2e.py` (new, 6 tests,
+  readiness-gated).
+- `progress.py`, `reports.py`, `history.py`: intentionally untouched
+  (optional touch points; header formatting lives in `stack_dumps`,
+  `_compound_killed` already keys on execution-timeout only — pinned by a
+  new regression test). No migration.
 
-## Diff (7 files, +106/-1; all inside the owned set)
+## Verification (all `ptest` from the task worktree root, exit 0)
 
-- src/ptest/resources/repository-agent-guide.md: `config-uncommitted` table
-  row placed directly before the `unsafe-path` row; "Untracked config"
-  paragraph added in Reporting. Guide is now exactly 100 lines (test limit
-  is `<= 100`) — future guide edits must shorten elsewhere first.
-- src/ptest/agent_rules.py: `_PREVIOUS_GUIDE_SHA256S` gains
-  `4fd66f8d…f9d` with the exact frozen comment
-  `# 80392ca (0.3.3-0.3.5): guide before the config-uncommitted row.`
-  (Pre-change bytes verified by `sha256sum` before editing.)
-- src/ptest/help.py: `_INIT` syntax gains `[--from-main]`; notes cover the
-  worktree refusal, verbatim stopgap (not combinable with
-  `--runner`/`--child`), base-branch fix, and the files-to-commit listing.
-  `_AGENTS` gains the one stop-rule sentence.
-- README.md: new `## Worktrees and clones` section (commit files,
-  `config-uncommitted`, `--from-main` stopgap + flag constraint, run
-  warning, doctor line, init file listing). No separate init flag table
-  exists in README, so the section documents the flag.
-- docs/changelog.md: new top `## Unreleased` section, five bullets.
-- tests/ng/test_agent_rules.py: `test_shipped_guide_documents_config_uncommitted`,
-  `test_previous_hashes_cover_pre_config_uncommitted_guide`.
-- tests/ng/test_help.py: `test_init_help_documents_from_main_stopgap`,
-  `test_agents_help_documents_config_uncommitted_stop_rule`.
+- `ptest tests/ng/test_stack_dumps.py` → `14 passed`, `ptest: passed · 14 tests`
+- `ptest tests/ng/test_run_deadline.py -k "stall or compound_killed or post_test_stall or launch_guard_manifest"` → `24 passed`
+- `ptest tests/ng/test_post_test_stall_e2e.py tests/ng/test_stack_dumps.py tests/ng/test_run_deadline.py` → `127 passed, 6 skipped`
+  (the 6 skips are the e2e readiness gate: `guard._STALL_POLL_S` and
+  `pytest_bridge._STALL_MARKER_SUFFIX` are both absent until T1+T3 land)
+- `ptest tests/ng/test_operations.py tests/ng/test_shadow.py` → `130 passed, 16 skipped`
+  (skips are interpreter-qualification skips in existing tests; my diff adds no skip markers)
+- `ptest tests/ng/test_cli.py tests/ng/test_run_output.py` → `416 passed`
+- Strict TDD red steps observed: new module first failed collection
+  (`ImportError`); deadline additions failed 18/24 pre-implementation
+  (seam/Outcome/suffix/manifest/fault); two `stack_dumps` failures were
+  test-side mistakes I fixed in the tests (single 30 KiB line is
+  `terminal_text`-capped to 1 KiB so the total-cap never tripped; exact
+  pull-count assertion replaced with a 10⁶-entry fake proving ≤4096 names).
 
-## Acceptance checklist (design §T4)
+## Acceptance mapping (design §4 T4)
 
-1. Guide row + reporting line: MET.
-2. Hash entry + upgrade tests: MET (`test_every_shipped_guide_version_hashes_into_previous_set`
-   and upgrade-in-place tests pass in the 107).
-3. help.py init + agents: MET.
-4. README section + changelog Unreleased: MET.
-5. `test_user_facing_text_has_no_banned_terms` passes (in the 107); new
-   assertions added: MET.
-6. Scoped run green: MET.
+- Manifest carries the effective value for pytest, None otherwise:
+  seam unit tests + `_launch_guard` encode-spy test (`test_run_deadline.py`).
+- Printer bounds/escaping/ordering/refusal/cleanup: `test_stack_dumps.py`.
+- Verdict 70 + rerun suffix + never-promoted raw codes (0 and 23 via
+  `TEST_GUARD_FAULT=problem:post-test-stall:<raw>` real-guard fault test),
+  `full_gate_eligible` False, no dump text in `serialize_run_result` (N7),
+  no `history._compound_killed` feed: `test_run_deadline.py`.
+- E2E serial/xdist stall, deadline dump (G1), Ctrl-C no-dump (N8), healthy
+  run (N10), disabled-timeout slow teardown (N9): `test_post_test_stall_e2e.py`,
+  skipped here by the mandated gate; orchestrator must confirm 0 skipped
+  after T1+T3 merge.
+- End line format unchanged (`progress.format_end` untouched); cause rides
+  the existing `cli._emit_reasons` reason line per D8, so no `cli.py` change.
 
-## Integration notes (seams, not blockers)
+## Integration notes (for the merge; all pre-T2-barrier shims, identical bytes)
 
-- `docs/schemas/v1/init.json` NOT touched: the task brief listed it in my
-  files, but the design (authoritative, §8 + D9) moved it to T1 (generated
-  from `contracts.PUBLIC_SCHEMAS`). My changelog bullet mentions
-  `commit_paths` in `init --json`; that payload is T1/T2's to produce.
-- Wave-1 seam: `help.py` documents `ptest init --from-main`, which no
-  `cli.py` in this worktree implements yet — that is T2's wave-2 delivery
-  against the same frozen text. Same for the run-warning/doctor/finding
-  sentences in README/changelog (T2/T3).
-- Self-review (Pass 1) found and fixed one issue: the Reporting paragraph
-  initially merged into the preceding paragraph (missing blank line).
-- No migration generated. Never pushed, merged, or deployed. Worktree left
-  clean at 299b3da.
+- `contracts.py` barrier is absent in every worktree (chain base included),
+  and `contracts.py` is T2-owned, so this diff never touches it. Three
+  guarded fallbacks, all no-ops after the barrier lands: `stack_dumps`
+  name constants + local `stack_dump_pid` mirror (`stack_dumps.py:24-46`),
+  `getattr(config.runner, "stall_timeout_s", None)` (`operations.py:66-83`),
+  conditional `stall_timeout_s` manifest kwarg (`operations.py:1304`).
+  Deadline tests pin behavior, not the barrier, via `_stall_reason_code()`.
+- Needs from siblings (unchanged frozen shapes assumed): T1 bridge marker +
+  dump files + `_STALL_MARKER_SUFFIX`; T3 `guard._STALL_POLL_S`,
+  `guard._DUMP_WAIT_S`, stall `Problem`, SIGWINCH-before-kill; T2
+  `RunnerConfig.stall_timeout_s` parsing (e2e deliberately monkeypatches
+  the seam instead of writing `stall_timeout` in TOML).
+
+## Honest closing (dan-jefferies passes 1–3)
+
+- Re-read the full diff twice; one non-obvious check confirmed:
+  shadow `bindings` are built pre-launch with `.path` per attempt and the
+  emit loop reuses the file's own `a{index:03d}` convention.
+- Claimed-vs-shipped delta: none. The e2e module is written to the frozen
+  interfaces but its live assertions (stall kill, worker stacks, deadline
+  dumps) are NOT verified here — they cannot run until T1+T3 merge.
+  That is the design-mandated gate, not a deferral of my own logic.
+- Stubbed/TODO/deferred: none (grep clean). Owned-vs-touched: identical
+  5-file set; no other file touched.
+- Out-of-scope smells (not fixed): `stack_dumps._parse_identity` detects
+  the controller by substring (`role=controller`); a hand-crafted
+  user-owned dump could mislabel ordering only — harmless, noted.
+- implemented: seam, ContextVar, manifest, `_outcome`, suffixes, printing
+  (3 paths), cleanup (3 sites), printer module, 3 test files.
+- verified: all green runs above with exact commands/exit codes.
+- not verified: live e2e stall behavior (needs T1+T3; 6 gated skips here).
+- deferred: removal of the three pre-barrier fallbacks after T2 lands
+  (optional cleanup; they are inert post-merge).
+- discovered-but-not-fixed: none in scope.
+- Confidence: high for unit/plumbing verdict behavior (red→green observed,
+  400+ adjacent tests green); medium for post-merge e2e count assertions
+  (`(3 processes)` assumes controller + 2 worker dumps all non-empty —
+  re-check this one number when the gate lifts).
+- never pushed, never merged, no live database touched, no `.pipeline/`
+  files staged; worktree clean at `e6ead20`.
