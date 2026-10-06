@@ -161,6 +161,48 @@ def test_rerun_outcome_is_not_final(tmp_path):
     assert (tmp_path / (arm._report_name + ".done")).is_file()
 
 
+def _genuine_subtest_report(name: str, outcome: str = "passed"):
+    """A real ``_pytest.subtests.SubtestReport`` for the parent nodeid."""
+    from _pytest.reports import TestReport
+    from _pytest.subtests import SubtestContext, SubtestReport
+
+    base = TestReport(nodeid=name, location=("a.py", 1, name),
+                      keywords={}, outcome=outcome, longrepr=None,
+                      when="call")
+    return SubtestReport._new(base, SubtestContext(msg="case", kwargs={}),
+                              captured_output=None, captured_logs=None)
+
+
+def test_subtest_reports_do_not_arm_mid_call(tmp_path):
+    """Subtest call reports carry the parent nodeid but are not final: the
+    marker stays absent between two subtests of the last test (passed or
+    failed) and appears only with the parent's own call report."""
+    arm = _arm_in(tmp_path)
+    arm.expect(["a.py::test_first", "a.py::test_last"])
+    arm.observe(_report("a.py::test_first", "call", outcome="passed"))
+    marker = tmp_path / (arm._report_name + ".done")
+    assert not marker.exists()
+    arm.observe(_genuine_subtest_report("a.py::test_last"))
+    assert not marker.exists(), "subtest report armed the marker mid-call"
+    arm.observe(_genuine_subtest_report("a.py::test_last", outcome="failed"))
+    assert not marker.exists(), "failed subtest armed the marker mid-call"
+    arm.observe(_report("a.py::test_last", "call", outcome="passed"))
+    assert marker.is_file()
+
+
+def test_subtest_plugin_report_shape_never_counts(tmp_path):
+    """The third-party pytest-subtests shape (``SubTestReport`` class name,
+    no ``context`` attribute) never counts as a final outcome either."""
+    cls = type("SubTestReport", (SimpleNamespace,), {})
+    arm = _arm_in(tmp_path)
+    arm.expect(["a.py::t1"])
+    arm.observe(cls(nodeid="a.py::t1", when="call", outcome="passed",
+                    failed=False, skipped=False))
+    assert not (tmp_path / (arm._report_name + ".done")).exists()
+    arm.observe(_report("a.py::t1", "call", outcome="passed"))
+    assert (tmp_path / (arm._report_name + ".done")).is_file()
+
+
 def test_unknown_nodeids_do_not_arm_early(tmp_path):
     arm = _arm_in(tmp_path)
     arm.expect(["a.py::t1"])
@@ -551,6 +593,75 @@ def test_no_marker_while_last_call_blocked(tmp_path):
             time.sleep(0.05)
         (gate / "go").write_text("x")
         assert _wait_for(marker_path, 15), "marker missing after release"
+    finally:
+        (gate / "go").write_text("x") if (gate.exists()
+                                          and not (gate / "go").exists()) else None
+    stdout, stderr = proc.communicate(timeout=60)
+    assert proc.returncode == 0, stderr.decode()
+
+
+def test_no_marker_between_subtests_of_last_test(tmp_path):
+    """Serial twin: each subtest block of the last test sends a call-phase
+    report with the parent nodeid, but the marker stays absent between the
+    two subtests (checked in-test and from the parent) and appears only
+    after the parent's own call report."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    _write(root, "tests/test_sub.py",
+           "import os\n"
+           "from pathlib import Path\n"
+           + _POLL_LOOP +
+           "MARKER = Path(os.environ['PTEST_PYTEST_REPORT_PATH'] + '.done')\n"
+           f"GATE = Path({str(gate)!r})\n"
+           "def test_first():\n"
+           "    assert True\n"
+           "def test_last(subtests):\n"
+           "    assert not MARKER.exists()\n"
+           "    with subtests.test(msg='one'):\n"
+           "        assert True\n"
+           "    assert not MARKER.exists()\n"
+           "    (GATE / 'between').write_text('x')\n"
+           f"    _wait(str(GATE / 'go'))\n"
+           "    assert not MARKER.exists()\n"
+           "    with subtests.test(msg='two'):\n"
+           "        assert True\n")
+    proc = None
+    try:
+        reports = root / "reports"
+        reports.mkdir(mode=0o700, exist_ok=True)
+        run_id, nonce = _hex(32), _hex(64)
+        report_path = reports / f"native-a001-{run_id}.json"
+        child_env = {k: v for k, v in os.environ.items() if k not in _SCRUB}
+        child_env.update({
+            "PTEST_BRIDGE_PROTOCOL": str(PROTOCOL),
+            "PTEST_GRANT_WORKERS": "1",
+            "PTEST_WORKER_ID": "w000",
+            "PTEST_RESOURCE_PREFIX": f"pt_abcd1234_{run_id}_a001_w000",
+            "PTEST_EXECUTION": "scoped",
+            "PTEST_TEST_ROOTS": "[]",
+            "PTEST_PYTEST_CHECKOUT_ROOT": str(root.resolve()),
+            "PTEST_PYTEST_CONFIG_PATH": "",
+            "PTEST_PYTEST_REPORT_PATH": str(report_path),
+            "PTEST_RUN_ID": run_id,
+            "PTEST_GRANT_NONCE": nonce,
+            "PTEST_PYTEST_ATTEMPT": "a001",
+            "PTEST_PYTEST_EXECUTION": "scoped",
+        })
+        proc = subprocess.Popen(
+            [sys.executable, str(BRIDGE), "-q", "-p", "no:cacheprovider",
+             "tests/test_sub.py"],
+            cwd=str(root), env=child_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        marker_path = Path(str(report_path) + ".done")
+        # Integration boundary: real bridge + real pytest startup.
+        assert _wait_for(gate / "between", 45), "last test never went idle"
+        for _ in range(20):  # ~1 s of polls: idle between the two subtests
+            assert not marker_path.exists(), "marker armed between subtests"
+            time.sleep(0.05)
+        (gate / "go").write_text("x")
+        assert _wait_for(marker_path, 15), "marker missing after final outcome"
     finally:
         (gate / "go").write_text("x") if (gate.exists()
                                           and not (gate / "go").exists()) else None

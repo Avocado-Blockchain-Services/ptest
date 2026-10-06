@@ -860,6 +860,32 @@ _STACK_DUMP_HEADER_PREFIX = "ptest stack dump: "
 
 _FINAL_CALL_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
+_SUBTEST_REPORT_TYPE_NAMES = frozenset({"SubtestReport", "SubTestReport"})
+
+
+def _is_subtest_report(report: Any) -> bool:
+    """True for subtest-scoped reports, which never carry a final outcome.
+
+    The builtin subtests (``_pytest.subtests.SubtestReport``) and the
+    third-party pytest-subtests plugin (``SubTestReport``) each emit one
+    call-phase report per subtest block with the parent item's nodeid,
+    before the parent's own call report arrives. Counting one would arm
+    the stall marker while the parent test is still running. Reports are
+    recognised by class name (stable across pytest versions and xdist
+    serialisation) or, more robustly, by the subtest ``context``
+    attribute plain TestReports lack.
+    """
+    try:
+        for klass in type(report).__mro__:
+            if klass.__name__ in _SUBTEST_REPORT_TYPE_NAMES:
+                return True
+    except Exception:
+        pass
+    try:
+        return getattr(report, "context", None) is not None
+    except Exception:
+        return False
+
 # Open dump-file descriptors, kept for the process lifetime so faulthandler
 # always writes to a live file.
 _STACK_DUMP_FDS: list[int] = []
@@ -970,7 +996,9 @@ class _StallArm:
     ``expect`` records the raw collected node ids (a Counter, so
     duplicates count); ``observe`` counts one final outcome per report:
     a call-phase report with outcome passed/failed/skipped, or a
-    setup-phase failure/skip that prevents the call. Teardown reports
+    setup-phase failure/skip that prevents the call. Subtest-scoped
+    reports never count (the parent's own call report still arrives
+    afterwards). Teardown reports
     never gate arming, because a hang in teardown must still arm.
     ``loop_returned`` arms when the native loop finished without every
     outcome (``-x``/maxfail/interrupts/collection errors). Arming
@@ -996,6 +1024,8 @@ class _StallArm:
 
     def observe(self, report: Any) -> None:
         try:
+            if _is_subtest_report(report):
+                return
             nodeid = getattr(report, "nodeid", "")
             when = getattr(report, "when", "")
             if not isinstance(nodeid, str) or not nodeid:
