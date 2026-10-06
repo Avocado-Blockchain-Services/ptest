@@ -64,7 +64,7 @@ def test_block():
 
 
 def _project(case, domain, *, suite=_PASS_SUITE, conftest="",
-             args=("-s",), workers=8):
+             args=("-s",), workers=8, addopts=None):
     root = case.project(domain, kind="pytest")
     config_path = root / ".ptest.toml"
     project_id = tomllib.loads(config_path.read_text())["project_id"]
@@ -75,6 +75,12 @@ def _project(case, domain, *, suite=_PASS_SUITE, conftest="",
         'test_roots = ["tests"]\n'
         f"workers = {workers}\n"
     )
+    if addopts is not None:
+        # The parallel tier is qualified by the project's own pytest
+        # config (executability.parallel_request reads ini addopts);
+        # ptest [runner] args must never carry -n (reject_unowned_controls).
+        (root / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = '" + addopts + "'\n")
     (root / "tests").mkdir()
     (root / "tests/test_native.py").write_text(suite)
     if conftest:
@@ -92,11 +98,12 @@ def _fast_guard(monkeypatch):
     monkeypatch.setattr(operations, "_stall_timeout_s", lambda _config: 1.0)
 
 
-def _execute(root, domain):
+def _execute(root, domain, workers=None):
     config = config_api.resolve_config(root).config
     assert config is not None
     return operations.execute(
-        domain, config, C.RunRequest(mode=C.Mode.SCOPED, argv=("tests",)))
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests",), workers=workers))
 
 
 def _stall_leftovers(domain):
@@ -129,7 +136,9 @@ def test_serial_stall_is_incomplete_70_with_controller_dump(case, monkeypatch, c
     assert stall[0].message.endswith(
         "; stack dumps above; rerun once alone, report a repeat")
     assert "ptest: stack dumps (" in err
-    assert err.splitlines()[0].endswith("— post-test-stall")
+    # The run-plan line is always stderr line 0 (see test_changed_explain),
+    # so the dump header is matched anywhere, with its exact reason suffix.
+    assert any(line.endswith("— post-test-stall") for line in err.splitlines())
     assert "_hang_in_teardown" in err
     assert _stall_leftovers(domain) == []
     payload = json.dumps(C.serialize_run_result(result))
@@ -140,10 +149,12 @@ def test_xdist_stall_includes_worker_stacks(case, monkeypatch, capsys):
     # Real guard plus real pytest/xdist startup with two workers.
     import xdist  # noqa: F401  (the xdist variant needs the real plugin)
     domain = case.domain(slots=2)
+    # Parallelism is qualified by the project's own pytest addopts; a -n
+    # in ptest [runner] args is rejected (reject_unowned_controls).
     root = _project(case, domain, conftest=_HANG_TEARDOWN_CONFTEST,
-                    args=("-s", "-n", "2"), workers=2)
+                    args=("-s",), workers=2, addopts="-n 2")
     _fast_guard(monkeypatch)
-    result = _execute(root, domain)
+    result = _execute(root, domain, workers=2)
     err = capsys.readouterr().err
     assert (result.status, result.exit_code) == (C.Status.INCOMPLETE, 70)
     assert "ptest: stack dumps (3 processes) — post-test-stall" in err
@@ -163,7 +174,9 @@ def test_compound_deadline_kill_prints_dumps(case, monkeypatch, capsys):
     assert (result.status, result.exit_code) == (C.Status.INCOMPLETE, 70)
     assert any(reason.code == "execution-timeout" for reason in result.reasons)
     assert "ptest: stack dumps (" in err
-    assert err.splitlines()[0].endswith("— execution-timeout")
+    # Same stderr ordering note as the serial stall test: the plan line is
+    # first, so the dump header is matched anywhere, with its reason suffix.
+    assert any(line.endswith("— execution-timeout") for line in err.splitlines())
     assert "test_block" in err
     assert _stall_leftovers(domain) == []
 
@@ -183,7 +196,12 @@ def test_ctrl_c_prints_no_dumps(case, capsys):
         result = _execute(root, domain)
         cancel.result(timeout=_WATCHDOG_S)
     assert "ptest: stack dumps" not in capsys.readouterr().err
-    assert result.status in (C.Status.CANCELLED, C.Status.INCOMPLETE)
+    # Cancel mapping is unchanged by the stall feature: the runner's own
+    # exit wins over an observed user cancel once the bridge certified a
+    # terminal report, so the interrupted call reads FAILED/exit-2/runner
+    # (the guard still forwards SIGINT for a fast kill, with no dump).
+    assert (result.status, result.exit_code, result.exit_origin) == (
+        C.Status.FAILED, 2, "runner")
     assert _stall_leftovers(domain) == []
 
 
