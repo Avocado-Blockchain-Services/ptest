@@ -462,6 +462,55 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         return None
 
 
+def group_cpu_times(
+    pgid: int,
+    *,
+    exclude_pid: int,
+    limit: int = 8192,
+) -> dict[tuple[int, float], float] | None:
+    """Summed user+system CPU seconds of live members of one process group.
+
+    The key is ``(pid, create_time)`` so a reused pid reads as a new
+    member. The guard's own pid is skipped via ``exclude_pid``. Any
+    unreadable or mid-read-vanishing member makes the whole sample
+    unreadable (None: the caller treats that as busy, never idle), as
+    does a scan past ``limit`` entries. Zombies are already dead weight
+    and are skipped, not counted.
+    """
+    if (isinstance(pgid, bool) or not isinstance(pgid, int) or pgid <= 0
+            or isinstance(exclude_pid, bool) or not isinstance(exclude_pid, int)
+            or isinstance(limit, bool) or not isinstance(limit, int)
+            or limit < 0):
+        return None
+    result: dict[tuple[int, float], float] = {}
+    try:
+        for count, proc in enumerate(psutil.process_iter()):
+            if count >= limit:
+                return None
+            pid = proc.pid
+            if pid == exclude_pid:
+                continue
+            try:
+                if os.getpgid(pid) != pgid:
+                    continue
+            except ProcessLookupError:
+                continue
+            try:
+                if proc.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                times = proc.cpu_times()
+                total = (float(times.user) + float(times.system)
+                         + float(times.children_user)
+                         + float(times.children_system))
+                result[(pid, float(proc.create_time()))] = total
+            except (psutil.Error, ProcessLookupError, PermissionError,
+                    OSError, AttributeError, ValueError, TypeError):
+                return None
+    except (psutil.Error, OSError, AttributeError):
+        return None
+    return result
+
+
 def probe_group(pgid: int) -> GroupObservation:
     """Probe a process group with ``killpg(..., 0)`` and never a real signal."""
     checked_at = time.monotonic()

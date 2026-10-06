@@ -166,13 +166,20 @@ class Harness:
 
     def start(self, *, stage="", raw=None, queued=None, failure="", stats=False,
               advance=0, decision_timeout=None,
-              scan_limit_after_phase=None):
+              scan_limit_after_phase=None, stall_poll=None, dump_wait=None,
+              stall_timeout=None):
         env = dict(os.environ, GUARD_CONTROL_FD=str(self.control_guard.fileno()),
                    GUARD_MANIFEST_FD=str(self.manifest_read),
                    GUARD_FAILURE=failure,
                    GUARD_ADVANCE_AFTER_FACTS=str(advance),
                    GUARD_DECISION_TIMEOUT=("" if decision_timeout is None
                                            else str(decision_timeout)),
+                   GUARD_STALL_POLL=("" if stall_poll is None
+                                     else str(stall_poll)),
+                   GUARD_DUMP_WAIT=("" if dump_wait is None
+                                    else str(dump_wait)),
+                   GUARD_STALL_TIMEOUT=("" if stall_timeout is None
+                                        else str(stall_timeout)),
                    GUARD_SCAN_LIMIT_AFTER_PHASE=(
                        "" if scan_limit_after_phase is None
                        else str(scan_limit_after_phase)),
@@ -1594,4 +1601,443 @@ def test_predecessor_quiescent_does_not_retry_genuine_failure(
             _quiescent_manifest(), _quiescent_identity(), state)
     assert caught.value.code == code
     assert len(reads) == 1
+
+
+# --- Post-test stall detection and SIGWINCH dump signal -----------------------
+#
+# Real guard plus real workload processes. The workload simulates the pytest
+# bridge: it registers a faulthandler dump file, creates the ".done" arm
+# marker, then blocks (idle), spins (busy), or forks a same-group child.
+# The stall window travels via GUARD_STALL_TIMEOUT because the
+# shared-contracts barrier has not landed: the manifest cannot carry
+# stall_timeout_s through encode/decode yet (see guard_driver.py).
+
+_STALL_WORKLOAD = _FIXTURES / "stall_workload.py"
+
+
+def _stall_harness(harness, mode, *, attempt_timeout_s=10, report=True,
+                   later=True):
+    h = harness()
+    h.ready = h.listener("s")
+    ready_path = str(h.domain.root / (h.root.name + "s"))
+    reports = h.root / "reports"
+    reports.mkdir(exist_ok=True)
+    h.report_path = reports / ("native-a001-" + "f" * 32 + ".json")
+    argv = (sys.executable, str(_STALL_WORKLOAD), mode, ready_path,
+            str(h.report_path))
+    if report:
+        prepared = C.PreparedRun(argv=argv, cwd=h.root,
+                                 report_path=h.report_path)
+    else:
+        prepared = C.PreparedRun(argv=argv, cwd=h.root)
+    attempts = (prepared, h.write(h.later)) if later else (prepared,)
+    ids = ("a001", "a002") if later else ("a001",)
+    h.manifest = replace(h.manifest, attempts=attempts, attempt_ids=ids,
+                         attempt_timeout_s=attempt_timeout_s)
+    return h
+
+
+def _stall_running(h, count=1):
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+    assert h.read().kind == "phase"
+    infos = []
+    for _ in range(count):
+        peer, _ = h.ready.accept()
+        peer.settimeout(_RECOVERY_WATCHDOG_S)
+        raw = bytearray()
+        while not raw.endswith(b"\n"):
+            raw.extend(_exact(peer, 1))
+        infos.append((peer, json.loads(raw)))
+        h.peers.append(peer)
+    return infos
+
+
+def _stall_facts(h):
+    return [f.payload for f in h.frames if f.kind == "runner-facts"]
+
+
+def _assert_alive(h, info, until):
+    while time.monotonic() < until:
+        assert h.process.poll() is None, "guard exited early"
+        assert psutil.Process(info["pid"]).is_running()
+        time.sleep(0.05)
+
+
+def test_stall_armed_idle_killed_with_dump_before_sigterm(harness):
+    # Integration boundary: real guard plus workload startup, 1s stall window.
+    h = _stall_harness(harness, "armed-idle")
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    facts = _stall_facts(h)
+    assert facts[0]["phase"] == "execution"
+    assert facts[0]["problem"]["code"] == "post-test-stall"
+    assert facts[0]["problem"]["message"] == (
+        "tests finished but runner processes stayed idle for "
+        "1s without exiting")
+    dump = Path(info["dump"])
+    text = dump.read_text()
+    assert text.startswith("ptest stack dump: role=controller")
+    assert "stall_blocked_teardown" in text
+    term = Path(str(h.report_path) + ".term")
+    assert term.read_text() == "15"
+    assert dump.stat().st_mtime_ns <= term.stat().st_mtime_ns
+    assert not h.later.exists()
+
+
+def test_stall_armed_idle_child_dumps_whole_group(harness):
+    # Integration boundary: real guard plus two workload processes.
+    h = _stall_harness(harness, "armed-idle-child", later=False)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    infos = _stall_running(h, count=2)
+    by_mode = {info["mode"]: info for _, info in infos}
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    assert _stall_facts(h)[0]["problem"]["code"] == "post-test-stall"
+    parent = by_mode["armed-idle-child"]
+    child = by_mode["stall-child"]
+    parent_dump = Path(str(h.report_path) + f".stack-{parent['pid']}")
+    child_dump = Path(str(h.report_path) + f".stack-{child['pid']}")
+    parent_text = parent_dump.read_text()
+    child_text = child_dump.read_text()
+    assert "role=controller" in parent_text.splitlines()[0]
+    assert "role=worker" in child_text.splitlines()[0]
+    assert "stall_blocked_teardown" in parent_text
+    assert "stall_blocked_teardown" in child_text
+
+
+def test_stall_unarmed_idle_survives_window_and_exits_zero(harness):
+    # Integration boundary: must outlive the 1s stall window plus a margin.
+    h = _stall_harness(harness, "unarmed-idle", later=False)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    _assert_alive(h, info, time.monotonic() + 2.5)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    facts = _stall_facts(h)
+    assert facts[0]["raw_exit_code"] == 0
+    assert facts[0]["problem"] is None
+    assert Path(str(h.report_path) + ".term").read_text() == "released"
+
+
+def test_stall_armed_busy_survives_window(harness):
+    # Integration boundary: a spinning teardown must outlive the window.
+    # The design mandates the 1.0s window here, like every other
+    # real-process stall test; the spinner polls the release socket
+    # without blocking, so it reads as busy even on a contended core.
+    h = _stall_harness(harness, "armed-busy", later=False)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    assert Path(str(h.report_path) + ".done").exists()
+    _assert_alive(h, info, time.monotonic() + 2.5)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    assert _stall_facts(h)[0]["problem"] is None
+
+
+@pytest.mark.parametrize("shape", ["symlink", "fifo", "dir"])
+def test_stall_foreign_marker_never_arms(harness, shape):
+    # Integration boundary: a non-regular marker must outlive the window.
+    h = _stall_harness(harness, "unarmed-idle", later=False)
+    marker = Path(str(h.report_path) + ".done")
+    if shape == "symlink":
+        target = h.root / "target"
+        target.write_text("x")
+        os.symlink(target, marker)
+    elif shape == "fifo":
+        os.mkfifo(marker)
+    else:
+        marker.mkdir()
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    _assert_alive(h, info, time.monotonic() + 2.0)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    assert _stall_facts(h)[0]["problem"] is None
+
+
+def test_stall_symlink_marker_not_written_through(harness):
+    # Integration boundary: the bridge-style create must fail on a symlink.
+    h = _stall_harness(harness, "armed-idle", later=False)
+    target = h.root / "target"
+    target.write_text("x")
+    os.symlink(target, Path(str(h.report_path) + ".done"))
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    _assert_alive(h, info, time.monotonic() + 2.0)
+    assert target.read_text() == "x"
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    assert _stall_facts(h)[0]["problem"] is None
+
+
+def test_stall_other_report_marker_never_arms(harness):
+    # Integration boundary: a stale marker for another report must not arm.
+    h = _stall_harness(harness, "unarmed-idle", later=False)
+    other = h.report_path.parent / ("native-a001-" + "e" * 32 + ".json")
+    Path(str(other) + ".done").write_text("")
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    _assert_alive(h, info, time.monotonic() + 2.0)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    assert _stall_facts(h)[0]["problem"] is None
+
+
+def test_stall_first_attempt_marker_does_not_arm_second(harness):
+    # Integration boundary: a001 arms its own marker path and exits
+    # cleanly, then an idle a002 with no marker of its own must survive
+    # the window. A watcher or arm state carried across attempts would see
+    # a001's stale marker and kill a002.
+    h = harness()
+    h.ready = h.listener("s")
+    ready_path = str(h.domain.root / (h.root.name + "s"))
+    reports = h.root / "reports"
+    reports.mkdir(exist_ok=True)
+    report_first = reports / ("native-a001-" + "f" * 32 + ".json")
+    report_second = reports / ("native-a002-" + "f" * 32 + ".json")
+    first = C.PreparedRun(
+        argv=(sys.executable, str(_STALL_WORKLOAD), "armed-idle",
+              ready_path, str(report_first)),
+        cwd=h.root, report_path=report_first)
+    second = C.PreparedRun(
+        argv=(sys.executable, str(_STALL_WORKLOAD), "unarmed-idle",
+              ready_path, str(report_second)),
+        cwd=h.root, report_path=report_second)
+    h.manifest = replace(h.manifest, attempts=(first, second),
+                         attempt_ids=("a001", "a002"),
+                         attempt_timeout_s=10)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+    assert h.read().kind == "phase"
+
+    def _accept():
+        peer, _ = h.ready.accept()
+        peer.settimeout(_RECOVERY_WATCHDOG_S)
+        raw = bytearray()
+        while not raw.endswith(b"\n"):
+            raw.extend(_exact(peer, 1))
+        h.peers.append(peer)
+        return peer, json.loads(raw)
+
+    peer_first, _ = _accept()
+    peer_first.sendall(b"x")
+    while True:
+        frame = h.read()
+        if frame.kind == "phase":
+            break
+    peer, info = _accept()
+    assert Path(str(report_first) + ".done").exists()
+    assert not Path(str(report_second) + ".done").exists()
+    _assert_alive(h, info, time.monotonic() + 2.0)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    facts = _stall_facts(h)
+    assert len(facts) == 2
+    assert [frame["attempt_id"] for frame in facts] == ["a001", "a002"]
+    assert [frame["raw_exit_code"] for frame in facts] == [0, 0]
+    assert [frame["problem"] for frame in facts] == [None, None]
+    assert Path(str(report_second) + ".term").read_text() == "released"
+
+
+def test_deadline_kill_sends_sigwinch_first_without_stall(harness):
+    # Integration boundary: attempt deadline with no stall configured.
+    h = _stall_harness(harness, "armed-idle", later=False,
+                       attempt_timeout_s=2)
+    h.start(stall_poll=0.2, dump_wait=0.3)
+    [(peer, info)] = _stall_running(h)
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    facts = _stall_facts(h)
+    assert facts[0]["problem"]["code"] == "execution-timeout"
+    dump = Path(info["dump"])
+    assert "stall_blocked_teardown" in dump.read_text()
+    term = Path(str(h.report_path) + ".term")
+    assert term.read_text() == "15"
+    assert dump.stat().st_mtime_ns <= term.stat().st_mtime_ns
+
+
+def test_deadline_kill_without_report_path_sends_no_sigwinch(harness):
+    # Integration boundary: no report binding means no dump signal or wait.
+    h = _stall_harness(harness, "armed-idle", later=False, report=False,
+                       attempt_timeout_s=2)
+    started = time.monotonic()
+    h.start(stall_poll=0.2, dump_wait=5, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    assert _stall_facts(h)[0]["problem"]["code"] == "execution-timeout"
+    dump = Path(info["dump"])
+    assert dump.read_text().startswith("ptest stack dump: ")
+    assert len(dump.read_text().splitlines()) == 1
+    # A 5s dump wait must leave no trace when there is no report binding.
+    assert time.monotonic() - started < 6.0
+
+
+def test_external_cancel_sends_no_sigwinch_and_no_delay(harness):
+    # Integration boundary: a control-frame cancel must skip the dump path.
+    h = _stall_harness(harness, "unarmed-idle", later=False)
+    h.start(stall_poll=0.2, dump_wait=5, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    started = time.monotonic()
+    h.control.sendall(_cancel(h.manifest))
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    assert time.monotonic() - started < 4.0
+    dump = Path(info["dump"])
+    assert len(dump.read_text().splitlines()) == 1
+
+
+def test_sigint_cancel_sends_no_sigwinch(harness):
+    # Integration boundary: SIGINT to the guard must skip the dump path.
+    h = _stall_harness(harness, "unarmed-idle", later=False)
+    h.start(stall_poll=0.2, dump_wait=5, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    started = time.monotonic()
+    os.kill(h.process.pid, signal.SIGINT)
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 128 + signal.SIGINT
+    assert time.monotonic() - started < 4.0
+    dump = Path(info["dump"])
+    assert len(dump.read_text().splitlines()) == 1
+
+
+def test_cancel_during_dump_wait_ends_wait_promptly(harness):
+    # Integration boundary: cancel interrupts a 5s dump wait mid-flight.
+    h = _stall_harness(harness, "armed-idle", later=False)
+    h.start(stall_poll=0.2, dump_wait=5, stall_timeout=1.0)
+    [(peer, info)] = _stall_running(h)
+    dump = Path(info["dump"])
+    header_len = len(dump.read_text())
+    deadline = time.monotonic() + _RECOVERY_WATCHDOG_S
+    while len(dump.read_text()) <= header_len:
+        assert time.monotonic() < deadline, "SIGWINCH dump never landed"
+        time.sleep(0.02)
+    started = time.monotonic()
+    h.control.sendall(_cancel(h.manifest))
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    assert time.monotonic() - started < 4.0
+
+
+def test_deadline_wins_same_poll_race(monkeypatch):
+    # Unit boundary: the attempt deadline AND the stall verdict are both
+    # due in the same _run_one pass, so the poll-loop order decides. The
+    # deadline fail() runs first and the stall check is skipped once
+    # cancel_signal is set: exactly one problem, one dump signal, one kill.
+    # (An integration timing test cannot force both due in one pass, so a
+    # 1s-deadline/5s-window pairing would prove nothing about precedence.)
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    now = [1000.0]
+    monkeypatch.setattr(guard_module, "time",
+                        SimpleNamespace(monotonic=lambda: now[0]))
+
+    class _Child:
+        calls = 0
+
+        def poll(self):
+            # Alive for the verdict pass, reaped by the kill path after.
+            type(self).calls += 1
+            return None if type(self).calls == 1 else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(guard_module.subprocess, "Popen",
+                        lambda *args, **kwargs: _Child())
+
+    watcher = SimpleNamespace(stall_s=5.0, checks=0)
+
+    def _due():
+        watcher.checks += 1
+        return True  # the stall verdict is due in this same pass
+
+    watcher.check = _due
+    monkeypatch.setattr(guard_module, "_stall_watcher_for",
+                        lambda *args: watcher)
+
+    sent = []
+    monkeypatch.setattr(guard_module, "_signal_group",
+                        lambda identity, signum: sent.append(signum))
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda *args, **kwargs: False)
+
+    class _Control:
+        manifest = SimpleNamespace()
+        pending = bytearray()
+
+        def poll(self, timeout=0):
+            now[0] += 0.05
+
+        def emit(self, kind, payload):
+            emitted.append((kind, payload))
+
+    emitted = []
+    state = guard_module._State()
+    fail_calls = []
+    original_fail = state.fail
+
+    def _counting_fail(problem, *, dump=False):
+        fail_calls.append((problem.code, dump))
+        return original_fail(problem, dump=dump)
+
+    state.fail = _counting_fail
+    prepared = SimpleNamespace(report_path=Path("report.json"),
+                               argv=("runner",), cwd=".", env_updates={})
+    result = guard_module._run_one(
+        _Control(), SimpleNamespace(), prepared, "a001", "execution",
+        0, now[0] + 100, SimpleNamespace(), state)
+
+    # The stall check is skipped once the deadline owns the timeline.
+    assert watcher.checks == 0
+    assert state.problem is not None
+    assert state.problem.code == "execution-timeout"
+    # Exactly one fail call: dropping the cancel guard on the stall check
+    # would record a second (losing) problem here.
+    assert fail_calls == [("execution-timeout", True)]
+    # Exactly one dump signal and one kill signal, in that order.
+    assert sent == [signal.SIGWINCH, signal.SIGTERM]
+    assert result == 0
+    facts = [payload for kind, payload in emitted if kind == "runner-facts"]
+    assert len(facts) == 1
+    assert facts[0]["problem"]["code"] == "execution-timeout"
+
+
+def test_signal_group_sigwinch_forged_identity_raises(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(os, "killpg",
+                        lambda pgid, sig: calls.append((pgid, sig)))
+    forged = SimpleNamespace(pid=123456789, pgid=123456789)
+    with pytest.raises(C.Problem) as caught:
+        guard_module._signal_group(forged, signal.SIGWINCH)
+    assert caught.value.code == "ownership-uncertain"
+    assert calls == []
+
+
+def test_fail_records_first_problem_and_dump_request():
+    import ptest.guard as guard_module
+
+    state = guard_module._State()
+    assert state.dump_requested is False
+    assert state.external_cancel is False
+    state.fail(guard_module._problem("execution-timeout", "x"), dump=True)
+    assert state.problem.code == "execution-timeout"
+    assert state.dump_requested is True
+    assert state.cancel_signal == signal.SIGTERM
+    assert state.external_cancel is False
+    state.fail(guard_module._problem("post-test-stall", "y"), dump=True)
+    assert state.problem.code == "execution-timeout"
+    assert state.dump_requested is True
+
+
+def test_fail_after_external_cancel_arms_no_dump():
+    import ptest.guard as guard_module
+
+    state = guard_module._State()
+    state.cancel(signal.SIGINT)
+    assert state.external_cancel is True
+    state.fail(guard_module._problem("execution-timeout", "x"), dump=True)
+    assert state.problem.code == "execution-timeout"
+    assert state.dump_requested is False
 
