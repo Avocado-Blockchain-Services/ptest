@@ -1722,14 +1722,14 @@ def test_stall_unarmed_idle_survives_window_and_exits_zero(harness):
 
 def test_stall_armed_busy_survives_window(harness):
     # Integration boundary: a spinning teardown must outlive the window.
-    # The 2s window keeps the 0.5s floor threshold, so the spinner needs
-    # only a quarter core on average: a loaded parallel suite cannot
-    # starve it into a false stall.
+    # The design mandates the 1.0s window here, like every other
+    # real-process stall test; the spinner polls the release socket
+    # without blocking, so it reads as busy even on a contended core.
     h = _stall_harness(harness, "armed-busy", later=False)
-    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=2.0)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
     [(peer, info)] = _stall_running(h)
     assert Path(str(h.report_path) + ".done").exists()
-    _assert_alive(h, info, time.monotonic() + 3.5)
+    _assert_alive(h, info, time.monotonic() + 2.5)
     peer.sendall(b"x")
     assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
     assert _stall_facts(h)[0]["problem"] is None
@@ -1782,6 +1782,63 @@ def test_stall_other_report_marker_never_arms(harness):
     peer.sendall(b"x")
     assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
     assert _stall_facts(h)[0]["problem"] is None
+
+
+def test_stall_first_attempt_marker_does_not_arm_second(harness):
+    # Integration boundary: a001 arms its own marker path and exits
+    # cleanly, then an idle a002 with no marker of its own must survive
+    # the window. A watcher or arm state carried across attempts would see
+    # a001's stale marker and kill a002.
+    h = harness()
+    h.ready = h.listener("s")
+    ready_path = str(h.domain.root / (h.root.name + "s"))
+    reports = h.root / "reports"
+    reports.mkdir(exist_ok=True)
+    report_first = reports / ("native-a001-" + "f" * 32 + ".json")
+    report_second = reports / ("native-a002-" + "f" * 32 + ".json")
+    first = C.PreparedRun(
+        argv=(sys.executable, str(_STALL_WORKLOAD), "armed-idle",
+              ready_path, str(report_first)),
+        cwd=h.root, report_path=report_first)
+    second = C.PreparedRun(
+        argv=(sys.executable, str(_STALL_WORKLOAD), "unarmed-idle",
+              ready_path, str(report_second)),
+        cwd=h.root, report_path=report_second)
+    h.manifest = replace(h.manifest, attempts=(first, second),
+                         attempt_ids=("a001", "a002"),
+                         attempt_timeout_s=10)
+    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=1.0)
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+    assert h.read().kind == "phase"
+
+    def _accept():
+        peer, _ = h.ready.accept()
+        peer.settimeout(_RECOVERY_WATCHDOG_S)
+        raw = bytearray()
+        while not raw.endswith(b"\n"):
+            raw.extend(_exact(peer, 1))
+        h.peers.append(peer)
+        return peer, json.loads(raw)
+
+    peer_first, _ = _accept()
+    peer_first.sendall(b"x")
+    while True:
+        frame = h.read()
+        if frame.kind == "phase":
+            break
+    peer, info = _accept()
+    assert Path(str(report_first) + ".done").exists()
+    assert not Path(str(report_second) + ".done").exists()
+    _assert_alive(h, info, time.monotonic() + 2.0)
+    peer.sendall(b"x")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    facts = _stall_facts(h)
+    assert len(facts) == 2
+    assert [frame["attempt_id"] for frame in facts] == ["a001", "a002"]
+    assert [frame["raw_exit_code"] for frame in facts] == [0, 0]
+    assert [frame["problem"] for frame in facts] == [None, None]
+    assert Path(str(report_second) + ".term").read_text() == "released"
 
 
 def test_deadline_kill_sends_sigwinch_first_without_stall(harness):
@@ -1859,16 +1916,89 @@ def test_cancel_during_dump_wait_ends_wait_promptly(harness):
     assert time.monotonic() - started < 4.0
 
 
-def test_deadline_wins_same_poll_race(harness):
-    # Integration boundary: a 1s attempt deadline beats a 5s stall window.
-    h = _stall_harness(harness, "armed-idle", later=False,
-                       attempt_timeout_s=1)
-    h.start(stall_poll=0.2, dump_wait=0.3, stall_timeout=5.0)
-    [(peer, info)] = _stall_running(h)
-    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
-    facts = _stall_facts(h)
+def test_deadline_wins_same_poll_race(monkeypatch):
+    # Unit boundary: the attempt deadline AND the stall verdict are both
+    # due in the same _run_one pass, so the poll-loop order decides. The
+    # deadline fail() runs first and the stall check is skipped once
+    # cancel_signal is set: exactly one problem, one dump signal, one kill.
+    # (An integration timing test cannot force both due in one pass, so a
+    # 1s-deadline/5s-window pairing would prove nothing about precedence.)
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    now = [1000.0]
+    monkeypatch.setattr(guard_module, "time",
+                        SimpleNamespace(monotonic=lambda: now[0]))
+
+    class _Child:
+        calls = 0
+
+        def poll(self):
+            # Alive for the verdict pass, reaped by the kill path after.
+            type(self).calls += 1
+            return None if type(self).calls == 1 else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(guard_module.subprocess, "Popen",
+                        lambda *args, **kwargs: _Child())
+
+    watcher = SimpleNamespace(stall_s=5.0, checks=0)
+
+    def _due():
+        watcher.checks += 1
+        return True  # the stall verdict is due in this same pass
+
+    watcher.check = _due
+    monkeypatch.setattr(guard_module, "_stall_watcher_for",
+                        lambda *args: watcher)
+
+    sent = []
+    monkeypatch.setattr(guard_module, "_signal_group",
+                        lambda identity, signum: sent.append(signum))
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda *args, **kwargs: False)
+
+    class _Control:
+        manifest = SimpleNamespace()
+        pending = bytearray()
+
+        def poll(self, timeout=0):
+            now[0] += 0.05
+
+        def emit(self, kind, payload):
+            emitted.append((kind, payload))
+
+    emitted = []
+    state = guard_module._State()
+    fail_calls = []
+    original_fail = state.fail
+
+    def _counting_fail(problem, *, dump=False):
+        fail_calls.append((problem.code, dump))
+        return original_fail(problem, dump=dump)
+
+    state.fail = _counting_fail
+    prepared = SimpleNamespace(report_path=Path("report.json"),
+                               argv=("runner",), cwd=".", env_updates={})
+    result = guard_module._run_one(
+        _Control(), SimpleNamespace(), prepared, "a001", "execution",
+        0, now[0] + 100, SimpleNamespace(), state)
+
+    # The stall check is skipped once the deadline owns the timeline.
+    assert watcher.checks == 0
+    assert state.problem is not None
+    assert state.problem.code == "execution-timeout"
+    # Exactly one fail call: dropping the cancel guard on the stall check
+    # would record a second (losing) problem here.
+    assert fail_calls == [("execution-timeout", True)]
+    # Exactly one dump signal and one kill signal, in that order.
+    assert sent == [signal.SIGWINCH, signal.SIGTERM]
+    assert result == 0
+    facts = [payload for kind, payload in emitted if kind == "runner-facts"]
+    assert len(facts) == 1
     assert facts[0]["problem"]["code"] == "execution-timeout"
-    assert "stall_blocked_teardown" in Path(info["dump"]).read_text()
 
 
 def test_signal_group_sigwinch_forged_identity_raises(monkeypatch):

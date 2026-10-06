@@ -62,7 +62,9 @@ def stall_blocked_teardown(peer: socket.socket) -> None:
 
 def stall_cpu_spin_until_released(peer: socket.socket) -> None:
     """Burn CPU until the release socket delivers a byte or times out."""
-    peer.settimeout(0.05)
+    # Non-blocking release polls: a blocking recv would idle the spinner
+    # for half of every pass, so the busy workload would read as idle.
+    peer.setblocking(False)
     while True:
         stop = time.monotonic() + 0.05
         while time.monotonic() < stop:
@@ -70,7 +72,7 @@ def stall_cpu_spin_until_released(peer: socket.socket) -> None:
         try:
             if peer.recv(1):
                 return
-        except socket.timeout:
+        except BlockingIOError:
             continue
 
 
