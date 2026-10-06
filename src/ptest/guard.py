@@ -10,6 +10,7 @@ import os
 import select
 import secrets
 import signal
+import stat
 import struct
 import subprocess
 import time
@@ -18,7 +19,8 @@ from pathlib import Path
 
 import psutil
 
-from . import leases, platform, scheduler
+from . import contracts as _contracts
+from . import leases, platform, scheduler, stall
 from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
     DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, DEFAULT_COMPOUND_TIMEOUT_S,
@@ -32,6 +34,13 @@ _POLL_S = 0.05
 _MAX_GROUP_SCAN = 8192
 _EXIT_PROTOCOL = 70
 _EXIT_REGISTRATION = 75
+# Marker stat and group-CPU sample cadence, and the bounded SIGWINCH-to-
+# dump wait. Both are read at call time (never bound as default arguments)
+# so tests can pin them. _DUMP_WAIT_S tracks the contracts constant; the
+# getattr fallback covers trees where the shared-contracts barrier has not
+# landed yet (the frozen value is 1.0 either way).
+_STALL_POLL_S = 1.0
+_DUMP_WAIT_S = getattr(_contracts, "STALL_DUMP_WAIT_S", 1.0)
 
 
 def _problem(code: str, message: str) -> Problem:
@@ -75,17 +84,29 @@ class _State:
     child: subprocess.Popen | None = None
     grace_deadline: float | None = None
     spawned: bool = False
+    dump_requested: bool = False
+    external_cancel: bool = False
 
     def cancel(self, signum: int) -> None:
         # First cancellation wins, including signals reflected by our killpg.
+        # Any outside cancel (signal handler, control frame) marks the run
+        # as externally cancelled: no dump signal and no added dump wait.
         if self.cancel_signal is None:
             self.cancel_signal = signum
         self.spawn_closed = True
+        self.external_cancel = True
 
-    def fail(self, problem: Problem) -> None:
+    def fail(self, problem: Problem, *, dump: bool = False) -> None:
+        # First problem wins. A dump is requested only when this call
+        # records the first problem while no cancellation was pending;
+        # closing the spawn here never marks an external cancellation.
         if self.problem is None:
             self.problem = problem
-        self.cancel(signal.SIGTERM)
+            if dump and self.cancel_signal is None:
+                self.dump_requested = True
+        if self.cancel_signal is None:
+            self.cancel_signal = signal.SIGTERM
+        self.spawn_closed = True
 
 
 class _StartupCancelled(Exception):
@@ -530,6 +551,95 @@ def _predecessor_quiescent(
     return True
 
 
+def _stall_marker_path(report_path: Path) -> Path:
+    """The post-test arm marker bound to one attempt's report path."""
+    marker = getattr(_contracts, "stall_marker_path", None)
+    if marker is not None:
+        return marker(report_path)
+    return Path(str(report_path) + ".done")
+
+
+def _marker_armed(marker: Path) -> bool:
+    """True only for a user-owned regular file: never a symlink, FIFO or dir."""
+    try:
+        stamp = os.lstat(marker)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode) and stamp.st_uid == os.getuid()
+
+
+def _stall_timeout_s(manifest: LaunchManifest) -> float | None:
+    """The stall window in seconds, or None when stall detection is off."""
+    value = getattr(manifest, "stall_timeout_s", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value <= 0:
+        return None
+    return float(value)
+
+
+class _StallWatcher:
+    """Arm on the bridge marker, then feed group CPU into an IdleWindow.
+
+    Detection runs only while the direct child is alive (the caller owns
+    that condition: check() is called from inside the child poll loop).
+    """
+
+    def __init__(self, marker: Path, stall_s: float, pgid: int,
+                 exclude_pid: int) -> None:
+        self.marker = marker
+        self.stall_s = stall_s
+        self.pgid = pgid
+        self.exclude_pid = exclude_pid
+        self.armed = False
+        self.window: stall.IdleWindow | None = None
+        self.next_check = 0.0
+
+    def check(self) -> bool:
+        now = time.monotonic()
+        if now < self.next_check:
+            return False
+        # _STALL_POLL_S is read at call time so tests can pin the cadence.
+        self.next_check = now + _STALL_POLL_S
+        if not self.armed:
+            if not _marker_armed(self.marker):
+                return False
+            self.armed = True
+            self.window = stall.IdleWindow(self.stall_s)
+        assert self.window is not None
+        return self.window.observe(
+            now, platform.group_cpu_times(
+                self.pgid, exclude_pid=self.exclude_pid))
+
+
+def _stall_watcher_for(manifest: LaunchManifest, prepared, phase: str,
+                       identity):
+    """Build the stall watcher when every D5 precondition holds."""
+    if phase != "execution" or prepared.report_path is None:
+        return None
+    stall_s = _stall_timeout_s(manifest)
+    if stall_s is None:
+        return None
+    return _StallWatcher(_stall_marker_path(prepared.report_path), stall_s,
+                         identity.pgid, identity.pid)
+
+
+def _dump_and_wait(state: _State, control: _Control, identity) -> None:
+    """Send the dump signal, then wait for stacks before the SIGTERM.
+
+    The wait is bounded by _DUMP_WAIT_S (read at call time) and ends
+    promptly on an external cancellation. Only time.monotonic is used,
+    and control.poll waits via select, so this is fake-clock safe.
+    """
+    _signal_group(identity, signal.SIGWINCH)
+    deadline = time.monotonic() + _DUMP_WAIT_S
+    while not state.external_cancel:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        control.poll(min(_POLL_S, remaining))
+
+
 def _run_one(control: _Control, manifest: LaunchManifest, prepared,
              attempt_id: str,
              phase: str, timeout_s: float | None, compound_deadline: float,
@@ -559,18 +669,32 @@ def _run_one(control: _Control, manifest: LaunchManifest, prepared,
         problem = _problem("missing-executable", "runner could not be launched")
         state.spawn_closed = True
     else:
+        watcher = _stall_watcher_for(manifest, prepared, phase, identity)
         while state.child.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0 and state.cancel_signal is None:
                 if timeout_scope == "compound":
                     state.fail(_problem(
                         "execution-timeout",
-                        _compound_timeout_message(manifest)))
+                        _compound_timeout_message(manifest)), dump=True)
                 else:
                     state.fail(_problem(
                         "execution-timeout",
-                        timeout_scope + " execution deadline expired"))
+                        timeout_scope + " execution deadline expired"),
+                        dump=True)
+            # The deadline check runs first in every pass; the stall check
+            # is skipped once a cancellation owns the timeline, so the
+            # first problem wins and there is one dump and one kill.
+            if (state.cancel_signal is None and watcher is not None
+                    and watcher.check()):
+                state.fail(_problem(
+                    "post-test-stall",
+                    "tests finished but runner processes stayed idle for "
+                    f"{watcher.stall_s:g}s without exiting"), dump=True)
             if state.cancel_signal is not None:
+                if (state.dump_requested and not state.external_cancel
+                        and prepared.report_path is not None):
+                    _dump_and_wait(state, control, identity)
                 _cancel_and_reap(state, control, identity)
                 break
             control.poll(min(_POLL_S, max(0, remaining)))
@@ -677,7 +801,8 @@ def run_guard(control_fd: int, manifest_fd: int, lease_fd: int = -1) -> int:
         if not scheduler.mark_draining(manifest.domain, manifest.grant, identity):
             return _EXIT_REGISTRATION
         control.emit("draining", {"provisional_artifact_id": None})
-        if state.problem and state.problem.code != "execution-timeout":
+        if state.problem and state.problem.code not in (
+                "execution-timeout", "post-test-stall"):
             return _EXIT_PROTOCOL
         return 0 if state.cancel_signal is None else 128 + state.cancel_signal
     except _StartupCancelled:

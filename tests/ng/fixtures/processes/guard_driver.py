@@ -25,6 +25,26 @@ def main() -> int:
         "GUARD_SCAN_LIMIT_AFTER_PHASE", "")
     if decision_timeout:
         guard.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = float(decision_timeout)
+    stall_poll = os.environ.pop("GUARD_STALL_POLL", "")
+    dump_wait = os.environ.pop("GUARD_DUMP_WAIT", "")
+    stall_timeout = os.environ.pop("GUARD_STALL_TIMEOUT", "")
+    if stall_poll:
+        guard._STALL_POLL_S = float(stall_poll)
+    if dump_wait:
+        guard._DUMP_WAIT_S = float(dump_wait)
+    if stall_timeout:
+        # Test seam until the shared-contracts barrier lands: the manifest
+        # cannot carry stall_timeout_s through encode/decode yet, so inject
+        # it at decode time. With the barrier, tests set the field directly.
+        original_decode = guard.decode_launch_manifest
+
+        def decode(raw):
+            manifest = original_decode(raw)
+            object.__setattr__(manifest, "stall_timeout_s",
+                               float(stall_timeout))
+            return manifest
+
+        guard.decode_launch_manifest = decode
     clock_offset = [0.0]
     if advance:
         guard.time = SimpleNamespace(monotonic=lambda: time.monotonic() + clock_offset[0])
