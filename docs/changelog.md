@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.10
 
 - Post-test stall detection (pytest runner only): once the tests have
   finished and the runner processes then stay CPU-idle for `[runner]
