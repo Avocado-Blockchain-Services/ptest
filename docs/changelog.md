@@ -9,11 +9,15 @@
   code instead of holding queue slots. Rerun once alone; report a repeat
   with the stack dump. There is no CLI flag.
 - Stack dumps before guard kills: on a compound/attempt deadline kill or a
-  post-test stall, every Python process of the pytest run first writes
-  all-thread stacks; ptest prints them on stderr as `ptest: stack dumps
-  (<n> processes) — <reason>`, bounded and escaped, never in `--json` or
-  history. The agent guide names the `post-test-stall` row and the
-  `[runner] stall_timeout` key.
+  post-test stall, the pytest controller and every xdist worker first write
+  all-thread stacks (other processes, and non-pytest runners, write none);
+  ptest prints them on stderr as `ptest: stack dumps (<n> processes) —
+  <reason>`, bounded and escaped, never in `--json` or history. A dump the
+  `uv run` launcher made a process write twice prints once. The agent guide
+  names the `post-test-stall` row and the `[runner] stall_timeout` key.
+- History stores a stalled run's reason as `state-unavailable` (message
+  kept), so a 0.4.9 ptest that reads the same history during an update or
+  after a downgrade does not disable it as `coordinator-corrupt`.
 
 ## 0.4.9
 

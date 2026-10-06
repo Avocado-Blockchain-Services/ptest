@@ -345,6 +345,31 @@ def test_killed_run_evidence_grows_next_deadline(case):
         runner, request, evidence) == (1800.0, "history")
 
 
+def test_stall_run_history_stays_readable_by_older_ptest(case, monkeypatch):
+    """0.4.9 decodes stored summaries against its own reason codes and
+    disables a checkout's history on an unknown one: a stall row must be
+    stored under a code older readers know, and never feed kill_s."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    request = C.RunRequest(mode=C.Mode.FULL)
+    stalled = _killed_full_result(checkout, request)
+    stalled = replace(
+        stalled,
+        reasons=(C.Reason(code="post-test-stall",
+                          message="tests finished but runner processes stayed idle"),),
+        sequence=history_api.next_sequence(domain, checkout),
+        policy_digest="ab" * 32)
+    assert history_api.publish_outcome(domain, checkout, stalled, None).committed
+    monkeypatch.setattr(C, "REASON_CODES", C.REASON_CODES - {"post-test-stall"})
+    summaries = history_api.read_history_summaries(domain, checkout)
+    (row,) = [item for item in summaries if item["run_id"] == stalled.run_id]
+    assert [reason["code"] for reason in row["reasons"]] == ["state-unavailable"]
+    assert row["reasons"][0]["message"] == (
+        "tests finished but runner processes stayed idle")
+    assert history_api.comparable_run_evidence(
+        domain, checkout, full=True) == (None, None)
+
+
 def test_comparable_evidence_ignores_attempt_timeout_kill(case):
     domain = case.domain()
     checkout = case.checkout(domain)
@@ -1065,18 +1090,12 @@ def test_execute_resets_deadline_after_launch_failure(case, monkeypatch):
 
 
 def _stall_reason_code():
-    # Pre-T2-barrier the closed reason vocabulary maps the frozen code to
-    # unknown-input; after the barrier lands the frozen code survives.
-    return "post-test-stall" if "post-test-stall" in C.REASON_CODES else "unknown-input"
+    return "post-test-stall"
 
 
-def _stall_config(kind, value=None, present=True):
+def _stall_config(kind, value=None):
     from types import SimpleNamespace
-    if present:
-        runner = SimpleNamespace(kind=kind, stall_timeout_s=value)
-    else:
-        runner = SimpleNamespace(kind=kind)
-    return SimpleNamespace(runner=runner)
+    return SimpleNamespace(runner=SimpleNamespace(kind=kind, stall_timeout_s=value))
 
 
 @pytest.mark.parametrize("kind", [C.RunnerKind.COMMAND, C.RunnerKind.VITEST])
@@ -1086,7 +1105,6 @@ def test_stall_timeout_s_is_none_for_non_pytest(kind, value):
 
 
 def test_stall_timeout_s_absent_means_default_120():
-    assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, present=False)) == 120.0
     assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, None)) == 120.0
 
 

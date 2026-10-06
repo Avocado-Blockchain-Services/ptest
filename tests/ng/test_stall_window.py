@@ -135,9 +135,9 @@ def test_group_cpu_times_none_when_member_unreadable(monkeypatch):
             def status(self):
                 raise psutil.AccessDenied(pid=proc.pid)
 
-        monkeypatch.setattr(
-            platform_module.psutil, "process_iter",
-            lambda *args, **kwargs: iter([_Unreadable()]))
+        monkeypatch.setattr(platform_module.psutil, "pids", lambda: [proc.pid])
+        monkeypatch.setattr(platform_module.psutil, "Process",
+                            lambda pid: _Unreadable())
         assert platform.group_cpu_times(
             os.getpgrp(), exclude_pid=-1) is None
     finally:
@@ -154,3 +154,30 @@ def test_group_cpu_times_none_past_limit():
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_group_cpu_times_limit_counts_members_not_host_processes():
+    """A busy host (many unrelated processes) must not disable sampling."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        members = platform.group_cpu_times(
+            os.getpgrp(), exclude_pid=os.getpid(), limit=8192)
+        assert members is not None
+        assert platform.group_cpu_times(
+            os.getpgrp(), exclude_pid=os.getpid(),
+            limit=len(members)) is not None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_group_cpu_times_none_when_scan_outlives_budget(monkeypatch):
+    import ptest.platform as platform_module
+
+    ticks = iter(range(1000))
+    monkeypatch.setattr(platform_module.time, "monotonic",
+                        lambda: float(next(ticks)))
+    monkeypatch.setattr(platform_module.psutil, "pids", lambda: list(range(1, 50)))
+    assert platform.group_cpu_times(
+        os.getpgrp(), exclude_pid=-1, budget_s=3.0) is None

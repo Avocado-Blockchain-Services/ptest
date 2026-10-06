@@ -16,13 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from ptest import config as config_api, contracts as C, guard as guard_api, operations
-from ptest.runtime import pytest_bridge
-
-pytestmark = pytest.mark.skipif(
-    not (hasattr(guard_api, "_STALL_POLL_S")
-         and hasattr(pytest_bridge, "_STALL_MARKER_SUFFIX")),
-    reason="post-test-stall e2e: awaiting T1+T3 integration")
+from ptest import config as config_api, contracts as C, operations
 
 _WATCHDOG_S = 60
 

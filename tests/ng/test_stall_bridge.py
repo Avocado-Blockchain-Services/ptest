@@ -77,21 +77,20 @@ def test_stall_constants_have_frozen_values():
     assert bridge._STACK_DUMP_HEADER_PREFIX == "ptest stack dump: "
 
 
-def test_stall_constants_match_contracts():
-    """Pin bridge literals to contracts.py once the shared barrier lands.
-
-    The contracts names are owned by T2; until they exist this asserts the
-    frozen literal values above, and afterwards it asserts equality too.
-    """
+def test_stall_constants_match_contracts(tmp_path):
+    """Pin the bridge's duplicated literals and path rules to contracts.py."""
     import ptest.contracts as contracts
 
-    assert bridge._STALL_MARKER_SUFFIX == ".done"
-    assert bridge._STACK_DUMP_INFIX == ".stack-"
-    assert bridge._STACK_DUMP_HEADER_PREFIX == "ptest stack dump: "
     for name in ("STALL_MARKER_SUFFIX", "STACK_DUMP_INFIX",
                  "STACK_DUMP_HEADER_PREFIX"):
-        if hasattr(contracts, name):
-            assert getattr(bridge, "_" + name) == getattr(contracts, name)
+        assert getattr(bridge, "_" + name) == getattr(contracts, name)
+    report = tmp_path / "native-a001-0123456789abcdef0123456789abcdef.json"
+    assert bridge._stall_marker_path(report) == contracts.stall_marker_path(report)
+    for pid in (1, 4242, 2**31 - 1):
+        assert (bridge._stack_dump_path(report, pid)
+                == contracts.stack_dump_path(report, pid))
+        assert contracts.stack_dump_pid(
+            report.name, bridge._stack_dump_path(report, pid).name) == pid
 
 
 def test_stall_path_rules_match_frozen_formulas(tmp_path):
@@ -212,6 +211,56 @@ def test_unknown_nodeids_do_not_arm_early(tmp_path):
     assert (tmp_path / (arm._report_name + ".done")).is_file()
 
 
+def test_duplicate_nodeids_need_one_outcome_each(tmp_path):
+    arm = _arm_in(tmp_path)
+    arm.expect(["a.py::t1", "a.py::t1", "a.py::t2"])
+    arm.observe(_report("a.py::t1", "call", outcome="passed"))
+    arm.observe(_report("a.py::t2", "call", outcome="passed"))
+    assert not (tmp_path / (arm._report_name + ".done")).exists()
+    arm.observe(_report("a.py::t1", "call", outcome="passed"))
+    assert (tmp_path / (arm._report_name + ".done")).is_file()
+
+
+def test_surplus_outcomes_for_one_id_do_not_cover_another(tmp_path):
+    arm = _arm_in(tmp_path)
+    arm.expect(["a.py::t1", "a.py::t2"])
+    for _ in range(3):
+        arm.observe(_report("a.py::t1", "call", outcome="passed"))
+    assert not (tmp_path / (arm._report_name + ".done")).exists()
+    arm.observe(_report("a.py::t2", "call", outcome="passed"))
+    assert (tmp_path / (arm._report_name + ".done")).is_file()
+
+
+def test_outcomes_before_expectation_still_count(tmp_path):
+    arm = _arm_in(tmp_path)
+    arm.observe(_report("a.py::t1", "call", outcome="passed"))
+    arm.expect(["a.py::t1", "a.py::t2"])
+    assert not (tmp_path / (arm._report_name + ".done")).exists()
+    arm.observe(_report("a.py::t2", "call", outcome="passed"))
+    assert (tmp_path / (arm._report_name + ".done")).is_file()
+
+
+def test_arm_cost_is_linear_in_suite_size(tmp_path, monkeypatch):
+    """Each report does O(1) work: no rescan of the expectation per report."""
+    arm = _arm_in(tmp_path)
+    ids = [f"a.py::t{index}" for index in range(5000)]
+    arm.expect(ids)
+    lookups = 0
+
+    class CountingCounter(type(arm._observed)):
+        def get(self, *args):
+            nonlocal lookups
+            lookups += 1
+            return super().get(*args)
+
+    arm._expected = CountingCounter(arm._expected)
+    arm._observed = CountingCounter(arm._observed)
+    for nodeid in ids:
+        arm.observe(_report(nodeid, "call", outcome="passed"))
+    assert (tmp_path / (arm._report_name + ".done")).is_file()
+    assert lookups <= 4 * len(ids)
+
+
 # ---------------------------------------------------------------------------
 # Arm condition (b): the native loop returned or raised.
 # ---------------------------------------------------------------------------
@@ -285,30 +334,36 @@ def test_unwritable_reports_dir_leaves_run_unaffected(tmp_path):
     arm.observe(_report("a.py::t1", "call", outcome="passed"))  # must not raise
 
 
-def test_controller_dump_header_lines_are_exact(tmp_path):
-    import faulthandler
-
+def _dump_header_in_child(tmp_path, role: str, worker_id: str = "") -> tuple[int, bytes]:
+    """Register in a fresh interpreter: an in-process faulthandler.register
+    would replace (and unregister would remove) the outer run's SIGWINCH
+    dump registration, which has no save/restore (design D11)."""
     report = tmp_path / "native-a001-0123456789abcdef0123456789abcdef.json"
-    try:
-        assert bridge._register_stack_dump(report, role="controller") is True
-        dump = tmp_path / f"{report.name}.stack-{os.getpid()}"
-        first = dump.read_bytes().splitlines(keepends=True)[0]
-        assert first == (f"ptest stack dump: role=controller pid={os.getpid()}\n").encode()
-    finally:
-        faulthandler.unregister(signal.SIGWINCH)
+    code = (
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(BRIDGE.parent)!r})\n"
+        "import pytest_bridge as b\n"
+        "from pathlib import Path\n"
+        f"ok = b._register_stack_dump(Path({str(report)!r}), role={role!r}, worker_id={worker_id!r})\n"
+        "print(os.getpid() if ok else 0)\n"
+    )
+    env = {key: value for key, value in os.environ.items() if key not in _SCRUB}
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          text=True, timeout=60, env=env, check=True)
+    pid = int(done.stdout.strip())
+    assert pid > 0, done.stderr
+    dump = tmp_path / f"{report.name}.stack-{pid}"
+    return pid, dump.read_bytes().splitlines(keepends=True)[0]
+
+
+def test_controller_dump_header_lines_are_exact(tmp_path):
+    pid, first = _dump_header_in_child(tmp_path, "controller")
+    assert first == f"ptest stack dump: role=controller pid={pid}\n".encode()
 
 
 def test_worker_dump_header_names_gateway(tmp_path):
-    import faulthandler
-
-    report = tmp_path / "native-a001-0123456789abcdef0123456789abcdef.json"
-    try:
-        assert bridge._register_stack_dump(report, role="worker", worker_id="gw3") is True
-        dump = tmp_path / f"{report.name}.stack-{os.getpid()}"
-        first = dump.read_bytes().splitlines(keepends=True)[0]
-        assert first == (f"ptest stack dump: role=worker id=gw3 pid={os.getpid()}\n").encode()
-    finally:
-        faulthandler.unregister(signal.SIGWINCH)
+    pid, first = _dump_header_in_child(tmp_path, "worker", "gw3")
+    assert first == f"ptest stack dump: role=worker id=gw3 pid={pid}\n".encode()
 
 
 def test_symlinked_dump_path_is_never_written_through(tmp_path):

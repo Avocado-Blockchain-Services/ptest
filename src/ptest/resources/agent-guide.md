@@ -49,8 +49,8 @@ never fill or upgrade a row, and a filled worksheet never updates ptest
 readiness. A clean or truncated static scan is never a pass and never proves
 parallel, timing, or execution readiness.
 
-A `post-test-stall` end line means the tests finished but the runner processes
-hung in teardown/shutdown (exit 70): rerun once alone, and if it repeats,
+A `post-test-stall` reason (an incomplete run, exit 70) means the tests
+finished but the runner processes hung in teardown/shutdown: rerun once alone, and if it repeats,
 report it with the stack dump printed above instead of editing tests to dodge
 it. A lasting change is `[runner] stall_timeout` in `.ptest.toml` (`0`
 disables stall detection).

@@ -1010,6 +1010,9 @@ class _StallArm:
         self._report_name = self._report_path.name
         self._expected: Counter[str] | None = None
         self._observed: Counter[str] = Counter()
+        # Outcomes still owed by expected ids: O(1) per report instead of a
+        # scan of the expectation, which grew quadratically with suite size.
+        self._remaining = 0
         self._armed = False
 
     def expect(self, nodeids: Any) -> None:
@@ -1019,8 +1022,12 @@ class _StallArm:
                 if isinstance(nodeid, str) and nodeid:
                     counts[nodeid] += 1
             self._expected = counts
+            self._remaining = sum(
+                max(0, count - self._observed.get(nodeid, 0))
+                for nodeid, count in counts.items())
         except Exception:
             self._expected = Counter()
+            self._remaining = 0
 
     def observe(self, report: Any) -> None:
         try:
@@ -1040,6 +1047,9 @@ class _StallArm:
             if not final:
                 return
             self._observed[nodeid] += 1
+            expected = self._expected
+            if expected and self._observed[nodeid] <= expected.get(nodeid, 0):
+                self._remaining -= 1
             self._maybe_arm()
         except Exception:
             return
@@ -1052,11 +1062,8 @@ class _StallArm:
 
     def _maybe_arm(self) -> None:
         expected = self._expected
-        if self._armed or not expected:
+        if self._armed or not expected or self._remaining > 0:
             return
-        for nodeid, count in expected.items():
-            if self._observed.get(nodeid, 0) < count:
-                return
         self._arm()
 
     def _arm(self) -> None:

@@ -1857,11 +1857,33 @@ def _baseline_reasons(
     return (_reason("no-baseline", "the outcome is not eligible for a clean full baseline"),)
 
 
+# Reason codes newer than a reader that may still share this history.
+# Every ptest decodes stored summaries against its own REASON_CODES and
+# treats an unknown code as coordinator-corrupt, which disables the
+# checkout's history for good; 0.4.9 jobs still running across an update,
+# or a downgrade, would hit that. Store these under a code every reader
+# knows; the message keeps the detail. Live output and --json are unchanged.
+_PERSISTED_REASON_ALIASES = {"post-test-stall": "state-unavailable"}
+
+
+def _persisted_reasons(value):
+    """``value`` with every aliased ``{"code": ...}`` object rewritten."""
+    if isinstance(value, list):
+        return [_persisted_reasons(item) for item in value]
+    if isinstance(value, dict):
+        rewritten = {key: _persisted_reasons(item) for key, item in value.items()}
+        code = rewritten.get("code")
+        if isinstance(code, str) and code in _PERSISTED_REASON_ALIASES:
+            rewritten["code"] = _PERSISTED_REASON_ALIASES[code]
+        return rewritten
+    return value
+
+
 def _insert_summary(
     connection: sqlite3.Connection, result: C.RunResult,
     inventory: C.Inventory | None,
 ) -> None:
-    summary = C.serialize_run_result(result)
+    summary = _persisted_reasons(C.serialize_run_result(result))
     before = _json_bytes(_snapshot_dict(result.input_before)) if result.input_before else None
     after = _json_bytes(_snapshot_dict(result.input_after)) if result.input_after else None
     source_digest, compatibility = _result_identity(result)
@@ -2030,7 +2052,7 @@ def _incoming_storage_size(
         _value_size(value)
         for value in (
             result.run_id, result.sequence, result.finished_at,
-            _json_bytes(C.serialize_run_result(result)), before, after,
+            _json_bytes(_persisted_reasons(C.serialize_run_result(result))), before, after,
             result.policy_digest, source_digest, compatibility,
             result.mode.value, result.status.value, stored_inventory,
         )

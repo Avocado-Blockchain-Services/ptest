@@ -244,3 +244,30 @@ def test_cleanup_leaves_symlinks_foreign_other_reports_and_missing(tmp_path):
     assert target.read_bytes() == b"keep"
     assert other_dump.exists()
     stack_dumps.cleanup(tmp_path / "reports" / "native-a999.json")
+
+
+_ONE_DUMP = (
+    "Thread 0x00007f0000000002 (most recent call first):",
+    '  File "/app/conftest.py", line 9 in _pool_teardown',
+    "",
+    "Current thread 0x00007f0000000001 (most recent call first):",
+    '  File "/venv/execnet/gateway_base.py", line 534 in wait',
+)
+
+
+def test_repeated_identical_dump_prints_once(tmp_path):
+    """uv run forwards SIGWINCH, so the controller appends the same dump twice."""
+    report = _report(tmp_path)
+    _write_dump(Path(f"{report}.stack-500"), role="controller", pid=500,
+                body=_ONE_DUMP + _ONE_DUMP)
+    (dump,) = stack_dumps.collect(report)
+    assert dump.lines[1:] == _ONE_DUMP
+
+
+def test_differing_consecutive_dumps_are_all_kept(tmp_path):
+    report = _report(tmp_path)
+    moved = _ONE_DUMP[:1] + ('  File "/app/conftest.py", line 12 in _pool_teardown',) + _ONE_DUMP[2:]
+    _write_dump(Path(f"{report}.stack-500"), role="controller", pid=500,
+                body=_ONE_DUMP + moved)
+    (dump,) = stack_dumps.collect(report)
+    assert dump.lines[1:] == _ONE_DUMP + moved

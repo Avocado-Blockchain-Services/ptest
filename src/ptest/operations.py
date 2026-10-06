@@ -72,11 +72,9 @@ def _stall_timeout_s(config: C.Config) -> float | None:
     """
     if config.runner.kind is not C.RunnerKind.PYTEST:
         return None
-    # getattr: the T2 contracts barrier adds RunnerConfig.stall_timeout_s;
-    # before it lands the field reads as absent (effective 120).
-    value = getattr(config.runner, "stall_timeout_s", None)
+    value = config.runner.stall_timeout_s
     if value is None:
-        return getattr(C, "DEFAULT_STALL_TIMEOUT_S", 120.0)
+        return C.DEFAULT_STALL_TIMEOUT_S
     if value == 0:
         return None
     return value
@@ -1288,7 +1286,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
                                                                _Frames]:
     attempts = prepared if isinstance(prepared, tuple) else (prepared,)
     attempt_ids = tuple(f"a{index:03d}" for index in range(1, len(attempts) + 1))
-    manifest_fields: dict = dict(
+    manifest = C.LaunchManifest(
         protocol=C.GUARD_PROTOCOL_VERSION,
         domain=domain, grant=grant, setup=setup,
         attempts=attempts, attempt_ids=attempt_ids,
@@ -1296,13 +1294,8 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         attempt_timeout_s=None,
         compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
         compound_timeout_source=_COMPOUND_TIMEOUT_SOURCE.get(),
+        stall_timeout_s=_STALL_TIMEOUT_S.get(),
     )
-    if "stall_timeout_s" in C.LaunchManifest.__dataclass_fields__:
-        # Pre-T2-barrier LaunchManifest has no stall window; the guard then
-        # runs without stall detection. The field is always present after
-        # the barrier lands.
-        manifest_fields["stall_timeout_s"] = _STALL_TIMEOUT_S.get()
-    manifest = C.LaunchManifest(**manifest_fields)
     lease_fd = leases.held_fd(Path(domain.root), grant.run_id)
     if lease_fd is None:
         raise C.Problem(code="ownership-uncertain",
@@ -1957,6 +1950,14 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                         binding.path, attempt_problem.code)
                 except Exception:
                     stall_printed[attempt_problem_id] = 0
+            elif (signal_state.number is None and not handoff_complete
+                    and attempt_problem_id not in fact_problems):
+                # The guard SIGKILLed itself after grace and this attempt's
+                # facts were lost, but its SIGWINCH dumps may be on disk.
+                try:
+                    stack_dumps.emit(binding.path, "guard handoff incomplete")
+                except Exception:
+                    pass
         for attempt_id, problem in fact_problems.items():
             code = problem.code if problem.code in C.REASON_CODES else "state-unavailable"
             message = (problem.message if code == problem.code

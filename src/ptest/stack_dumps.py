@@ -21,29 +21,9 @@ from pathlib import Path
 from . import contracts as C
 from . import files, render
 
-# Frozen post-test-stall names. The getattr default covers this worktree
-# before the T2 contracts barrier lands; the bytes are identical.
-_MARKER_SUFFIX = getattr(C, "STALL_MARKER_SUFFIX", ".done")
-_DUMP_INFIX = getattr(C, "STACK_DUMP_INFIX", ".stack-")
-_HEADER_PREFIX = getattr(C, "STACK_DUMP_HEADER_PREFIX", "ptest stack dump: ")
-
-
-def _stack_dump_pid(report_name: str, name: str) -> int | None:
-    """The PID in ``name`` when it names a dump file of ``report_name``."""
-    local = getattr(C, "stack_dump_pid", None)
-    if callable(local):
-        try:
-            return local(report_name, name)
-        except (TypeError, ValueError):
-            return None
-    prefix = report_name + _DUMP_INFIX
-    if not name.startswith(prefix):
-        return None
-    digits = name[len(prefix):]
-    if (not 1 <= len(digits) <= 10 or not digits.isascii()
-            or not digits.isdigit() or digits[0] == "0"):
-        return None
-    return int(digits)
+_MARKER_SUFFIX = C.STALL_MARKER_SUFFIX
+_DUMP_INFIX = C.STACK_DUMP_INFIX
+_HEADER_PREFIX = C.STACK_DUMP_HEADER_PREFIX
 
 
 _MAX_FILES = 32
@@ -103,6 +83,29 @@ def _parse_identity(first: str) -> tuple[bool, str | None]:
     return controller, worker_id
 
 
+def _collapse_repeats(content: list[str]) -> tuple[list[str], int]:
+    """Drop consecutive identical dumps; return the lines and the drop count.
+
+    A process can receive the dump signal twice for one kill (``uv run``
+    forwards SIGWINCH to the child it launched, which killpg also reaches),
+    so it appends the same faulthandler dump twice. A dump starts with the
+    first thread header, which appears once per dump, so its recurrences
+    split the file into dumps. Differing dumps are all kept.
+    """
+    if not content:
+        return content, 0
+    first = content[0]
+    starts = [index for index, line in enumerate(content) if line == first]
+    segments = [content[start:end] for start, end in
+                zip(starts, starts[1:] + [len(content)])]
+    kept: list[list[str]] = []
+    for segment in segments:
+        if kept and segment == kept[-1]:
+            continue
+        kept.append(segment)
+    return [line for segment in kept for line in segment], len(segments) - len(kept)
+
+
 def _read_dump(report_dir: Path, name: str, pid: int) -> Dump | None:
     try:
         files.validate_private_file(report_dir / name)
@@ -120,6 +123,9 @@ def _read_dump(report_dir: Path, name: str, pid: int) -> Dump | None:
     content = rest.split("\n")
     if content and content[-1] == "":
         content.pop()
+    if not extra_bytes:
+        # A byte-truncated file may end mid-dump; only whole files collapse.
+        content, _ = _collapse_repeats(content)
     extra_lines = len(content) - _MAX_LINES_PER_FILE if len(content) > _MAX_LINES_PER_FILE else 0
     if extra_lines:
         content = content[:_MAX_LINES_PER_FILE]
@@ -140,7 +146,7 @@ def collect(report_path: Path) -> tuple[Dump, ...]:
     report_name = Path(report_path).name
     found: list[Dump] = []
     for name in _candidate_names(report_dir):
-        pid = _stack_dump_pid(report_name, name)
+        pid = C.stack_dump_pid(report_name, name)
         if pid is None:
             continue
         dump = _read_dump(report_dir, name, pid)
@@ -167,12 +173,8 @@ def emit(report_path: Path, reason: str) -> int:
         return 0
     shown: list[Dump] = []
     total = 0
-    capped_total = False
     for dump in dumps:
-        if len(shown) >= _MAX_FILES:
-            break
-        if total + dump.size > _MAX_BYTES_TOTAL:
-            capped_total = True
+        if len(shown) >= _MAX_FILES or total + dump.size > _MAX_BYTES_TOTAL:
             break
         shown.append(dump)
         total += dump.size
@@ -223,7 +225,7 @@ def cleanup(report_path: Path) -> None:
         report_dir = Path(report_path).parent
         report_name = Path(report_path).name
         names = [name for name in _candidate_names(report_dir)
-                 if _stack_dump_pid(report_name, name) is not None]
+                 if C.stack_dump_pid(report_name, name) is not None]
     except (C.Problem, OSError):
         return
     for name in [report_name + _MARKER_SUFFIX, *names]:

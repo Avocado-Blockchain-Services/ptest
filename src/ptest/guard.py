@@ -36,11 +36,9 @@ _EXIT_PROTOCOL = 70
 _EXIT_REGISTRATION = 75
 # Marker stat and group-CPU sample cadence, and the bounded SIGWINCH-to-
 # dump wait. Both are read at call time (never bound as default arguments)
-# so tests can pin them. _DUMP_WAIT_S tracks the contracts constant; the
-# getattr fallback covers trees where the shared-contracts barrier has not
-# landed yet (the frozen value is 1.0 either way).
+# so tests can pin them.
 _STALL_POLL_S = 1.0
-_DUMP_WAIT_S = getattr(_contracts, "STALL_DUMP_WAIT_S", 1.0)
+_DUMP_WAIT_S = _contracts.STALL_DUMP_WAIT_S
 
 
 def _problem(code: str, message: str) -> Problem:
@@ -553,10 +551,7 @@ def _predecessor_quiescent(
 
 def _stall_marker_path(report_path: Path) -> Path:
     """The post-test arm marker bound to one attempt's report path."""
-    marker = getattr(_contracts, "stall_marker_path", None)
-    if marker is not None:
-        return marker(report_path)
-    return Path(str(report_path) + ".done")
+    return _contracts.stall_marker_path(report_path)
 
 
 def _marker_armed(marker: Path) -> bool:
@@ -570,10 +565,8 @@ def _marker_armed(marker: Path) -> bool:
 
 def _stall_timeout_s(manifest: LaunchManifest) -> float | None:
     """The stall window in seconds, or None when stall detection is off."""
-    value = getattr(manifest, "stall_timeout_s", None)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if value <= 0:
+    value = manifest.stall_timeout_s
+    if value is None or value <= 0:
         return None
     return float(value)
 
