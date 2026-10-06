@@ -64,6 +64,7 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
                 "incomplete (exit 70)",
                 "protocol-mismatch", "ownership-uncertain",
                 "execution-timeout", "queue-timeout",
+                "post-test-stall",
                 "unsafe-path", "unknown command"):
         assert row in guide, row
     # Exit-code table: every documented code is present.
@@ -109,6 +110,23 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     assert "One test file (always runs it)" in guide
     assert "All tests under one folder" in guide
     assert "`ptest --full <folder>`" in guide
+
+
+def test_repository_guide_documents_post_test_stall():
+    guide = files("ptest").joinpath(
+        "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
+    assert "post-test-stall" in guide
+    flat = " ".join(guide.split())
+    assert "tests finished" in flat
+    assert "teardown/shutdown" in flat
+    assert "exit 70" in flat
+    assert "stack dump" in flat
+    assert "Rerun once alone" in flat
+    assert "never edit tests to dodge it" in flat
+    assert "[runner] stall_timeout" in flat
+    assert "default 120" in flat
+    assert "0 disables" in flat
+    assert len(guide.splitlines()) <= 100
 
 
 def test_shipped_guides_never_mention_repo_internal_workflow():

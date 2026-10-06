@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Post-test stall detection (pytest runner only): once the tests have
+  finished and the runner processes then stay CPU-idle for `[runner]
+  stall_timeout` seconds (default 120, `0` disables, otherwise 10..86400),
+  the run ends incomplete (exit 70) with the new `post-test-stall` problem
+  code instead of holding queue slots. Rerun once alone; report a repeat
+  with the stack dump. There is no CLI flag.
+- Stack dumps before guard kills: on a compound/attempt deadline kill or a
+  post-test stall, every Python process of the pytest run first writes
+  all-thread stacks; ptest prints them on stderr as `ptest: stack dumps
+  (<n> processes) — <reason>`, bounded and escaped, never in `--json` or
+  history. The agent guide names the `post-test-stall` row and the
+  `[runner] stall_timeout` key.
+
 ## 0.4.9
 
 - A ptest process that died mid-write left a hot SQLite rollback journal,

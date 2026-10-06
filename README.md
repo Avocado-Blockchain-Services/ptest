@@ -265,6 +265,7 @@ full_args = []
 test_roots = ["tests"]          # what --full runs: pytest testpaths, or every folder holding tests
 workers = 1
 lifecycle = "cooperative-process-group"
+# stall_timeout = 120  # pytest: end a run whose tests finished but whose processes stay idle; 0 disables
 
 [setup]                         # runs first when required paths are missing or the lockfile changed
 argv = ["uv", "sync", "--locked"]
@@ -322,6 +323,7 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | `passed · N tests` / `failed · …` | the verdict |
 | `next: ptest --full before handoff` | a changed-mode green; the gate is still to do |
 | `incomplete (exit 70)` + reason | ptest could not prove the result; rerun once, report if it repeats |
+| `post-test-stall: tests finished but runner processes stayed idle …` | tests finished, processes hung in teardown/shutdown (exit 70); stack dumps printed above — rerun once alone, report a repeat with the dump; lasting change: `[runner] stall_timeout` in `.ptest.toml` (default 120, `0` disables, `0` or `10..86400`, no CLI flag) |
 
 ### Exit codes
 
