@@ -127,6 +127,13 @@ MAX_COMPOUND_TIMEOUT_S = 86400.0
 COMPOUND_TIMEOUT_SAFETY_FACTOR = 3.0
 COMPOUND_TIMEOUT_PER_TEST_S = 0.50
 CANCEL_GRACE_S = 3.0
+DEFAULT_STALL_TIMEOUT_S = 120.0
+MIN_STALL_TIMEOUT_S = 10.0
+MAX_STALL_TIMEOUT_S = 86400.0
+STALL_DUMP_WAIT_S = 1.0
+STALL_MARKER_SUFFIX = ".done"
+STACK_DUMP_INFIX = ".stack-"
+STACK_DUMP_HEADER_PREFIX = "ptest stack dump: "
 SCHEDULER_POLL_S = 0.25
 CONTROL_FRAME_MAX_BYTES = 65536
 CONTROL_FRAME_MAX_NESTING = 16
@@ -167,6 +174,7 @@ REASON_CODES = frozenset({
     "probe-no-conflict-observed", "probe-conflict-observed",
     "parallel-workers",
     "config-uncommitted",
+    "post-test-stall",
 })
 
 FINDING_CODES = frozenset({
@@ -430,6 +438,7 @@ class RunnerConfig:
     lifecycle: str = "cooperative-process-group"
     timeout_s: float | None = field(default=None, repr=False)
     full_timeout_s: float | None = field(default=None, repr=False)
+    stall_timeout_s: float | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         kind = _check_enum("runner.kind", self.kind, RunnerKind)
@@ -449,6 +458,12 @@ class RunnerConfig:
             if value is not None:
                 object.__setattr__(self, field_name, _check_float(
                     f"runner.{field_name}", value, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
+        if self.stall_timeout_s is not None:
+            stall = _check_float("runner.stall_timeout_s", self.stall_timeout_s,
+                                 lo=0, hi=MAX_STALL_TIMEOUT_S)
+            if 0 < stall < MIN_STALL_TIMEOUT_S:
+                raise ValueError("runner.stall_timeout_s must be 0 or 10-86400")
+            object.__setattr__(self, "stall_timeout_s", stall)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1233,6 +1248,34 @@ class AttemptIdentity:
         if not re.fullmatch(r"[A-Za-z0-9_]+", self.resource_prefix):
             raise ValueError("attempt.resource_prefix must be [A-Za-z0-9_]+ within 54 ASCII")
         _check_int("attempt.worker_count", self.worker_count, lo=1, hi=64)
+
+
+def stall_marker_path(report_path: Path) -> Path:
+    """The post-test arm marker bound to one attempt's native report path.
+
+    The pytest bridge duplicates this rule (it imports no ptest code); the
+    guard and the dump printer derive it from here.
+    """
+    return Path(str(report_path) + STALL_MARKER_SUFFIX)
+
+
+def stack_dump_path(report_path: Path, pid: int) -> Path:
+    """One process's stack dump file bound to one attempt's report path."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("stack dump pid must be a positive int")
+    return Path(f"{report_path}{STACK_DUMP_INFIX}{pid}")
+
+
+def stack_dump_pid(report_name: str, name: str) -> int | None:
+    """The PID in ``name`` when it names a dump file of ``report_name``."""
+    prefix = report_name + STACK_DUMP_INFIX
+    if not name.startswith(prefix):
+        return None
+    digits = name[len(prefix):]
+    if (not 1 <= len(digits) <= 10 or not digits.isascii()
+            or not digits.isdigit() or digits[0] == "0"):
+        return None
+    return int(digits)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -2175,6 +2218,7 @@ class LaunchManifest:
     attempt_timeout_s: float | None = None
     compound_timeout_s: float | None = None
     compound_timeout_source: str | None = None
+    stall_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         if (not _is_int(self.protocol)
@@ -2211,6 +2255,10 @@ class LaunchManifest:
         if (self.compound_timeout_source is not None
                 and self.compound_timeout_source not in COMPOUND_TIMEOUT_SOURCES):
             raise ValueError("manifest.compound_timeout_source must be a known deadline source")
+        if self.stall_timeout_s is not None:
+            object.__setattr__(self, "stall_timeout_s", _check_float(
+                "manifest.stall_timeout_s", self.stall_timeout_s,
+                lo=0.1, hi=MAX_STALL_TIMEOUT_S))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -3938,6 +3986,7 @@ def _manifest_object(manifest: LaunchManifest) -> dict:
         "attempt_timeout_s": manifest.attempt_timeout_s,
         "compound_timeout_s": manifest.compound_timeout_s,
         "compound_timeout_source": manifest.compound_timeout_source,
+        "stall_timeout_s": manifest.stall_timeout_s,
     }
 
 
@@ -4086,7 +4135,8 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
     for key in obj:
         if key not in ("protocol", "domain", "grant", "setup", "attempts",
                        "attempt_ids", "setup_timeout_s", "attempt_timeout_s",
-                       "compound_timeout_s", "compound_timeout_source"):
+                       "compound_timeout_s", "compound_timeout_source",
+                       "stall_timeout_s"):
             raise _invalid("protocol-mismatch",
                            "manifest carries an unknown field")
     _check_nesting(obj, MANIFEST_MAX_NESTING)
@@ -4104,6 +4154,7 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
             attempt_timeout_s=obj.get("attempt_timeout_s"),
             compound_timeout_s=obj.get("compound_timeout_s"),
             compound_timeout_source=obj.get("compound_timeout_source"),
+            stall_timeout_s=obj.get("stall_timeout_s"),
         )
     except (KeyError, TypeError, ValueError):
         raise _invalid("protocol-mismatch",

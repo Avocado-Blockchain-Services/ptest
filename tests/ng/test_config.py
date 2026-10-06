@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from ptest.config import init_project, resolve_config
+from ptest.config import _serialize_fresh, init_project, resolve_config
+from ptest import contracts as C
 from ptest.contracts import InitOptions, Problem, RunnerKind, SelectionPolicy
 
 
@@ -1174,3 +1175,109 @@ def test_git_root_and_config_uncommitted_never_raise(tmp_path):
     assert config_api.git_root(wt) == wt
     assert config_api.git_root(main) == main
     assert config_api.config_uncommitted(main) is None
+
+
+# --- post-test-stall: [runner] stall_timeout --------------------------------
+
+def _write_stall_runner_config(root: Path, runner_extra: str = "") -> Path:
+    path = root / ".ptest.toml"
+    path.write_text(
+        "version = 1\n"
+        'project_id = "ab1234567890ab1234567890ab123456"\n'
+        "\n[runner]\n"
+        'kind = "command"\n'
+        'launcher = ["echo"]\n'
+        'args = ["hello"]\n'
+        + runner_extra +
+        "\n[resources]\n"
+        "locks = []\n"
+        "memory_mb_per_worker = 0\n"
+        'probe_isolation = "undeclared"\n'
+        "\n[selection]\n"
+        "enabled = false\n"
+        "closed_inputs = false\n"
+        "input_roots = []\n"
+        "ignored_inputs = []\n"
+        "environment = []\n"
+        "full_triggers = []\n"
+        "always = []\n"
+        "no_tests = []\n"
+        "non_input_outputs = []\n"
+        "full_ratio = 0.7\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _stall_config(**runner_overrides):
+    runner_fields = {
+        "kind": C.RunnerKind.COMMAND,
+        "launcher": ("echo",),
+        "args": ("hello",),
+        "full_args": (),
+        "test_roots": (),
+        "workers": 1,
+        "lifecycle": "cooperative-process-group",
+    }
+    runner_fields.update(runner_overrides)
+    return C.Config(
+        runner=C.RunnerConfig(**runner_fields),
+        setup=None,
+        resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
+        project_id="ab" * 16,
+    )
+
+
+def test_config_without_stall_timeout_leaves_it_unset(tmp_path):
+    _write_stall_runner_config(tmp_path)
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.runner.stall_timeout_s is None
+
+
+@pytest.mark.parametrize("value", ["0", "10", "10.5", "120", "86400"])
+def test_config_parses_valid_stall_timeout(tmp_path, value):
+    _write_stall_runner_config(tmp_path, f"stall_timeout = {value}\n")
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.runner.stall_timeout_s == float(value)
+
+
+@pytest.mark.parametrize("value", [
+    "-1", "5", "9.99", '"120"', "1e9", "true", "nan", "inf", "86400.5",
+])
+def test_config_rejects_invalid_stall_timeout(tmp_path, value):
+    _write_stall_runner_config(tmp_path, f"stall_timeout = {value}\n")
+    resolution = resolve_config(tmp_path)
+    assert resolution.config is None
+    assert resolution.problem is not None
+    assert resolution.problem.code == "invalid-config"
+
+
+def test_config_renders_stall_timeout_after_full_timeout_only_when_set():
+    without = _serialize_fresh(_stall_config()).decode("utf-8")
+    assert "stall_timeout" not in without
+    rendered = _serialize_fresh(
+        _stall_config(timeout_s=120, full_timeout_s=300,
+                      stall_timeout_s=60)).decode("utf-8")
+    assert "timeout = 120\nfull_timeout = 300\nstall_timeout = 60\n" in rendered
+    rendered_zero = _serialize_fresh(
+        _stall_config(stall_timeout_s=0)).decode("utf-8")
+    assert "stall_timeout = 0\n" in rendered_zero
+
+
+@pytest.mark.parametrize("value", [None, 0, 10.5, 120, 86400])
+def test_config_stall_timeout_render_round_trips(tmp_path, value):
+    kwargs = {} if value is None else {"stall_timeout_s": value}
+    text = _serialize_fresh(_stall_config(**kwargs)).decode("utf-8")
+    _write_stall_runner_config(tmp_path, "".join(
+        line + "\n" for line in text.splitlines()
+        if line.startswith("stall_timeout")))
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    expected = None if value is None else float(value)
+    assert resolution.config.runner.stall_timeout_s == expected
