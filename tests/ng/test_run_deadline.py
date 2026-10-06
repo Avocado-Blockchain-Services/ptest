@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -1058,3 +1059,137 @@ def test_execute_resets_deadline_after_launch_failure(case, monkeypatch):
     monkeypatch.setattr(operations, "_launch_guard", fail)
     operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
     assert operations._COMPOUND_TIMEOUT_S.get() == C.DEFAULT_COMPOUND_TIMEOUT_S
+
+
+# --- T4 post-test-stall operations -------------------------------------------
+
+
+def _stall_reason_code():
+    # Pre-T2-barrier the closed reason vocabulary maps the frozen code to
+    # unknown-input; after the barrier lands the frozen code survives.
+    return "post-test-stall" if "post-test-stall" in C.REASON_CODES else "unknown-input"
+
+
+def _stall_config(kind, value=None, present=True):
+    from types import SimpleNamespace
+    if present:
+        runner = SimpleNamespace(kind=kind, stall_timeout_s=value)
+    else:
+        runner = SimpleNamespace(kind=kind)
+    return SimpleNamespace(runner=runner)
+
+
+@pytest.mark.parametrize("kind", [C.RunnerKind.COMMAND, C.RunnerKind.VITEST])
+@pytest.mark.parametrize("value", [None, 30.0])
+def test_stall_timeout_s_is_none_for_non_pytest(kind, value):
+    assert operations._stall_timeout_s(_stall_config(kind, value)) is None
+
+
+def test_stall_timeout_s_absent_means_default_120():
+    assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, present=False)) == 120.0
+    assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, None)) == 120.0
+
+
+@pytest.mark.parametrize("value", [0, 0.0])
+def test_stall_timeout_s_zero_disables(value):
+    assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, value)) is None
+
+
+@pytest.mark.parametrize("value", [10.0, 10.5, 30.0, 120.0, 86400.0])
+def test_stall_timeout_s_passes_configured_value(value):
+    assert operations._stall_timeout_s(_stall_config(C.RunnerKind.PYTEST, value)) == value
+
+
+def _stall_problem():
+    return C.Problem(code="post-test-stall",
+                     message=("tests finished but runner processes stayed idle "
+                              "for 120s without exiting"),
+                     phase="guard", retryable=False)
+
+
+@pytest.mark.parametrize("raw", [None, 0, 1, 23, -15])
+def test_outcome_post_test_stall_is_incomplete_70_regardless_of_raw(raw):
+    assert operations._outcome(raw, None, _stall_problem(), True) == (
+        C.Status.INCOMPLETE, 70, "ptest", None)
+
+
+@pytest.mark.parametrize("incomplete", [True, False])
+def test_outcome_post_test_stall_with_cancellation_keeps_cancel_mapping(incomplete):
+    status, code, origin, number = operations._outcome(
+        None, signal.SIGINT, _stall_problem(), incomplete)
+    assert (code, origin, number) == (128 + signal.SIGINT, "signal", signal.SIGINT)
+    assert status is (C.Status.INCOMPLETE if incomplete else C.Status.CANCELLED)
+
+
+def test_stall_reason_suffix_names_dumps_only_when_printed():
+    assert operations._stall_reason_message("m", 0) == "m; rerun once alone, report a repeat"
+    assert operations._stall_reason_message("m", 2) == (
+        "m; stack dumps above; rerun once alone, report a repeat")
+
+
+def test_compound_killed_ignores_post_test_stall():
+    summary = {"status": "incomplete", "reasons": [
+        {"code": "post-test-stall",
+         "message": ("tests finished but runner processes stayed idle "
+                     "for 120s without exiting")}]}
+    assert history_api._compound_killed(summary) is False
+
+
+def test_launch_guard_manifest_carries_resolved_stall_timeout(case, monkeypatch):
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    from ptest.config import resolve_config as resolve
+    config = resolve(root).config
+    assert config is not None
+    monkeypatch.setattr(operations, "_stall_timeout_s", lambda _config: 30.0)
+    manifests = []
+    real_encode = C.encode_launch_manifest
+
+    def capture(manifest):
+        manifests.append(manifest)
+        return real_encode(manifest)
+
+    monkeypatch.setattr(C, "encode_launch_manifest", capture)
+    operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+    assert operations._STALL_TIMEOUT_S.get() is None
+    if "stall_timeout_s" in C.LaunchManifest.__dataclass_fields__:
+        assert [manifest.stall_timeout_s for manifest in manifests] == [30.0]
+    else:
+        assert all(not hasattr(manifest, "stall_timeout_s") for manifest in manifests)
+
+
+_GUARD_FAULTS = Path(__file__).parent / "fixtures" / "command" / "guard_faults.py"
+
+
+def _guard_fault_problem(monkeypatch, mode):
+    monkeypatch.setenv("TEST_GUARD_FAULT", mode)
+    monkeypatch.setattr(
+        operations, "_GUARD_SCRIPT",
+        f"exec(compile(open({_GUARD_FAULTS.as_posix()!r}).read(), 'guard_faults', 'exec'))")
+
+
+@pytest.mark.parametrize("raw, runner_code", [("0", 0), ("23", 23)])
+def test_post_test_stall_fault_is_incomplete_70_with_rerun_line(
+        case, monkeypatch, capsys, raw, runner_code):
+    # Real guard, injected post-test-stall facts: the native code never wins,
+    # the run is never promoted, and the reason line carries the rerun hint.
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    from ptest.config import resolve_config as resolve
+    config = resolve(root).config
+    assert config is not None
+    _guard_fault_problem(monkeypatch, f"problem:post-test-stall:{raw}")
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+    assert result.status is C.Status.INCOMPLETE
+    assert result.exit_code == 70
+    assert result.exit_origin == "ptest"
+    assert result.runner_exit_code == runner_code
+    assert result.full_gate_eligible is False
+    matches = [reason for reason in result.reasons
+               if reason.code == _stall_reason_code()]
+    assert len(matches) == 1
+    assert matches[0].message == (
+        "injected guard failure; rerun once alone, report a repeat")
+    assert "ptest: stack dumps" not in capsys.readouterr().err
+    payload = json.dumps(C.serialize_run_result(result))
+    assert "stack dump" not in payload
