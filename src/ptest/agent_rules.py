@@ -812,6 +812,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "a9aced45ed86ac1f390e6371aeb1dc8896c0214ef737baa04fc0dddfc5d7ede8",
     # 21b7712 (0.4.7 draft): child-skip rows, before the ptest release row.
     "f4faf6c682dc1052a5a2d98d661f2166210b339b5a5920060835e8cd54b608c4",
+    # 04d968c (0.4.8-0.4.9): guide before the post-test-stall row.
+    "874642905132b63140bff23f991399f5f008404463696a4680eb64bacf16af4e",
 })
 
 

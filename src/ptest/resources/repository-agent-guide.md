@@ -22,8 +22,7 @@ Run these commands exactly as shown: never add `--workers`, `--timeout` or `--qu
 
 ## Monorepo
 
-Always run from the monorepo root. Prefix scopes with the owning child, such
-as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
+Always run from the monorepo root. Prefix scopes with the owning child, such as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
 Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them. `ptest --full` skips a child whose own files, config, root `.ptest.toml` and `full_triggers` are unchanged since its last green, even after commits elsewhere, so a child whose tests read files outside its folder (a sibling's `<sibling>/openapi.json`, generated types) must list them in its `[selection] full_triggers`; `ptest -v` lists the inputs behind each skip. Qualified Vitest whole-suite runs can also reuse full results when native runtime bytes match; narrowed commands or uncertain configuration execute normally without reusable full proof.
 
 ## Reading ptest output
@@ -48,6 +47,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 | `incomplete (exit 70)`, `protocol-mismatch` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
 | `ownership-uncertain` | ptest could not prove that a run's processes are gone (a run started in another sandbox is judged by its lease lock only, which cannot see processes that run left behind) | Rerun once alone; if it repeats, find the stuck run with `ptest status --json` and run `ptest release <run_id>` (it refuses while anything is alive); if it refuses, report it — do not change code for it. |
 | `execution-timeout …` / `queue-timeout` | the run exceeded its time limit / waited out the queue limit | Do what the line says (rerun once unchanged, or report a fixed limit); report a repeat: the time limit is `[runner] timeout` / `full_timeout` in `.ptest.toml`; for the queue, name what the waiting line says holds it. |
+| `post-test-stall: tests finished but runner processes stayed idle …` | tests finished, processes hung in teardown/shutdown (exit 70); stack dumps printed above | Rerun once alone; if it repeats, report it with the stack dump — never edit tests to dodge it; lasting change is `[runner] stall_timeout` in `.ptest.toml` (seconds, default 120, 0 disables). |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
 | `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
 | `update available: X … run: ptest update` / `ptest X can improve this config … run ptest doctor --fix` | a newer ptest exists / this config predates it | Run `ptest update` (running jobs keep their version) / run `ptest doctor --fix`; then continue. If it says `installed from source`, tell the user. |

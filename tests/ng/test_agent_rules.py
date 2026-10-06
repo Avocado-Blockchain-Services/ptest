@@ -1268,3 +1268,38 @@ def test_replace_rejects_in_place_edit_before_publish(tmp_path, monkeypatch):
     leftovers = [name for name in os.listdir(tmp_path)
                  if name.startswith(".AGENTS.md.ptest-")]
     assert leftovers == []
+
+
+def test_released_3ab75e8_guide_upgrades_in_place(tmp_path):
+    """Twin: a repo holding the 0.4.9 guide upgrades cleanly.
+
+    Uses the real `_PREVIOUS_GUIDE_SHA256S` (no monkeypatch): the fixture
+    bytes must hash to the registered 87464290… digest, `_guide_kind`
+    must say "previous", and `apply` must rewrite it to the current
+    bytes. An edited copy still raises already-exists.
+    """
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+    from ptest.contracts import Problem
+
+    fixture = (Path(__file__).resolve().parent / "fixtures" / "previous-guides"
+               / "3ab75e8-ptest-agent.md")
+    old = fixture.read_bytes()
+    assert hashlib.sha256(old).hexdigest() == (
+        "874642905132b63140bff23f991399f5f008404463696a4680eb64bacf16af4e")
+    assert rules_module._guide_kind(
+        old.decode("utf-8"), rules_module._guide()) == "previous"
+
+    guide_dir = tmp_path / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+
+    result = apply(tmp_path)
+
+    assert result.changed is True
+    assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
+
+    (guide_dir / "ptest-agent.md").write_bytes(old + b"\n# user note\n")
+    with pytest.raises(Problem, match="already exists"):
+        apply(tmp_path)
