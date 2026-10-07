@@ -687,7 +687,24 @@ def test_dynamic_selected_routes_scoped_with_deselect(tmp_path, monkeypatch):
     assert request.deselect == ("tests/test_a.py::test_other",)
     assert request.changed_note == (
         "changed vs origin/dev (no green run yet): pkg/core.py → "
-        "3 tests in 1 of 8 files (dynamic · 1 function changed)")
+        "3 tests in 1 file of 8 files (dynamic · 1 function changed)")
+
+
+def test_dynamic_selected_singular_counts(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    single = _dynamic(files=("tests/test_a.py",),
+                      deselect=("tests/test_a.py::test_other",), tests=1,
+                      total=1,
+                      units=(("function", "pkg/core.py:boot", 1),))
+    _route_dynamic(monkeypatch, tmp_path.name, single)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    assert calls[0].changed_note == (
+        "changed vs origin/dev (no green run yet): pkg/core.py → "
+        "1 test in 1 file of 1 file (dynamic · 1 function changed)")
 
 
 def test_dynamic_none_with_reach_prints_reached_line(tmp_path, monkeypatch,
@@ -781,7 +798,7 @@ def test_dynamic_full_routes_full_with_dynamic_reason(tmp_path, monkeypatch):
 
 def test_dynamic_verbose_details_are_escaped(tmp_path, monkeypatch, capsys):
     _pytest_project(tmp_path, monkeypatch)
-    evil = _dynamic(details=("changed function evil\x1b[31m.py:boot → 1 tests",))
+    evil = _dynamic(details=("changed function evil\x1b[31m.py:boot → 1 test",))
     _route_dynamic(monkeypatch, tmp_path.name, evil)
     calls = _capture(monkeypatch)
 
@@ -789,7 +806,7 @@ def test_dynamic_verbose_details_are_escaped(tmp_path, monkeypatch, capsys):
 
     assert len(calls) == 1
     err = capsys.readouterr().err
-    assert "ptest: -v selection: changed function evil\\x1b[31m.py:boot → 1 tests" in err
+    assert "ptest: -v selection: changed function evil\\x1b[31m.py:boot → 1 test" in err
     assert "\x1b[31m" not in err
 
 

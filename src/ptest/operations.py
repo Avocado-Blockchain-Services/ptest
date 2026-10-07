@@ -4116,6 +4116,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 stack_dumps.cleanup(report_binding.path)
             except Exception:
                 pass
+            # Selection ingest files (deselect binding, dep files) get the
+            # same every-outcome guarantee: setup failure, pre-launch
+            # cancellation and early returns never reach _selection_after_run.
+            try:
+                _selection_engine().cleanup(report_binding.path)
+            except Exception:
+                pass
         if full_lease_claimed:
             history.release_full_lease(domain, checkout, run_id)
         for signum, handler in previous.items():

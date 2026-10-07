@@ -84,14 +84,29 @@ def _close_quietly(store) -> None:
 
 def _open_store(domain, project_id, *, create):
     """Open the selection store, or None when it is unavailable."""
+    store, _ = _open_store_reason(domain, project_id, create=create)
+    return store
+
+
+def _open_store_reason(domain, project_id, *, create):
+    """Open the selection store with its failure class.
+
+    Returns ``(store_or_None, never_created)``. ``never_created`` is
+    True only when the store module reports ``state-unavailable`` for a
+    store that was never created (a first run, an upgrade, or
+    ``dynamic`` newly enabled) as opposed to a genuinely broken store.
+    """
     try:
         store_mod = _store()
     except Exception:
-        return None
+        return None, False
     try:
-        return store_mod.open_store(domain, project_id, create=create)
-    except Exception:
-        return None
+        return store_mod.open_store(domain, project_id, create=create), False
+    except Exception as exc:
+        if getattr(exc, "code", None) == "state-unavailable" and str(
+                getattr(exc, "message", exc)).endswith("does not exist"):
+            return None, True
+        return None, False
 
 
 # --- static reasons (frozen, design 2.8) ------------------------------------
@@ -255,16 +270,17 @@ def _detail_lines(decision, meta) -> tuple[str, ...]:
     size = progress.format_store_bytes(getattr(meta, "size_bytes", 0))
     newest = getattr(meta, "newest_recorded_at", None)
     if isinstance(newest, (int, float)) and not isinstance(newest, bool):
-        age = progress.format_duration(max(0.0, time.time() - newest)) + " ago"
+        age = progress.format_duration(max(0.0, time.time() - newest))
     else:
         age = "unknown"
-    lines = [f"engine dynamic · {decision.recorded} tests recorded · "
+    lines = [f"engine dynamic · "
+             f"{C.plural(getattr(decision, 'recorded', 0), 'test')} recorded · "
              f"coverage {coverage} of test files · store {size} · "
              f"newest {age} ago"]
     for unit in list(getattr(decision, "units", ()) or [])[:20]:
         lines.append(f"changed {getattr(unit, 'kind', '?')} "
                      f"{getattr(unit, 'label', '?')} → "
-                     f"{getattr(unit, 'tests', 0)} tests")
+                     f"{C.plural(getattr(unit, 'tests', 0), 'test')}")
     rest_units = len(getattr(decision, "units", ()) or ()) - 20
     if rest_units > 0:
         lines.append(f"… +{rest_units} more changed units")
@@ -398,9 +414,13 @@ def _refine(domain, top, project_root, config: C.Config,
         key = None
     if key is None:
         return _static_fallback(static, _NO_RECORDS)
-    store = _open_store(domain, config.project_id, create=False)
+    store, never_created = _open_store_reason(
+        domain, config.project_id, create=False)
     if store is None:
-        return _static_fallback(static, _STORE_DOWN)
+        # A store that was never created is the empty-store case from
+        # spec 6.6, not a broken store.
+        return _static_fallback(
+            static, _NO_RECORDS if never_created else _STORE_DOWN)
     try:
         return _refine_with_store(store, key, project_root, config,
                                   repo_changed, static)
@@ -617,6 +637,28 @@ def _prepare_run(domain, config: C.Config, request, report_path,
     return (tuple(env), binding)
 
 
+# --- cleanup (operations seam) ------------------------------------------------
+
+def cleanup(report_path) -> None:
+    """Delete one attempt's private ingest files. Never raises.
+
+    Operations calls this in ``execute()``'s outer ``finally`` (next to
+    ``stack_dumps.cleanup``) so bindings and dependency files are
+    removed on every outcome — including setup failure, pre-launch
+    cancellation and paths that never reach ``after_run``.
+    """
+    try:
+        ingest = _ingest()
+    except Exception:
+        return
+    if report_path is None:
+        return
+    try:
+        ingest.cleanup(Path(report_path))
+    except Exception:
+        pass
+
+
 # --- after_run (operations seam) ----------------------------------------------
 
 def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
@@ -660,46 +702,71 @@ def _after_run(*, domain, config, project_id, run_id, report_path,
             progress.emit(progress.format_selection_not_recorded(
                 "dependency ingest is unavailable"), quiet=quiet)
         return
+    # Private ingest files are owned by operations' outer finally
+    # (engine.cleanup, next to stack_dumps.cleanup), so every outcome —
+    # including ones that never reach here — removes them.
+    if cancelled:
+        if verbose:
+            progress.emit(progress.format_selection_not_recorded(
+                "the run was cancelled"), quiet=quiet)
+        return
     try:
-        if cancelled:
-            if verbose:
-                progress.emit(progress.format_selection_not_recorded(
-                    "the run was cancelled"), quiet=quiet)
-            return
-        try:
-            run = ingest.read_run(Path(report_path), run_id=run_id,
-                                  expected_workers=int(expected_workers))
-        except Exception:
-            run = None
-        if run is None:
-            _fallbacks(None, domain, config, project_id, argv_files,
-                       verbose, quiet,
-                       reason="dependency files are unavailable")
-            return
-        try:
-            key = _source_key(domain)
-        except Exception:
-            key = None
-        ingestible = (bool(valid_handoff) and bool(unchanged_inputs)
-                      and not guard_failed and not setup_failed
-                      and bool(getattr(run, "complete", False))
-                      and bool(getattr(run, "recording", False))
-                      and key is not None)
-        if ingestible:
-            _ingest_run(run, domain, config, project_id, run_id, key,
-                        project_root, execution, expected_workers,
-                        verbose, quiet)
-        else:
-            _fallbacks(run, domain, config, project_id, argv_files,
-                       verbose, quiet,
-                       reason=_not_recorded_reason(
-                           valid_handoff, unchanged_inputs, guard_failed,
-                           setup_failed, run, key))
+        run = ingest.read_run(Path(report_path), run_id=run_id,
+                              expected_workers=int(expected_workers))
+    except Exception:
+        run = None
+    if run is None:
+        _fallbacks(None, domain, config, project_id, argv_files,
+                   verbose, quiet,
+                   reason="dependency files are unavailable")
+        return
+    if not getattr(run, "recording", False):
+        _note_inactive(domain, project_id, run)
+    try:
+        key = _source_key(domain)
+    except Exception:
+        key = None
+    ingestible = (bool(valid_handoff) and bool(unchanged_inputs)
+                  and not guard_failed and not setup_failed
+                  and bool(getattr(run, "complete", False))
+                  and bool(getattr(run, "recording", False))
+                  and key is not None)
+    if ingestible:
+        _ingest_run(run, domain, config, project_id, run_id, key,
+                    project_root, execution, expected_workers,
+                    verbose, quiet)
+    else:
+        _fallbacks(run, domain, config, project_id, argv_files,
+                   verbose, quiet,
+                   reason=_not_recorded_reason(
+                       valid_handoff, unchanged_inputs, guard_failed,
+                       setup_failed, run, key))
+
+
+def _note_inactive(domain, project_id, run) -> None:
+    """Persist a bridge inactivity report for future static reasons.
+
+    ``store.meta`` is the only source for the ``test Python 3.N ...``
+    and ``recording was unavailable: ...`` reasons; without this write
+    they could never print. Status-only: never writes dependency
+    records and never raises.
+    """
+    inactive = getattr(run, "inactive_reason", None)
+    python = getattr(run, "python", None)
+    if inactive is None and python is None:
+        return
+    try:
+        store = _open_store(domain, project_id, create=True)
+    except Exception:
+        return
+    if store is None:
+        return
+    try:
+        store.note_inactive(inactive, python)
+    except Exception:
+        pass
     finally:
-        try:
-            ingest.cleanup(Path(report_path))
-        except Exception:
-            pass
+        _close_quietly(store)
 
 
 def _not_recorded_reason(valid_handoff: bool, unchanged_inputs: bool,
@@ -839,6 +906,11 @@ def _ingest_run(run, domain, config, project_id, run_id, key,
                          full=str(execution) == "full")
         except Exception:
             return
+        try:
+            # Recording worked: any remembered inactivity is stale.
+            store.note_inactive(None, None)
+        except Exception:
+            pass
         if verbose:
             count = len(getattr(run, "nodes", None) or {})
             progress.emit(progress.format_selection_recorded(

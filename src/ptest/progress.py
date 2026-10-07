@@ -470,19 +470,20 @@ def format_workers_cap(workers: int, project_workers: int) -> str:
 
 def summarize_units(units) -> str:
     """Join changed-unit counts in design 2.8 order for the start line."""
-    words = (("function", "function"), ("name", "name"),
-             ("module", "module"), ("data", "data file"),
-             ("file", "test file"),
-             ("unrecorded", "unrecorded test file"))
+    words = (("function", "function", " changed"), ("name", "name", " changed"),
+             ("module", "module", " changed"),
+             ("data", "data file", " changed"),
+             ("file", "test file", " changed"),
+             ("unrecorded", "unrecorded test file", ""))
     counts: dict = {}
     for unit in units or ():
         kind = getattr(unit, "kind", None)
         counts[kind] = counts.get(kind, 0) + 1
     parts = []
-    for kind, word in words:
+    for kind, word, suffix in words:
         count = counts.get(kind, 0)
         if count:
-            parts.append(f"{C.plural(count, word)} changed")
+            parts.append(f"{C.plural(count, word)}{suffix}")
     return ", ".join(parts) if parts else "dependencies changed"
 
 
@@ -510,7 +511,7 @@ def format_selection_store(declaration: str | None, nodes: int,
     head = ("selection store" if not declaration
             else f"selection store {declaration}")
     age = ("unknown" if newest_age_s is None
-           else format_duration(max(0.0, newest_age_s)) + " ago")
+           else format_duration(max(0.0, newest_age_s)))
     return (f"{head}: {C.plural(int(nodes), 'test')} recorded · "
             f"{_format_store_bytes(size_bytes)} · newest {age} ago")
 
@@ -522,15 +523,27 @@ def format_selection_audit(misses: int) -> str:
             f"change statically reaches them")
 
 
+def _plural_miss(misses: int) -> str:
+    """``1 miss`` / ``N misses`` (``C.plural`` only handles y-plurals)."""
+    return f"{misses} miss" if misses == 1 else f"{misses} misses"
+
+
+def _plural_process(processes: int) -> str:
+    """``1 process`` / ``N processes`` (``C.plural`` only handles y-plurals)."""
+    return f"{processes} process" if processes == 1 else \
+        f"{processes} processes"
+
+
 def format_selection_vaudit(checked: int, misses: int) -> str:
     """The ``-v`` self-audit summary, printed even with no misses."""
-    return (f"ptest: -v selection audit: {checked} failing tests "
-            f"checked · {misses} misses")
+    return (f"ptest: -v selection audit: {C.plural(checked, 'failing test')} "
+            f"checked · {_plural_miss(misses)}")
 
 
 def format_selection_recorded(tests: int, processes: int) -> str:
     """The ``-v`` line for a run whose dependencies were recorded."""
-    return f"ptest: -v selection: recorded {tests} tests from {processes} processes"
+    return (f"ptest: -v selection: recorded {C.plural(tests, 'test')} "
+            f"from {_plural_process(processes)}")
 
 
 def format_selection_not_recorded(reason: str) -> str:

@@ -1590,8 +1590,12 @@ def _selection_env(monkeypatch, **overrides):
     def after_run(**kwargs):
         calls["after"] = kwargs
 
+    def cleanup(report_path):
+        calls.setdefault("cleanup", []).append(report_path)
+
     fake.prepare_run = prepare_run
     fake.after_run = after_run
+    fake.cleanup = cleanup
     monkeypatch.setattr("ptest.operations._selection_engine", lambda: fake)
     return calls
 
@@ -1616,7 +1620,7 @@ def _pytest_selection_config(root, **policy):
     return replace(config, selection=C.SelectionPolicy(**fields))
 
 
-def test_selection_record_env_matrix(case):
+def test_selection_record_env_matrix(case, tmp_path):
     """D9 through the real engine: record env exactly for pytest runs
     with selection enabled and dynamic on; silent otherwise."""
     import types
@@ -1625,7 +1629,8 @@ def test_selection_record_env_matrix(case):
 
     domain = case.domain()
     root = _git_pytest_project(case, domain)
-    report = Path(root) / "native-a001.json"
+    # Outside the project root so a merged-tree binding leaves no litter.
+    report = tmp_path / "native-a001.json"
     scoped = C.RunRequest(mode=C.Mode.SCOPED,
                           argv=("tests/test_native.py",))
 
@@ -1637,15 +1642,25 @@ def test_selection_record_env_matrix(case):
     env, binding = run(_pytest_selection_config(root), scoped)
     assert (C.SELECTION_RECORD_ENV, "1") in env
     assert binding is None
-    # Deselect without an ingest module still records, but binds nothing:
-    # every test in the argv files runs.
+    # D7: a scoped request with deselect binds exactly when the ingest
+    # module exists; without it nothing binds and every test in the
+    # argv files runs.
     env, binding = run(
         _pytest_selection_config(root),
         C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",),
                      deselect=("tests/test_native.py::test_body",)))
     assert (C.SELECTION_RECORD_ENV, "1") in env
-    assert binding is None
-    assert C.SELECTION_DESELECT_ENV not in dict(env)
+    try:
+        from ptest import selection_ingest as ingest_mod
+    except ImportError:
+        ingest_mod = None
+    if ingest_mod is None:
+        assert binding is None
+        assert C.SELECTION_DESELECT_ENV not in dict(env)
+    else:
+        assert binding == C.selection_deselect_path(report)
+        assert dict(env)[C.SELECTION_DESELECT_ENV] == str(binding)
+        assert binding.is_file()
 
     silent = [
         _pytest_selection_config(root, dynamic=False),
@@ -1728,6 +1743,40 @@ def test_basic_pytest_scoped_pass_with_deselect_records_no_proof(case):
     assert result.source_valid is False
     view = history.read_history(domain, checkout)
     assert view.baseline is None
+
+
+def _failing_setup_project(case, domain):
+    """Pytest project whose setup command exits nonzero."""
+    root = _pytest_project(case, domain)
+    (root / "setup.py").write_text("raise SystemExit(1)\n",
+                                   encoding="utf-8")
+    config_path = root / ".ptest.toml"
+    config_path.write_text(config_path.read_text(encoding="utf-8") + (
+        "[setup]\n"
+        f"argv = {json.dumps([sys.executable, 'setup.py'])}\n"
+        'required_paths = ["node_modules"]\n'
+        "network = false\n"
+        "lifecycle_scripts = false\n"), encoding="utf-8")
+    return root
+
+
+def test_selection_ingest_cleanup_runs_on_setup_failure(case, monkeypatch):
+    """The leak path: a setup failure skips _selection_after_run, but
+    execute()'s outer finally still removes the ingest files (the
+    stack_dumps.cleanup precedent)."""
+    domain = case.domain()
+    root = _failing_setup_project(case, domain)
+    config = config_api.resolve_config(root).config
+    calls = _selection_env(monkeypatch)
+
+    result = operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.FULL, argv=()))
+
+    assert "after" not in calls
+    assert len(calls.get("cleanup", [])) == 1
+    assert str(calls["cleanup"][0]).endswith(".json")
+    assert result.status is not C.Status.PASSED
 
 
 def test_selection_after_run_receives_ingest_flags(case, monkeypatch):

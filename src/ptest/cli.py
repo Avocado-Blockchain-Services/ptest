@@ -3063,8 +3063,9 @@ def _impact_note(impact, label: str, *, reference: str) -> str:
         if impact.kind == "selected":
             summary = progress.summarize_units(getattr(impact, "units", ()))
             files = tuple(getattr(impact, "files", ()) or ())
-            return (f"{head} → {getattr(impact, 'tests', 0)} tests in "
-                    f"{len(files)} of {getattr(impact, 'total', 0)} files "
+            return (f"{head} → {C.plural(getattr(impact, 'tests', 0), 'test')} "
+                    f"in {C.plural(len(files), 'file')} "
+                    f"of {C.plural(getattr(impact, 'total', 0), 'file')} "
                     f"(dynamic · {summary})")
         if impact.kind == "none":
             reached = int(getattr(impact, "reached", 0) or 0)

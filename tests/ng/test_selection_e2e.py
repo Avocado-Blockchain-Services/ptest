@@ -1,12 +1,18 @@
 """Readiness-gated CLI end-to-end selection tests (T5).
 
 Integration boundary: subprocess CLI (``case.invoke``, the
-``test_pytest_scoped_subprocess`` pattern) on an inline tmp git
-project, with a fixture domain and real pytest through the bridge.
-Each test records dependencies with a green ``--full`` run, edits one
-thing, then asserts the ``--changed`` (or ``--base``) run's note and
-the exact set of executed tests (each test appends its name to
-``ran.txt``).
+``test_pytest_scoped_subprocess`` pattern: ``case.project`` inside the
+fixture domain) on an inline tmp git project, with a fixture domain
+and real pytest through the bridge. Each test records dependencies
+with a green ``--full`` run, edits one thing, then asserts the
+``--changed`` (or ``--base``) run's note and the exact set of
+executed tests (each test appends its name to ``ran.txt``).
+
+The seven recorded tests live in three test files on purpose: with a
+single test file every narrowing selection would trip the D8
+``full_ratio`` file conversion (``1 of 1 test files``) and no
+narrowing case could be demonstrated. Grouped files still exercise
+node-level deselect inside partially selected files.
 
 Every case needs the merged T1-T4 modules
 (``ptest.source_index``, ``ptest.selection_planner``,
@@ -20,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -60,15 +67,15 @@ def checked(name):
     return getattr(core, name)(1)
 """
 
-_TESTS = """\
-import json
-import pkg.core as core
-from helpers import helper_alpha
-
-
+_MARK = """\
 def _mark(name):
     with open("ran.txt", "a") as fh:
         fh.write(name + "\\n")
+
+"""
+
+_TEST_CORE = """\
+import pkg.core as core
 
 
 def test_alpha():
@@ -79,6 +86,10 @@ def test_alpha():
 def test_beta():
     _mark("beta")
     assert core.beta(2) == 4
+"""
+
+_TEST_LIMIT = """\
+import pkg.core as core
 
 
 def test_limit():
@@ -89,11 +100,17 @@ def test_limit():
 def test_glimit():
     _mark("glimit")
     assert getattr(core, "LIMIT") == 3
+"""
+
+_TEST_MISC = """\
+import json
+import pkg.core as core
+from helpers import helper_alpha
 
 
 def test_data():
     _mark("data")
-    assert json.load(open("data/config.json"))["mode"] == "fast"
+    assert json.load(open("tests/data/config.json"))["mode"] == "fast"
 
 
 def test_helper():
@@ -115,17 +132,29 @@ def helper_alpha(n):
 _ALL = {"alpha", "beta", "limit", "glimit", "data", "helper", "checked"}
 
 
-def _write_project(root: Path, project_id: str) -> None:
+def _make_project(case, domain) -> Path:
+    """Inline git project inside the fixture domain (containment rule).
+
+    ``case.project`` creates the root under ``domain.root`` so the
+    scheduler's fixture-containment check passes; the command-kind stub
+    config is then replaced with the pytest selection project.
+    """
+    root = case.project(domain, kind="pytest")
+    project_id = tomllib.loads(
+        (root / ".ptest.toml").read_text())["project_id"]
     (root / "pkg").mkdir(parents=True, exist_ok=True)
     (root / "tests").mkdir(exist_ok=True)
-    (root / "data").mkdir(exist_ok=True)
+    (root / "tests" / "data").mkdir(exist_ok=True)
     (root / "pkg" / "__init__.py").write_text("")
     (root / ".gitignore").write_text(
-        "__pycache__/\n.pytest_cache/\nran.txt\n")
+        "__pycache__/\n.pytest_cache/\nran.txt\nptest-result-*.json\n")
     (root / "pkg" / "core.py").write_text(_CORE)
-    (root / "data" / "config.json").write_text('{"mode": "fast"}\n')
+    (root / "tests" / "data" / "config.json").write_text(
+        '{"mode": "fast"}\n')
     (root / "tests" / "helpers.py").write_text(_HELPERS)
-    (root / "tests" / "test_core.py").write_text(_TESTS)
+    (root / "tests" / "test_core.py").write_text(_MARK + _TEST_CORE)
+    (root / "tests" / "test_limit.py").write_text(_MARK + _TEST_LIMIT)
+    (root / "tests" / "test_misc.py").write_text(_MARK + _TEST_MISC)
     (root / ".ptest.toml").write_text(
         "version = 1\n"
         f'project_id = "{project_id}"\n'
@@ -139,16 +168,15 @@ def _write_project(root: Path, project_id: str) -> None:
         'lifecycle = "cooperative-process-group"\n'
         "\n[selection]\n"
         "enabled = true\n")
+    support.init_git_repo(root, message="base")
+    return root
 
 
 @pytest.fixture
-def recorded(case, tmp_path):
+def recorded(case):
     """Git project with a green full run (dependencies recorded)."""
     domain = case.domain()
-    root = tmp_path / "proj"
-    root.mkdir(parents=True, exist_ok=True)
-    _write_project(root, "ab" * 16)
-    support.init_git_repo(root, message="base")
+    root = _make_project(case, domain)
     full = case.invoke(domain, root, "--full", timeout=_FULL_TIMEOUT)
     assert full.code == 0, full.stderr.decode()[-2000:]
     assert _markers(root) == _ALL
@@ -178,7 +206,10 @@ def test_edit_function_body_runs_only_its_tests(recorded, case):
 
     assert result.code == 0, err[-2000:]
     assert "(dynamic · 1 function changed)" in err
-    assert _markers(root) == {"alpha"}
+    # Node-level reach through recorded calls: the direct test plus the
+    # transitive callers (helpers.helper_alpha, checked() by name). The
+    # other four tests stay out; same-file test_beta is deselected.
+    assert _markers(root) == {"alpha", "helper", "checked"}
 
 
 def test_edit_constant_runs_referencing_tests(recorded, case):
@@ -200,21 +231,27 @@ def test_effectful_change_selects_static_reach(recorded, case):
     (root / "pkg" / "core.py").write_text(
         _CORE + "\nprint('effect-marker')\n")
 
-    result, err = _changed(case, domain, root)
+    result, err = _changed(case, domain, root, "-v")
 
+    # A module-level effect taints every record stale, so the dynamic
+    # decision selects all recorded tests and D8 converts to full. The
+    # -v unit line proves the effectful-module mechanism behind it.
     assert result.code == 0, err[-2000:]
-    assert "(dynamic · 1 module changed)" in err
+    assert ("→ full suite: 7 of 7 recorded tests reach "
+            "full_ratio 0.7 (dynamic)") in err
+    assert "changed module pkg/core.py" in err
     assert _markers(root) == _ALL
 
 
-def test_empty_store_reports_static_note(case, tmp_path):
+def test_empty_store_reports_static_note(case):
     domain = case.domain()
-    root = tmp_path / "fresh"
-    root.mkdir(parents=True, exist_ok=True)
-    _write_project(root, "cd" * 16)
-    support.init_git_repo(root, message="base")
-    (root / "pkg" / "core.py").write_text(
-        _CORE.replace("return n + 1", "return 1 + n"))
+    root = _make_project(case, domain)
+    # A test-file edit keeps the static verdict a selection (not a
+    # full-suite verdict, which carries no static reason): with no
+    # store the note names the empty-store reason.
+    (root / "tests" / "test_core.py").write_text(
+        (_MARK + _TEST_CORE).replace("assert core.alpha(1) == 2",
+                                     "assert core.alpha(1) == 1 + 1"))
 
     result, err = _changed(case, domain, root)
 
@@ -223,8 +260,7 @@ def test_empty_store_reports_static_note(case, tmp_path):
             in err)
 
 
-def test_second_worktree_reports_no_tests_affected(recorded, case,
-                                                   tmp_path):
+def test_second_worktree_reports_no_tests_affected(recorded, case):
     domain, root = recorded
     (root / "pkg" / "core.py").write_text(
         _CORE.replace("return n + 1", "return 1 + n"))
@@ -235,7 +271,7 @@ def test_second_worktree_reports_no_tests_affected(recorded, case,
     assert rerun.code == 0, rerun.stderr.decode()[-2000:]
     (root / "ran.txt").unlink()
 
-    other = tmp_path / "wt2"
+    other = domain.root / "wt2"
     support.git(root, "worktree", "add", str(other), "HEAD")
     try:
         result = case.invoke(domain, other, "--changed", "--base", base,
@@ -287,8 +323,8 @@ def test_self_audit_miss_demotes_then_selects(recorded, case):
 def test_edit_single_test_function_deselects_rest(recorded, case):
     domain, root = recorded
     (root / "tests" / "test_core.py").write_text(
-        _TESTS.replace("assert core.alpha(1) == 2",
-                       "assert core.alpha(1) == 1 + 1"))
+        (_MARK + _TEST_CORE).replace("assert core.alpha(1) == 2",
+                                     "assert core.alpha(1) == 1 + 1"))
 
     result, err = _changed(case, domain, root)
 
@@ -299,7 +335,10 @@ def test_edit_single_test_function_deselects_rest(recorded, case):
 
 def test_edit_data_file_runs_only_reader(recorded, case):
     domain, root = recorded
-    (root / "data" / "config.json").write_text('{"mode": "fast" }\n')
+    # Under a test root so the change stays inside the code area
+    # (impact drops data files where no test could reach them).
+    (root / "tests" / "data" / "config.json").write_text(
+        '{"mode": "fast" }\n')
 
     result, err = _changed(case, domain, root)
 

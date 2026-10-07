@@ -549,6 +549,45 @@ def test_dynamic_details_carry_v_lines(fakes, tmp_path):
         out2.details
 
 
+def test_dynamic_details_use_singular_counts(fakes, tmp_path):
+    units = (C.ChangedUnit(kind="function", label="pkg/core.py:boot",
+                           tests=1),)
+    fakes.planner_mod._decision = _decision(
+        files=("tests/test_a.py",), selected=1, recorded=3, units=units)
+    out = fakes.engine.refine(None, None, tmp_path, _config(), (),
+                              _static_ok())
+    assert out.kind == "selected"
+    assert out.details[0].startswith("engine dynamic · 3 tests recorded · ")
+    assert "changed function pkg/core.py:boot → 1 test" in out.details
+
+
+def test_progress_selection_formats_use_singular_and_plural():
+    from ptest import progress
+
+    assert progress.format_selection_store(None, 12, 2048, 5.0) == (
+        "selection store: 12 tests recorded · 2.0 KB · newest 5.0s ago")
+    assert progress.format_selection_store(None, 1, 4, 1.0) == (
+        "selection store: 1 test recorded · 4 B · newest 1.0s ago")
+    assert progress.format_selection_recorded(1, 1) == (
+        "ptest: -v selection: recorded 1 test from 1 process")
+    assert progress.format_selection_recorded(7, 2) == (
+        "ptest: -v selection: recorded 7 tests from 2 processes")
+    assert progress.format_selection_vaudit(1, 1) == (
+        "ptest: -v selection audit: 1 failing test checked · 1 miss")
+    assert progress.format_selection_vaudit(0, 2) == (
+        "ptest: -v selection audit: 0 failing tests checked · 2 misses")
+
+    def unit(kind):
+        return types.SimpleNamespace(kind=kind, label=kind, tests=1)
+
+    assert progress.summarize_units(
+        [unit("function"), unit("unrecorded")]) == (
+        "1 function changed, 1 unrecorded test file")
+    assert progress.summarize_units(
+        [unit("unrecorded"), unit("unrecorded")]) == (
+        "2 unrecorded test files")
+
+
 def test_dynamic_summary_counts_units_by_kind(fakes, tmp_path):
     units = (C.ChangedUnit(kind="function", label="a", tests=1),
              C.ChangedUnit(kind="function", label="b", tests=1),
@@ -816,12 +855,30 @@ def _kinds(calls):
     return [call[0] for call in calls]
 
 
-def test_after_run_valid_scoped_updates_and_cleans_up(fakes, tmp_path):
+def test_cleanup_removes_ingest_files(fakes, tmp_path):
+    report = Path(tmp_path) / "native-a001.json"
+    fakes.engine.cleanup(report)
+    assert fakes.ingest_mod.cleaned == [report]
+
+
+def test_cleanup_without_ingest_or_report_never_raises(fakes, tmp_path,
+                                                       monkeypatch):
+    fakes.engine.cleanup(None)
+    assert fakes.ingest_mod.cleaned == []
+    monkeypatch.setattr(fakes.engine, "_ingest",
+                        lambda: (_ for _ in ()).throw(ImportError("gone")))
+    fakes.engine.cleanup(Path(tmp_path) / "native-a001.json")
+
+
+def test_after_run_valid_scoped_updates_without_cleaning_up(
+        fakes, tmp_path):
+    # Ingest-file cleanup is owned by operations' outer finally
+    # (engine.cleanup), not by after_run.
     fakes.ingest_mod._run = _run_deps(
         nodes=[("tests/test_a.py::test_x", "passed")])
     _after(fakes, tmp_path)
     assert ("update", "cd" * 16) in fakes.store.calls
-    assert fakes.ingest_mod.cleaned == [Path(tmp_path) / "native-a001.json"]
+    assert fakes.ingest_mod.cleaned == []
     assert "mark_outcomes" not in _kinds(fakes.store.calls)
     assert "invalidate" not in _kinds(fakes.store.calls)
 
@@ -833,7 +890,7 @@ def test_after_run_valid_scoped_verbose_reports_recorded(fakes, tmp_path,
                ("tests/test_a.py::test_y", "passed")])
     _after(fakes, tmp_path, verbose=True)
     err = capsys.readouterr().err
-    assert "ptest: -v selection: recorded 2 tests from 1 processes" in err
+    assert "ptest: -v selection: recorded 2 tests from 1 process" in err
 
 
 def test_after_run_cancelled_writes_nothing(fakes, tmp_path, capsys):
@@ -841,7 +898,7 @@ def test_after_run_cancelled_writes_nothing(fakes, tmp_path, capsys):
         nodes=[("tests/test_a.py::test_x", "failed")])
     _after(fakes, tmp_path, cancelled=True, verbose=True)
     assert fakes.store.calls == []
-    assert fakes.ingest_mod.cleaned == [Path(tmp_path) / "native-a001.json"]
+    assert fakes.ingest_mod.cleaned == []
     assert "not recorded" in capsys.readouterr().err
 
 
@@ -896,15 +953,55 @@ def test_after_run_incomplete_run_invalidates_full(fakes, tmp_path):
     assert ("update", "cd" * 16) not in fakes.store.calls
 
 
-def test_after_run_recording_disabled_cleans_up_only(fakes, tmp_path,
-                                                     capsys):
-    fakes.ingest_mod._run = _run_deps(recording=False,
-                                     inactive="Python 3.11 has no sys.monitoring",
-                                     nodes=[])
+def test_after_run_recording_disabled_notes_inactive(fakes, tmp_path,
+                                                       capsys):
+    # The bridge inactivity report is persisted so the frozen
+    # ``test Python 3.N ...`` / ``recording was unavailable: ...``
+    # static reasons can print on later runs. Cleanup is owned by
+    # operations' outer finally, not by after_run.
+    fakes.ingest_mod._run = _run_deps(
+        recording=False, inactive="Python 3.11 has no sys.monitoring",
+        python=(3, 11), nodes=[])
     _after(fakes, tmp_path, verbose=True)
     assert ("update", "cd" * 16) not in fakes.store.calls
-    assert fakes.ingest_mod.cleaned != []
+    assert ("note_inactive", "Python 3.11 has no sys.monitoring",
+            (3, 11)) in fakes.store.calls
+    assert fakes.ingest_mod.cleaned == []
     assert "not recorded" in capsys.readouterr().err
+
+
+def test_after_run_success_clears_stale_inactive(fakes, tmp_path):
+    fakes.ingest_mod._run = _run_deps(
+        nodes=[("tests/test_a.py::test_x", "passed")])
+    _after(fakes, tmp_path)
+    assert ("update", "cd" * 16) in fakes.store.calls
+    assert ("note_inactive", None, None) in fakes.store.calls
+
+
+def test_missing_store_means_no_records_yet(fakes, tmp_path, monkeypatch):
+    def missing(domain, project_id, *, create):
+        raise C.Problem(code="state-unavailable",
+                        message="selection store does not exist",
+                        phase="test")
+
+    monkeypatch.setattr(fakes.store_mod, "open_store", missing)
+    out = fakes.engine.refine(None, None, tmp_path, _config(), (),
+                              _static_ok())
+    assert out.static_reason == \
+        "no dependency records yet — any run records them"
+    assert out.kind == "selected"
+
+
+def test_broken_store_means_store_unavailable(fakes, tmp_path, monkeypatch):
+    def broken(domain, project_id, *, create):
+        raise C.Problem(code="coordinator-corrupt",
+                        message="selection store has an unknown schema",
+                        phase="test")
+
+    monkeypatch.setattr(fakes.store_mod, "open_store", broken)
+    out = fakes.engine.refine(None, None, tmp_path, _config(), (),
+                              _static_ok())
+    assert out.static_reason == "dependency store unavailable"
 
 
 def test_after_run_never_raises(fakes, tmp_path, monkeypatch, capsys):
@@ -965,7 +1062,7 @@ def test_self_audit_verbose_summary_without_misses(fakes, tmp_path, capsys):
     _after(fakes, tmp_path, execution="full", argv_files=None, verbose=True)
     err = capsys.readouterr().err
     assert "ptest: selection audit:" not in err
-    assert "ptest: -v selection audit: 1 failing tests checked · 0 misses" \
+    assert "ptest: -v selection audit: 1 failing test checked · 0 misses" \
         in err
     assert ("record_audit", 1, 0) in fakes.store.calls
 
