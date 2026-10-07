@@ -1,0 +1,849 @@
+"""Pure-logic unit tests for scripts/selection_eval.py (spec 6.7).
+
+Only deterministic logic is covered here: sampling, mutation operators,
+ground-truth choice, miss classification, flake marking and report
+rendering. The A1-A5 campaign itself is never executed in this task.
+"""
+from __future__ import annotations
+
+import ast
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location(
+        "selection_eval", SCRIPTS / "selection_eval.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+se = _load()
+
+
+FUNCS_PY = '''\
+VALUE = 41
+
+CONSTANT = "hello"
+
+import os
+import sys as system
+
+from pkg.mod import alpha, beta
+
+
+def add(first, second=True, count=3):
+    """Add things."""
+    total = first + second
+    if total == count and total != 0:
+        return total
+    return -1
+
+
+class Widget:
+    KIND = "gadget"
+
+    def __init__(self, size=10):
+        self.size = size
+
+    @pytest.mark.parametrize("case", [1, 2])
+    def render(self, mode="short"):
+        return f"{self.KIND}:{mode}"
+'''
+
+
+def _tree():
+    return {"pkg/core.py": FUNCS_PY, "data/config.json": '{"key": 1}\n'}
+
+
+def test_mutation_classes_are_the_spec_eight():
+    assert se.MUTATION_CLASSES == (
+        "raise-entry",
+        "comparison-flip",
+        "constant-change",
+        "attr-change",
+        "default-change",
+        "decorator-change",
+        "import-change",
+        "data-change",
+    )
+
+
+def test_collect_sites_covers_every_class():
+    sites = se.collect_sites(_tree())
+    found = {site.site_class for site in sites}
+    assert found == set(se.MUTATION_CLASSES)
+
+
+def test_collect_sites_is_sorted_and_deterministic():
+    first = se.collect_sites(_tree())
+    second = se.collect_sites(_tree())
+    assert [(site.site_class, site.path, site.lineno) for site in first] == [
+        (site.site_class, site.path, site.lineno) for site in second]
+    keys = [(site.site_class, site.path, site.lineno) for site in first]
+    assert keys == sorted(keys)
+
+
+def test_sampling_is_deterministic_for_a_seed():
+    sites = se.collect_sites(_tree())
+    one = se.sample_mutants(sites, 6, seed=1234)
+    two = se.sample_mutants(sites, 6, seed=1234)
+    assert one == two
+
+
+def test_sampling_covers_every_class_when_it_fits():
+    sites = se.collect_sites(_tree())
+    mutants = se.sample_mutants(sites, len(se.MUTATION_CLASSES), seed=7)
+    assert {mutant.site.site_class for mutant in mutants} == set(se.MUTATION_CLASSES)
+
+
+def test_sampling_caps_at_available_sites():
+    sites = se.collect_sites(_tree())
+    mutants = se.sample_mutants(sites, 10_000, seed=7)
+    assert len(mutants) == len(sites)
+    assert len({mutant.mutant_id for mutant in mutants}) == len(sites)
+
+
+@pytest.mark.parametrize("site_class", [
+    "raise-entry", "comparison-flip", "constant-change", "attr-change",
+    "default-change", "decorator-change", "import-change",
+])
+def test_each_code_operator_parses_and_changes_exactly_one_site(site_class):
+    tree = _tree()
+    sites = [site for site in se.collect_sites(tree) if site.site_class == site_class]
+    assert sites, site_class
+    site = sites[0]
+    mutated = se.apply_mutation(tree[site.path], site)
+    assert mutated != tree[site.path]
+    ast.parse(mutated)  # still valid Python
+    # Deterministic: applying twice gives the same mutant.
+    assert se.apply_mutation(tree[site.path], site) == mutated
+    # Exactly one site changes: the diff is a single hunk.
+    assert len(_hunks(tree[site.path], mutated)) == 1
+
+
+def _hunks(before, after):
+    import difflib
+    return [line for line in difflib.unified_diff(
+        before.splitlines(), after.splitlines()) if line.startswith("@@")]
+
+
+def test_data_operator_appends_a_marker_line():
+    tree = _tree()
+    sites = [site for site in se.collect_sites(tree) if site.site_class == "data-change"]
+    assert len(sites) == 1
+    mutated = se.apply_mutation(tree[sites[0].path], sites[0])
+    assert mutated != tree[sites[0].path]
+    assert "ptest-eval-mutant" in mutated
+    assert len(_hunks(tree[sites[0].path], mutated)) == 1
+
+
+def test_raise_entry_operator_inserts_a_raise():
+    tree = _tree()
+    site = next(site for site in se.collect_sites(tree)
+                if site.site_class == "raise-entry" and site.name == "add")
+    mutated = se.apply_mutation(tree[site.path], site)
+    func = next(node for node in ast.walk(ast.parse(mutated))
+                if isinstance(node, ast.FunctionDef) and node.name == "add")
+    assert isinstance(func.body[0], ast.Raise)
+
+
+def test_union_or_full_prefers_full_only_when_affordable():
+    files = ("tests/test_a.py", "tests/test_b.py")
+    assert se.ground_truth_target(files, v1_is_full=True, affordable=True) == ("full", ())
+    assert se.ground_truth_target(files, v1_is_full=True, affordable=False) == ("union", files)
+    assert se.ground_truth_target(files, v1_is_full=False, affordable=True) == ("union", files)
+    assert se.ground_truth_target((), v1_is_full=False, affordable=True) == ("union", ())
+
+
+@pytest.mark.parametrize(("indicators", "site_class", "expected"), [
+    ({"nondeterministic": True}, "comparison-flip", "R1"),
+    ({"order_dependent": True}, "comparison-flip", "R1"),
+    ({"shared_state": True}, "comparison-flip", "R1"),
+    ({"dynamic_name": True}, "constant-change", "R2"),
+    ({"dynamic_name": True}, "attr-change", "R2"),
+    ({"import_side_effect": True}, "import-change", "R3"),
+    ({"spawned_binary": True}, "comparison-flip", "R4"),
+    ({"recorder_tamper": True}, "comparison-flip", "R5"),
+    ({"py_as_data": True}, "comparison-flip", "R6"),
+    ({"installed_package": True}, "comparison-flip", "R7"),
+    ({"line_number_dependent": True}, "comparison-flip", "R8"),
+    ({"background_thread": True}, "comparison-flip", "R9"),
+    ({}, "comparison-flip", "unclassified"),
+    # Spec preconditions gate R2/R3: a dynamic-name signal on a
+    # function-body change, or an import-side-effect signal on a
+    # non-import change, must not classify.
+    ({"dynamic_name": True}, "comparison-flip", "unclassified"),
+    ({"dynamic_name": True}, None, "unclassified"),
+    ({"import_side_effect": True}, "comparison-flip", "unclassified"),
+    ({"import_side_effect": True}, None, "unclassified"),
+])
+def test_miss_classification_mapping(indicators, site_class, expected):
+    assert se.classify_miss(indicators, site_class=site_class) == expected
+
+
+def test_miss_classification_priority_is_documented_order():
+    assert se.classify_miss({"dynamic_name": True, "spawned_binary": True},
+                            site_class="constant-change") == "R2"
+    # The same signals on a function-body change fall through to R4:
+    # the R2 gate blocks, the R4 signal still counts.
+    assert se.classify_miss({"dynamic_name": True, "spawned_binary": True},
+                            site_class="comparison-flip") == "R4"
+
+
+def test_baseline_failures_are_not_misses():
+    misses = se.find_misses(
+        mutant_failed=("tests/test_a.py::test_1", "tests/test_a.py::test_2"),
+        baseline_failed=("tests/test_a.py::test_2",),
+        selected=("tests/test_a.py::test_1", "tests/test_b.py::test_9"),
+    )
+    assert misses == ()
+
+
+def test_unselected_new_failures_are_misses():
+    misses = se.find_misses(
+        mutant_failed=("tests/test_a.py::test_1", "tests/test_a.py::test_2"),
+        baseline_failed=(),
+        selected=("tests/test_a.py::test_1",),
+    )
+    assert misses == ("tests/test_a.py::test_2",)
+
+
+def test_report_json_round_trips_and_markdown_names_every_miss():
+    report = se.EvalReport(
+        seed=11,
+        mutants=(se.MutantRecord(
+            mutant_id="m0001", site_class="constant-change",
+            path="pkg/core.py", lineno=1,
+            v1_files=("tests/test_a.py",), v2_files=(),
+            v1_is_full=False, full_files=4,
+            failed=("tests/test_a.py::test_1",),
+            baseline_failed=(), misses=("tests/test_a.py::test_1",),
+            miss_classes=("R2",), planning_ms={"v1": 3.0, "v2": 5.0}),),
+        overhead_ms={"dynamic-false": [1.0, 2.0, 3.0], "dynamic-true": [1.0, 1.0, 1.0]},
+    )
+    payload = json.loads(se.render_json(report))
+    assert payload["seed"] == 11
+    assert payload["mutants"][0]["mutant_id"] == "m0001"
+    assert payload["mutants"][0]["miss_classes"] == ["R2"]
+    assert payload["mutants"][0]["planning_ms"] == {"v1": 3.0, "v2": 5.0}
+    assert payload["mutants"][0]["full_files"] == 4
+    text = se.render_markdown(report)
+    assert "m0001" in text
+    assert "constant-change" in text
+    # The record carries a real miss: it must name the failing node id,
+    # its R-class, the selection sizes and both planning times.
+    assert "tests/test_a.py::test_1" in text
+    assert "R2" in text
+    assert "3.0" in text and "5.0" in text
+    assert "| 1 | 0 | 4 |" in text
+
+
+def test_tuple_default_mutant_parses_without_comment_splice():
+    source = "def g(a=(1, 2), b=3):\n    return a\n"
+    sites = [site for site in se.collect_sites({"m.py": source})
+             if site.site_class == "default-change"]
+    assert len(sites) == 2
+    for site in sites:
+        mutated = se.apply_mutation(source, site)
+        ast.parse(mutated)
+        assert "#" not in mutated.splitlines()[site.lineno - 1]
+        assert se.diff_edits(source, mutated) == 1
+
+
+def test_none_default_mutant_is_not_a_noop():
+    source = "def f(x=None, y=1):\n    return x\n"
+    site = next(site for site in se.collect_sites({"m.py": source})
+                if site.site_class == "default-change"
+                and source.splitlines()[site.lineno - 1].startswith("def f(x=None"))
+    mutated = se.apply_mutation(source, site)
+    ast.parse(mutated)
+    assert mutated != source
+    assert "x=None" not in mutated
+    assert se.diff_edits(source, mutated) == 1
+
+
+def test_multi_statement_line_keeps_the_second_statement():
+    source = "X = (1, 2); Y = 2\n"
+    site = next(site for site in se.collect_sites({"m.py": source})
+                if site.site_class == "constant-change" and site.name == "X")
+    mutated = se.apply_mutation(source, site)
+    ast.parse(mutated)
+    assert "Y = 2" in mutated
+    assert se.diff_edits(source, mutated) == 1
+
+
+def test_non_ascii_default_splice_lands_on_the_node():
+    source = 'def g(a="é", b=2):\n    return a\n'
+    sites = [site for site in se.collect_sites({"m.py": source})
+             if site.site_class == "default-change"]
+    assert len(sites) == 2
+    by_detail = {site.detail: site for site in sites}
+    assert se.apply_mutation(source, by_detail["0"]) == \
+        'def g(a=\'é-mutant\', b=2):\n    return a\n'
+    assert se.apply_mutation(source, by_detail["1"]) == \
+        'def g(a="é", b=3):\n    return a\n'
+
+
+def test_check_mutant_rejects_noop_unparseable_and_multi_site():
+    with pytest.raises(RuntimeError):
+        se.check_mutant("X = 1\n", "X = 1\n")
+    with pytest.raises(RuntimeError):
+        se.check_mutant("X = 1\n", "X = \n")
+    with pytest.raises(RuntimeError):
+        se.check_mutant("X = 1\n", "X = 2\nY = 3\n")
+    assert se.check_mutant("X = 1\n", "X = 2\n") == "X = 2\n"
+
+
+@pytest.mark.parametrize(("snippet", "indicator", "site_class", "expected"), [
+    ("def f(a):\n    return getattr(a, 'b')\n", "dynamic_name",
+     "constant-change", "R2"),
+    ("configure()\n", "import_side_effect", "import-change", "R3"),
+    ("def run():\n    import subprocess\n    subprocess.run(['x'])\n",
+     "spawned_binary", "comparison-flip", "R4"),
+    ("DB = 'selection.db'\n", "recorder_tamper", "comparison-flip", "R5"),
+    ("import ast\ntree = ast.parse('x=1')\n", "py_as_data",
+     "comparison-flip", "R6"),
+    ("import importlib.metadata\n", "installed_package", "comparison-flip",
+     "R7"),
+    ("n = node.lineno\n", "line_number_dependent", "comparison-flip", "R8"),
+    ("def start():\n    import threading\n    threading.Thread().start()\n",
+     "background_thread", "comparison-flip", "R9"),
+    ("import random\nx = random.random()\n", "nondeterministic",
+     "comparison-flip", "R1"),
+    ("def bump():\n    global STATE\n    STATE = 1\n", "order_dependent",
+     "comparison-flip", "R1"),
+    ("import multiprocessing\n", "shared_state", "comparison-flip", "R1"),
+])
+def test_every_indicator_can_fire_and_classifies(snippet, indicator,
+                                                site_class, expected):
+    signals = se.indicators_for(snippet)
+    assert signals[indicator] is True
+    assert se.classify_miss({indicator: True},
+                            site_class=site_class) == expected
+    assert se.classify_miss(signals, site_class=site_class) == expected
+
+
+def test_ground_truth_argv_uses_ptest_with_result_json():
+    union = se.ground_truth_argv("uv run ptest", ("a.py", "b.py"),
+                                 "run-1.json", full=False)
+    assert union == ["uv", "run", "ptest", "--result-json", "run-1.json",
+                     "a.py", "b.py"]
+    full = se.ground_truth_argv("uv run ptest", ("a.py",), "run-1.json",
+                                full=True)
+    assert full == ["uv", "run", "ptest", "--full", "--again",
+                    "--result-json", "run-1.json"]
+
+
+def test_ground_truth_argv_parses_through_ptest_cli():
+    """The harness argv must survive ptest's own option parsing.
+
+    Options precede paths, so ``--result-json`` lands in ``result_path``
+    (not in the pytest tail) for both the union and the full branch.
+    """
+    from ptest import cli as cli_mod
+    union = se.ground_truth_argv(
+        "uv run ptest",
+        ("tests/test_a.py", "tests/test_b.py"),
+        "selection-eval-run-x.json", full=False)
+    parsed = cli_mod._parse_execution(union[3:])
+    assert parsed.result_path == "selection-eval-run-x.json"
+    assert tuple(parsed.runner_argv) == ("tests/test_a.py",
+                                         "tests/test_b.py")
+    assert parsed.mode == cli_mod.C.Mode.SCOPED
+    full = se.ground_truth_argv(
+        "uv run ptest", (), "selection-eval-run-x.json", full=True)
+    parsed_full = cli_mod._parse_execution(full[3:])
+    assert parsed_full.result_path == "selection-eval-run-x.json"
+    assert tuple(parsed_full.runner_argv) == ()
+    assert parsed_full.mode == cli_mod.C.Mode.FULL
+    assert parsed_full.again is True
+
+
+def test_read_result_export_rejects_missing_and_scalar(tmp_path):
+    with pytest.raises(RuntimeError):
+        se.read_result_export(tmp_path / "absent.json")
+    scalar = tmp_path / "scalar.json"
+    scalar.write_text("[1, 2]\n")
+    with pytest.raises(RuntimeError):
+        se.read_result_export(scalar)
+    ok = tmp_path / "ok.json"
+    ok.write_text('{"run_id": "abc"}\n')
+    assert se.read_result_export(ok) == {"run_id": "abc"}
+
+
+def test_pytest_lastfailed_merges_caches_and_skips_garbage(tmp_path):
+    first = tmp_path / ".pytest_cache" / "v" / "cache"
+    first.mkdir(parents=True)
+    (first / "lastfailed").write_text(
+        json.dumps({"tests/test_a.py::test_1": True}))
+    nested = tmp_path / "tests" / ".pytest_cache" / "v" / "cache"
+    nested.mkdir(parents=True)
+    (nested / "lastfailed").write_text(
+        json.dumps({"tests/test_b.py::test_9": True}))
+    broken = tmp_path / "other" / ".pytest_cache" / "v" / "cache"
+    broken.mkdir(parents=True)
+    (broken / "lastfailed").write_text("not json{")
+    assert se.pytest_lastfailed(tmp_path) == (
+        "tests/test_a.py::test_1", "tests/test_b.py::test_9")
+
+
+def test_failing_nodeids_raise_on_unidentified_failure(tmp_path):
+    export = tmp_path / "run.json"
+    export.write_text("{}\n")
+    with pytest.raises(RuntimeError):
+        se.failing_nodeids(export, tmp_path, run_failed=True)
+    assert se.failing_nodeids(export, tmp_path, run_failed=False) == ()
+
+
+def test_selected_covering_maps_files_to_failing_nodes():
+    failed = ("tests/test_a.py::test_1", "tests/test_b.py::test_2")
+    assert se.selected_covering(failed, ("tests/test_a.py",)) == (
+        "tests/test_a.py::test_1",)
+    assert se.find_misses(failed, (), se.selected_covering(
+        failed, ("tests/test_a.py",))) == ("tests/test_b.py::test_2",)
+
+
+def test_store_backup_restore_round_trip(tmp_path):
+    assert se.backup_store(tmp_path / "absent.db", tmp_path / "bak") is None
+    store = tmp_path / "selection.db"
+    store.write_bytes(b"store-bytes")
+    backup = se.backup_store(store, tmp_path / "bak")
+    assert backup is not None and backup.read_bytes() == b"store-bytes"
+    store.write_bytes(b"polluted")
+    se.restore_store(store, backup)
+    assert store.read_bytes() == b"store-bytes"
+    se.restore_store(tmp_path / "other.db", None)
+
+
+def test_run_mutant_wires_truth_baseline_misses_and_classes(
+        tmp_path, monkeypatch):
+    core = ("import random\n\nVALUE = 1\n\n\n"
+            "def add(first, second=True):\n"
+            "    total = first + second\n"
+            "    if total == VALUE:\n"
+            "        return total\n"
+            "    return -1\n")
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "pkg" / "core.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(core)
+        return scratch
+
+    class FakePlan:
+        def __init__(self, kind, files, total):
+            self.kind = kind
+            self.files = files
+            self.total = total
+
+    def fake_run(cmd, cwd, timeout=600):
+        export = cmd[cmd.index("--result-json") + 1]
+        assert cmd[:3] == ["uv", "run", "ptest"]
+        assert "--result-json" in cmd
+        Path(cwd, export).write_text("{}\n")
+        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        if "ground-truth" in export:
+            (cache / "lastfailed").write_text(json.dumps(
+                {"tests/test_a.py::test_1": True}))
+            code = 1
+        else:
+            (cache / "lastfailed").write_text(json.dumps({}))
+            code = 0
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "plan_v1",
+                        lambda top, root, changed: FakePlan(
+                            "selected", ("tests/test_a.py",), 10))
+    monkeypatch.setattr(se, "plan_v2",
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda root: (_ for _ in ()).throw(
+                            RuntimeError("no store here")))
+    args = type("Args", (), {
+        "project": str(project), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": False})()
+    assert se.run_campaign(args) == 0
+    payload = json.loads((out / "selection-eval.json").read_text())
+    assert len(payload["mutants"]) == 1
+    record = payload["mutants"][0]
+    assert record["failed"] == ["tests/test_a.py::test_1"]
+    assert record["baseline_failed"] == []
+    assert record["misses"] == ["tests/test_a.py::test_1"]
+    # The sampled mutant is a function-body site (raise-entry) whose
+    # changed line carries no R signals, and the missed test file does
+    # not exist on disk: the miss is unclassifiable even though the
+    # module-wide `import random` still shows up as a suggestion.
+    assert record["miss_classes"] == ["unclassified"]
+    assert record["suggestions"] == ["nondeterministic"]
+    assert record["v1_files"] == ["tests/test_a.py"]
+    assert record["v1_is_full"] is False
+    assert record["full_files"] == 10
+    assert set(record["planning_ms"]) == {"v1", "v2"}
+    text = (out / "selection-eval.md").read_text()
+    assert "tests/test_a.py::test_1" in text
+    assert "unclassified (suggests: nondeterministic)" in text
+
+
+def test_median_of_three():
+    assert se.median([3.0, 1.0, 2.0]) == 2.0
+
+
+def test_campaign_writes_reports_when_benchmark_fails(
+        tmp_path, monkeypatch):
+    core = ("VALUE = 1\n\n\ndef add(first, second=True):\n"
+            "    return first + second\n")
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "pkg" / "core.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(core)
+        return scratch
+
+    class FakePlan:
+        def __init__(self, kind, files, total):
+            self.kind = kind
+            self.files = files
+            self.total = total
+
+    def fake_run(cmd, cwd, timeout=600):
+        export = cmd[cmd.index("--result-json") + 1]
+        Path(cwd, export).write_text("{}\n")
+        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "lastfailed").write_text(json.dumps({}))
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "plan_v1",
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
+    monkeypatch.setattr(se, "plan_v2",
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda root: (_ for _ in ()).throw(
+                            RuntimeError("no store here")))
+    monkeypatch.setattr(se, "benchmark_overhead",
+                        lambda project, out, ptest: (_ for _ in ()).throw(
+                            RuntimeError("benchmark run failed")))
+    args = type("Args", (), {
+        "project": str(project), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": True})()
+    with pytest.raises(RuntimeError):
+        se.run_campaign(args)
+    # The mutant records survive the benchmark failure.
+    payload = json.loads((out / "selection-eval.json").read_text())
+    assert len(payload["mutants"]) == 1
+    assert payload["overhead_ms"] == {}
+
+
+def test_arg_parsing_defaults():
+    args = se.parse_args(["--project", "proj", "--mutants", "5",
+                          "--seed", "9", "--out", "outdir"])
+    assert args.project == "proj"
+    assert args.mutants == 5
+    assert args.seed == 9
+    assert args.out == "outdir"
+    assert args.dry_run is False
+    assert args.benchmark_overhead is False
+
+
+def test_dry_run_lists_mutants_without_touching_git_or_runs(tmp_path, monkeypatch, capsys):
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(FUNCS_PY)
+    out = tmp_path / "out"
+    calls = []
+
+    def fail(*argv, **kwargs):
+        calls.append(argv)
+        raise AssertionError("must not touch git or run tests")
+
+    monkeypatch.setattr(se.subprocess, "run", fail)
+    code = se.main(["--project", str(project), "--mutants", "4",
+                    "--seed", "3", "--out", str(out), "--dry-run"])
+    assert code == 0
+    assert calls == []
+    listed = json.loads((out / "selection-eval.json").read_text(encoding="utf-8"))
+    assert len(listed["mutants"]) == 4
+    assert "m000" in capsys.readouterr().out
+
+
+def test_plan_v1_call_uses_0410_rules_and_fails_without_the_knob():
+    seen = {}
+
+    class FakeImpact:
+        def plan(self, top, root, config, changed, *, conftest_edges=True):
+            seen.update(top=top, root=root, changed=changed,
+                        conftest_edges=conftest_edges)
+            return "v1-plan"
+
+    assert se._plan_v1_call(FakeImpact(), "top", "root", "config",
+                            ("a.py",)) == "v1-plan"
+    assert seen["conftest_edges"] is False
+    assert seen["changed"] == ("a.py",)
+
+    class OldImpact:
+        def plan(self, top, root, config, changed):
+            return "v1-plan"
+
+    with pytest.raises(RuntimeError):
+        se._plan_v1_call(OldImpact(), "top", "root", "config", ("a.py",))
+
+
+def test_open_without_py_path_is_not_py_as_data():
+    assert se.indicators_for('open("fixture.py")\n')["py_as_data"] is True
+    assert se.indicators_for(
+        'handle = open("data.json")\n# parsed from docs/schema.py\n'
+    )["py_as_data"] is False
+
+
+def test_function_body_miss_with_incidental_tokens_stays_unclassified(
+        tmp_path):
+    module = ("import random\n\n\n"
+              "STATE = {}\n\n\n"
+              "def fetch(key):\n"
+              "    return getattr(STATE, key)\n\n\n"
+              "def touch():\n"
+              "    global STATE\n"
+              "    STATE = {}\n\n\n"
+              "def compare(first, second):\n"
+              "    if first == second:\n"
+              "        return True\n"
+              "    return False\n")
+    site = next(site for site in se.collect_sites({"pkg/core.py": module})
+                if site.site_class == "comparison-flip")
+    mutated = se.apply_mutation(module, site)
+    # Whole-module keyword hits would claim R1 (random/global) or R2
+    # (getattr) for this function-body change; they are suggestions only.
+    whole = se.indicators_for(mutated)
+    assert whole["nondeterministic"] is True
+    assert whole["dynamic_name"] is True
+    assert whole["order_dependent"] is True
+    assert se.classify_miss(whole, site_class="comparison-flip") == "R1"
+    # The per-miss signals come from the changed line plus the missed
+    # test only, so the incidental module tokens cannot classify.
+    scratch = tmp_path / "scratch"
+    (scratch / "tests").mkdir(parents=True)
+    (scratch / "tests" / "test_core.py").write_text(
+        "from pkg.core import compare\n\n\n"
+        "def test_compare():\n"
+        "    assert compare(1, 1) is True\n")
+    signals = se.signals_for_miss(scratch, "tests/test_core.py::test_compare",
+                                  module, mutated)
+    assert signals["dynamic_name"] is False
+    assert signals["nondeterministic"] is False
+    assert signals["order_dependent"] is False
+    assert se.classify_miss(signals,
+                            site_class="comparison-flip") == "unclassified"
+
+
+def test_test_function_source_ignores_sibling_tests(tmp_path):
+    scratch = tmp_path / "scratch"
+    (scratch / "tests").mkdir(parents=True)
+    (scratch / "tests" / "test_two.py").write_text(
+        "import threading\n\n\n"
+        "def test_noisy():\n"
+        "    threading.Thread().start()\n\n\n"
+        "def test_quiet():\n"
+        "    assert 1 + 1 == 2\n")
+    noisy = se.signals_for_miss(scratch, "tests/test_two.py::test_noisy",
+                                "X = 1\n", "X = 2\n")
+    assert noisy["background_thread"] is True
+    assert se.classify_miss(noisy, site_class="comparison-flip") == "R9"
+    quiet = se.signals_for_miss(scratch, "tests/test_two.py::test_quiet",
+                                "X = 1\n", "X = 2\n")
+    assert quiet["background_thread"] is False
+    assert se.classify_miss(quiet,
+                            site_class="comparison-flip") == "unclassified"
+    missing = se.signals_for_miss(scratch, "tests/test_two.py::test_absent",
+                                  "X = 1\n", "X = 2\n")
+    assert se.classify_miss(missing,
+                            site_class="comparison-flip") == "unclassified"
+
+
+def test_project_prefix_is_empty_for_standalone_project(tmp_path):
+    assert se._project_prefix(tmp_path / "proj") == ""
+
+
+def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
+        tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    child = tmp_path / "services" / "cp"
+    (child / "pkg").mkdir(parents=True)
+    core = ("import random\n\nVALUE = 1\n\n\n"
+            "def add(first, second=True):\n"
+            "    total = first + second\n"
+            "    if total == VALUE:\n"
+            "        return total\n"
+            "    return -1\n")
+    (child / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+    assert se._project_prefix(child) == "services/cp"
+
+    created = {}
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "services" / "cp" / "pkg" / "core.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(core)
+        created[name] = scratch
+        return scratch
+
+    class FakePlan:
+        def __init__(self, kind, files, total):
+            self.kind = kind
+            self.files = files
+            self.total = total
+
+    plans = []
+    runs = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        runs.append((list(cmd), Path(cwd)))
+        export = cmd[cmd.index("--result-json") + 1]
+        assert cmd[:3] == ["uv", "run", "ptest"]
+        Path(cwd, export).write_text("{}\n")
+        # Pytest records lastfailed under the child's rootdir with
+        # child-relative ids — never repo-root-prefixed ids at the
+        # scratch root.
+        cache = (Path(cwd) / "services" / "cp" / ".pytest_cache"
+                 / "v" / "cache")
+        cache.mkdir(parents=True, exist_ok=True)
+        if "ground-truth" in export:
+            (cache / "lastfailed").write_text(json.dumps(
+                {"tests/test_a.py::test_1": True}))
+            code = 1
+        else:
+            (cache / "lastfailed").write_text(json.dumps({}))
+            code = 0
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(
+        se, "plan_v1",
+        lambda top, root, changed: plans.append(("v1", top, root, changed))
+        or FakePlan("selected", ("tests/test_a.py",), 10))
+    monkeypatch.setattr(
+        se, "plan_v2",
+        lambda top, root, changed: plans.append(("v2", top, root, changed))
+        or FakePlan("selected", (), 10))
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda root: (_ for _ in ()).throw(
+                            RuntimeError("no store here")))
+    args = type("Args", (), {
+        "project": str(child), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": False})()
+    assert se.run_campaign(args) == 0
+    # Planning happens in scratch/prefix with a repo-relative change,
+    # from the scratch repo root as top.
+    assert len(plans) == 2
+    for label, top, root, changed in plans:
+        assert top == created["m0001"]
+        assert root == created["m0001"] / "services" / "cp"
+        assert tuple(changed) == ("services/cp/pkg/core.py",)
+    # ptest runs from the scratch repo root with child-prefixed scopes,
+    # options before paths so the export is produced.
+    assert len(runs) == 2
+    for cmd, cwd in runs:
+        assert cwd in (created["m0001"], created["m0001-baseline"])
+        assert cmd[3] == "--result-json"
+        assert cmd[5:] == ["services/cp/tests/test_a.py"]
+    payload = json.loads((out / "selection-eval.json").read_text())
+    record = payload["mutants"][0]
+    assert record["misses"] == ["services/cp/tests/test_a.py::test_1"]
+    assert record["miss_classes"] == ["unclassified"]
+    assert record["suggestions"] == ["nondeterministic"]
+
+
+def test_scope_node_prefixes_child_relative_ids_idempotently():
+    assert se._scope_node("", "tests/test_a.py::test_1") == (
+        "tests/test_a.py::test_1")
+    assert se._scope_node("services/cp", "tests/test_a.py::test_1") == (
+        "services/cp/tests/test_a.py::test_1")
+    assert se._scope_node(
+        "services/cp",
+        "services/cp/tests/test_a.py::test_1") == (
+        "services/cp/tests/test_a.py::test_1")
+    assert se._scope_node("services/cp", "tests/test_a.py") == (
+        "services/cp/tests/test_a.py")
+    # A selected child-relative failure matches the prefixed v2 plan,
+    # so it is covered rather than a miss.
+    assert se.selected_covering(
+        (se._scope_node("services/cp", "tests/test_a.py::test_1"),),
+        ("services/cp/tests/test_a.py",)) == (
+        "services/cp/tests/test_a.py::test_1",)
+
+
+def test_benchmark_overhead_on_nested_child_uses_child_config_and_cwd(
+        tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    child = tmp_path / "services" / "cp"
+    child.mkdir(parents=True)
+    (tmp_path / ".ptest.toml").write_text(
+        '[monorepo]\nversion = 1\n[[monorepo.child]]\n'
+        'path = "services/cp"\n')
+    created = {}
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "services" / "cp" / ".ptest.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('[project]\nname = "cp"\n')
+        created[name] = scratch
+        return scratch
+
+    runs = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        runs.append(Path(cwd))
+        assert list(cmd)[:4] == ["uv", "run", "ptest", "--full"]
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "_run", fake_run)
+    samples = se.benchmark_overhead(child, tmp_path / "out", "uv run ptest")
+    assert set(samples) == {"dynamic-false", "dynamic-true"}
+    assert all(len(values) == 3 for values in samples.values())
+    # Every run happens in the child dir, never at the scratch root
+    # where the [monorepo] manifest lives.
+    assert runs and all(
+        cwd == created["overhead"] / "services" / "cp" for cwd in runs)
+    # The overlay is reverted after each run.
+    assert (created["overhead"] / "services" / "cp" / ".ptest.toml"
+            ).read_text() == '[project]\nname = "cp"\n'

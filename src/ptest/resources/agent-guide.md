@@ -54,3 +54,9 @@ finished but the runner processes hung in teardown/shutdown: rerun once alone, a
 report it with the stack dump printed above instead of editing tests to dodge
 it. A lasting change is `[runner] stall_timeout` in `.ptest.toml` (`0`
 disables stall detection).
+
+Dependency-recorded selection narrows a changed run to the tests whose recorded
+dependencies changed (`… (dynamic · …)`); without usable records the static fallback
+(`… (static: <reason> · …)`) selects by imports instead, and a full run prints a
+`ptest: selection audit: …` line when it pins misses to static reach. A changed green,
+dynamic or static, is iteration only; the `ptest --full` final gate still applies.

@@ -14,11 +14,10 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 | All tests under one folder | `ptest --full <folder>` |
 | Before handoff or merge | bring the base branch in first, then `ptest --full`; fix and rerun until green |
 
-A scoped or changed green is iteration only; only `ptest --full` completes the
-change. Rerun it only after a change (`--again` forces one). Fast-forward the
-green tip and never rerun for the merge (`already verified … in <checkout>`).
-Keep notes and reports outside the repo, or in declared gitignored outputs.
-Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal.
+A scoped or changed green, dynamic or static, is iteration only; only `ptest --full`
+completes the change. Rerun it only after a change (`--again` forces one). Fast-forward
+the green tip and never rerun for the merge (`already verified … in <checkout>`). Keep notes
+and reports outside the repo, or in declared gitignored outputs. Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal.
 
 ## Monorepo
 
@@ -32,13 +31,15 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 | Line | Meaning | What to do |
 |---|---|---|
 | `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
-| `changed: <path> (+N files) → N of M test files (D direct · V via importers)` | changed mode selected the tests your change reaches | Nothing; this is the normal loop. |
+| `changed: <path> (+N files) → T tests in F of M files (dynamic · …)` | dependency records selected the tests your change reaches | Nothing; this is the normal loop. |
+| `changed: <path> (+N files) → N of M test files (static: <reason> · D direct · V via importers)` | the static fallback selected the tests your change reaches | Nothing; this is the normal loop. |
 | `changed → full suite: <reason>` | this run IS the full suite: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing extra; do not start `ptest --full` because of this line. |
 | `changed: <path> → vitest changed delegation` | that child delegated its changed set to vitest | Nothing. |
-| `changed: <path> → no tests affected` / `no changes vs <label> — nothing to test` | the change reaches no tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
+| `changed: <path> → no tests affected: R tests reach these changes and already passed on this code` / `no changes vs <label> — nothing to test` | the change reaches no new tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
 | `no changes under <folder> — nothing to test` | the change reaches no tests under that folder (exit 0) | Nothing; `ptest --full <folder>` runs everything there. |
 | `<project> · no changes` | that child is untouched (one line per untouched child) | Nothing. |
 | `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Keep iterating with `ptest`; run `ptest --full` once only when you are done. |
+| `ptest: selection audit: N failing tests would not have been selected — they now run whenever a change statically reaches them` | a full run pinned failing tests to static reach | Nothing. |
 | `waiting for N slots …` / `waiting: <reason>` | queued behind other runs; the reason names the real blocker | Wait; do not start another run. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
@@ -83,12 +84,11 @@ wall-clock sleeps for synchronization.
 
 ## Reporting
 
-`ptest doctor` asks consent, then makes one initial call per model-assessed item
-and one bounded verification for each valid reply, including `OK`. It uses
-requested models Codex `gpt-6-sol` and Claude `opus` by default; overrides are
-explicit. `ptest doctor --offline` is static and sends nothing. Reviews cover
-cited reachable units only; omitted decisive callers or failure paths remain
-unknown. Timing, selection, and parallel-execution items use ptest's own facts.
+`ptest doctor` asks consent, then makes one initial call per model-assessed item and one
+bounded verification for each valid reply, including `OK`. It uses requested models Codex
+`gpt-6-sol` and Claude `opus` by default; overrides are explicit. `ptest doctor --offline`
+is static and sends nothing. Reviews cover cited reachable units only; omitted decisive
+callers or failure paths remain unknown. Timing, selection, and parallel-execution items use ptest's own facts.
 
 Untracked config: `ptest: .ptest.toml is not committed` — tell the user; do not commit it yourself unless asked.
 
