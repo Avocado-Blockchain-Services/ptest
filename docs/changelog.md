@@ -35,6 +35,17 @@
   loader). Tests that start the project's
   own interpreter (`python -m pkg`, a checkout script) follow that entry
   module's imports under the static rule.
+- Changes only callers can notice select like body changes: a new default
+  of a plain function or method, or an attribute of a plain class, runs the
+  tests that ran that code instead of every test that imported the module.
+  Decorated routes, framework models, computed defaults (`Depends(...)`,
+  `Query(...)`) and dunder methods keep the import-time rule, and a module
+  that no selected test still imports falls back to it, so an edit that
+  breaks the import is still caught. The parse cache re-indexes once.
+- A full run that records no baseline because gitignored files inside the
+  scope count as inputs now names them and the settings that declare them
+  (`[selection] non_input_outputs` or `ignored_inputs`), instead of
+  "uncommitted changes".
 - Nested monorepo child scopes: `route_scopes` matches the longest declared
   child prefix, so `ptest services/control-plane/tests` and `ptest --full
   services/control-plane` reach the nested child, and `services/api-v2`

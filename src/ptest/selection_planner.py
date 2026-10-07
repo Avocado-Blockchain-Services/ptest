@@ -28,7 +28,8 @@ _CAP_REASON = "too many recorded code versions"
 class _Analysis:
     """One memoised per-signature diff plus propagation result (D5)."""
 
-    __slots__ = ("cf", "seeds", "names", "wild", "am", "sk", "wf", "pw", "af")
+    __slots__ = ("cf", "seeds", "names", "wild", "am", "sk", "wf", "pw", "af",
+                 "soft")
 
     def __init__(self):
         self.cf = set()      # (path, qualname) changed functions
@@ -40,6 +41,7 @@ class _Analysis:
         self.wf = set()      # test files selected whole
         self.pw = set()      # path-wide changed paths (every function)
         self.af = set()      # (path, qualname) affected via propagation
+        self.soft = set()    # paths with caller-local import-time changes
 
 
 def _cur_digest(index, path):
@@ -132,6 +134,34 @@ def _import_time_scope(scope) -> bool:
     return bool(getattr(scope, "decorated", False)) or "." in scope.qualname
 
 
+def _reads_signature(qualname) -> bool:
+    """A dunder method: a framework may read it without calling it
+    (``__init__`` of a dependency class, ``__call__``, ``__new__``)."""
+    name = qualname.rsplit(".", 1)[-1]
+    return name.startswith("__") and name.endswith("__")
+
+
+def _plain_class(file_index, qualname) -> bool:
+    """Only code reading this class notices its change: a plain class
+    whose direct methods all have caller-local skeletons."""
+    for cls in file_index.classes:
+        if cls.qualname == qualname:
+            if not cls.plain:
+                return False
+            prefix = qualname + "."
+            return all(scope.local for scope in file_index.scopes
+                       if scope.qualname.startswith(prefix)
+                       and "." not in scope.qualname[len(prefix):])
+    return False
+
+
+def _local_def(file_index, name) -> bool:
+    for scope in file_index.scopes:
+        if scope.qualname == name:
+            return scope.local
+    return False
+
+
 def _diff_path(analysis, index, path, basemap, versions):
     """4.3: diff one stale path; fills the analysis sets."""
     old_digest = basemap.get(path)
@@ -174,8 +204,17 @@ def _diff_path(analysis, index, path, basemap, versions):
                 analysis.cf.add((path, qual))
             if scope.skeleton != prev.skeleton:
                 analysis.cf.add((path, qual))
-                analysis.am.add(path)
-                _seed_name(analysis, per_path, path, qual)
+                if scope.local and prev.local:
+                    # A plain default or annotation: only callers notice,
+                    # like a body change. A top-level function or a dunder
+                    # may still be read by a framework through its name
+                    # (``Depends(f)``), which propagation follows.
+                    analysis.soft.add(path)
+                    if "." not in qual or _reads_signature(qual):
+                        _seed_name(analysis, per_path, path, qual)
+                else:
+                    analysis.am.add(path)
+                    _seed_name(analysis, per_path, path, qual)
     for qual, scope in old_scopes.items():
         if qual not in new_scopes:
             analysis.cf.add((path, qual))
@@ -189,7 +228,10 @@ def _diff_path(analysis, index, path, basemap, versions):
             if is_test:
                 analysis.wf.add(path)
         elif cls.skeleton != prev.skeleton or cls.body != prev.body:
-            analysis.am.add(path)
+            if _plain_class(old, qual) and _plain_class(new, qual):
+                analysis.soft.add(path)  # only its readers notice
+            else:
+                analysis.am.add(path)
             _seed_class(analysis, per_path, index, old_scopes, new_scopes,
                         path, qual)
     for qual in old_classes:
@@ -209,10 +251,10 @@ def _diff_path(analysis, index, path, basemap, versions):
         analysis.wild.add(path)
     if sorted(_effect_fps(old)) != sorted(_effect_fps(new)):
         analysis.am.add(path)
-    if per_path or path in analysis.am:
+    if per_path or path in analysis.am or path in analysis.soft:
         analysis.sk.add(path)
     if is_test and (per_path or path in analysis.am
-                    or path in analysis.wild):
+                    or path in analysis.soft or path in analysis.wild):
         analysis.wf.add(path)
     return old
 
@@ -229,6 +271,7 @@ def _propagate(index, analysis, olds):
     names = analysis.names
     wild = analysis.wild
     am = analysis.am
+    soft = analysis.soft
     cf = analysis.cf
     af = analysis.af
     growing = True
@@ -251,9 +294,20 @@ def _propagate(index, analysis, olds):
                         # A def or class whose skeleton references a
                         # changed name is re-created differently at import
                         # (an annotation-driven dependency, a decorator
-                        # argument): an import-time change (N1).
-                        am.add(path)
-                        growing = True
+                        # argument): an import-time change (N1), unless
+                        # only its callers can notice (a plain default).
+                        name = (statements[pos].bound[0]
+                                if pos < len(statements)
+                                and len(statements[pos].bound) == 1
+                                else None)
+                        if name is not None and (
+                                _local_def(current.index, name)
+                                if kind == "def"
+                                else _plain_class(current.index, name)):
+                            soft.add(path)
+                        else:
+                            am.add(path)
+                            growing = True
                     if kind == "def":
                         # It also affects the function itself; bound names
                         # alone never match a recorded (path, qual) id.
@@ -274,8 +328,11 @@ def _propagate(index, analysis, olds):
                     names.add(key)
                     growing = True
                 if path not in am:
-                    am.add(path)  # a class body runs at import time
-                    growing = True
+                    if _plain_class(current.index, cls.qualname):
+                        soft.add(path)  # read only by code using it
+                    else:
+                        am.add(path)  # a class body runs at import time
+                        growing = True
                 if (path, cls.qualname) not in cf:
                     cf.add((path, cls.qualname))
                     old = olds.get(path)
@@ -292,7 +349,7 @@ def _propagate(index, analysis, olds):
                     # Functions never propagate further.
                     af.add((path, scope.qualname))
     for path in index.test_files:
-        if path in am:
+        if path in am or path in soft:
             analysis.wf.add(path)
             continue
         for key in names:
@@ -506,8 +563,9 @@ def plan(inputs):
     selected_files = set()
     selected_nodes = set()
     usable_of = {}
+    paths_of = {}       # nodeid -> project paths whose code it ran
     counts = {}
-    reached = 0
+    reached = set()     # passing nodes whose recorded code changed
     recorded = 0
 
     def _count(kind, label, nodeid):
@@ -530,6 +588,8 @@ def plan(inputs):
         node_fids = list(node.fixtures)
         missing_fixture = any(fid not in deps.fixtures for fid in node_fids)
         own = _context_paths(vocabulary, deps.fixtures, node.deps, node_fids)
+        if own is not None:
+            paths_of[nodeid] = {p for p, _ in own[0]} | set(own[1])
         fixture_opaque = False
         if not missing_fixture:
             for fid in node_fids:
@@ -567,7 +627,7 @@ def plan(inputs):
                 funcs, mods, data = own
                 dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
                 if dep_paths & touch[node.run_id]:
-                    reached += 1
+                    reached.add(nodeid)
             continue
         if node.test_file in analysis.wf:
             _select()  # clause c
@@ -621,7 +681,44 @@ def plan(inputs):
             continue
         dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
         if dep_paths & touch[node.run_id]:
-            reached += 1
+            reached.add(nodeid)
+
+    # Caller-local import-time changes select only the code that runs
+    # them. A change that breaks the import shows in any test importing
+    # the module, so one selected test must still import it; otherwise
+    # the path follows the import-time rule for that run (static reach,
+    # plus the whole run when its ambient imported the module).
+    fallback_modules = set()
+    for rid, analysis in per_run.items():
+        soft = analysis.soft - analysis.am - analysis.pw
+        if not soft:
+            continue
+        members = [nodeid for nodeid, path in usable_of.items()
+                   if deps.nodes[nodeid].run_id == rid]
+        missing = set()
+        for path in sorted(soft):
+            reach = _reach(index, test_roots, {path})
+            if not any(nodeid in selected_nodes
+                       and (path in paths_of.get(nodeid, ())
+                            or usable_of[nodeid] in reach)
+                       for nodeid in members):
+                missing.add(path)
+        if not missing:
+            continue
+        ambient_mods = {_resolve_path(vocabulary, pid)
+                        for pid in list(compat_runs[rid].ambient.modules)}
+        whole = not missing.isdisjoint(ambient_mods)
+        reach = _reach(index, test_roots, missing)
+        fallback_modules |= missing
+        for nodeid in members:
+            if nodeid in selected_nodes:
+                continue
+            ran = missing & paths_of.get(nodeid, set())
+            if whole or ran or usable_of[nodeid] in reach:
+                selected_nodes.add(nodeid)
+                selected_files.add(usable_of[nodeid])
+                for path in (ran or missing):
+                    _count("module", path, nodeid)
 
     # 4.6: test files with no usable node follow the static rule (N2).
     usable_files = set(usable_of.values())
@@ -657,7 +754,7 @@ def plan(inputs):
         units.append(C.ChangedUnit(
             kind="name", label=key,
             tests=len(counts.get(("name", key), ()))))
-    for path in am_all:
+    for path in am_all | fallback_modules:
         units.append(C.ChangedUnit(
             kind="module", label=path,
             tests=len(counts.get(("module", path), ()))))
@@ -694,7 +791,7 @@ def plan(inputs):
         deselect=tuple(deselect),
         whole_files=tuple(whole),
         selected=len(selected_nodes),
-        reached=reached,
+        reached=len(reached - selected_nodes),
         recorded=recorded,
         total_files=total_files,
         units=tuple(units),

@@ -19,6 +19,7 @@ returns None for anything else.
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import json
 import marshal
@@ -249,6 +250,67 @@ def _class_skeleton_dumps(node: ast.ClassDef) -> list[str]:
     return parts
 
 
+# Decorators that wrap a function for its callers only: they register
+# nothing and read no signature at import.
+_LOCAL_DECORATORS = frozenset({
+    "staticmethod", "classmethod", "property", "cached_property",
+    "abstractmethod", "overload", "override", "cache", "lru_cache"})
+_LOCAL_DECORATOR_MODULES = frozenset({
+    "functools", "abc", "typing", "typing_extensions"})
+_PROPERTY_PARTS = frozenset({"setter", "getter", "deleter"})
+# Builtin classes as bases keep a class plain; ``type`` makes a metaclass.
+_PLAIN_BASES = frozenset(name for name, value in vars(builtins).items()
+                         if isinstance(value, type) and name != "type")
+
+
+def _local_decorator(node: ast.expr) -> bool:
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Name):
+        return node.id in _LOCAL_DECORATORS
+    if isinstance(node, ast.Attribute):
+        if node.attr in _PROPERTY_PARTS:
+            return True
+        return (node.attr in _LOCAL_DECORATORS
+                and isinstance(node.value, ast.Name)
+                and node.value.id in _LOCAL_DECORATOR_MODULES)
+    return False
+
+
+def _has_call(nodes: list[ast.AST]) -> bool:
+    return any(isinstance(sub, ast.Call)
+               for node in nodes for sub in ast.walk(node))
+
+
+def _local_skeleton(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Only callers can notice a change of this skeleton: no decorator
+    that registers it or reads its signature at import, and no call in
+    defaults, annotations or type params (a ``Depends``/``Query`` marker
+    or a value computed at import)."""
+    if not all(_local_decorator(node) for node in func.decorator_list):
+        return False
+    return not _has_call([func.args]
+                         + ([func.returns] if func.returns is not None
+                            else [])
+                         + list(getattr(func, "type_params", [])))
+
+
+def _plain_class(node: ast.ClassDef) -> bool:
+    """Only code that reads this class can notice a change of its body:
+    no decorator, keyword (metaclass) or type params, builtin bases only
+    (a framework base registers or inspects subclasses), and no call in
+    its non-function members (a column, field or descriptor)."""
+    if node.decorator_list or node.keywords \
+            or getattr(node, "type_params", None):
+        return False
+    if not all(isinstance(base, ast.Name) and base.id in _PLAIN_BASES
+               for base in node.bases):
+        return False
+    return not _has_call([stmt for stmt in node.body
+                          if not isinstance(stmt, (ast.FunctionDef,
+                                                   ast.AsyncFunctionDef))])
+
+
 def _body_dumps(body: list[ast.stmt]) -> list[str]:
     """Body statement dumps, leading docstring included.
 
@@ -343,8 +405,10 @@ def index_source(raw: bytes) -> C.FileIndex:
     def add_class(node: ast.ClassDef, parts: tuple[str, ...]) -> None:
         qualname = ".".join(parts)
         entry = class_acc.setdefault(
-            qualname, {"skeleton": [], "body": [], "refs": set()})
+            qualname, {"skeleton": [], "body": [], "refs": set(),
+                       "plain": True})
         entry["skeleton"].extend(_class_skeleton_dumps(node))
+        entry["plain"] = entry["plain"] and _plain_class(node)
         members = [stmt for stmt in node.body
                    if not isinstance(stmt, (ast.FunctionDef,
                                              ast.AsyncFunctionDef))]
@@ -461,12 +525,15 @@ def index_source(raw: bytes) -> C.FileIndex:
                                 skeleton=_fingerprint(entry["skeleton"]),
                                 refs=tuple(sorted(entry["refs"])),
                                 decorated=any(node.decorator_list
-                                              for node in entry["nodes"]))
+                                              for node in entry["nodes"]),
+                                local=all(_local_skeleton(node)
+                                          for node in entry["nodes"]))
                    for qualname, entry in sorted(scope_acc.items()))
     classes = tuple(C.ClassIndex(qualname=qualname,
                                  skeleton=_fingerprint(entry["skeleton"]),
                                  body=_fingerprint(entry["body"]),
-                                 refs=tuple(sorted(entry["refs"])))
+                                 refs=tuple(sorted(entry["refs"])),
+                                 plain=entry["plain"])
                     for qualname, entry in sorted(class_acc.items()))
     return C.FileIndex(parsed=True, imports=tuple(imports), scopes=scopes,
                        classes=classes, statements=tuple(statements))
@@ -478,14 +545,15 @@ def encode_index(index: C.FileIndex) -> bytes:
     """Deterministic, versioned bytes for one FileIndex (the cache value)."""
     payload = {
         "classes": [[entry.qualname, entry.skeleton, entry.body,
-                     [list(chain) for chain in entry.refs]]
+                     [list(chain) for chain in entry.refs], entry.plain]
                     for entry in index.classes],
         "imports": [[imp.level, imp.module, imp.name, imp.local,
                      imp.aliased, imp.statement]
                     for imp in index.imports],
         "parsed": index.parsed,
         "scopes": [[entry.qualname, entry.body, entry.skeleton,
-                    [list(chain) for chain in entry.refs], entry.decorated]
+                    [list(chain) for chain in entry.refs], entry.decorated,
+                    entry.local]
                    for entry in index.scopes],
         "statements": [[stmt.kind, list(stmt.bound),
                         [list(chain) for chain in stmt.refs],
@@ -562,29 +630,31 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
                                          statement=statement))
         scopes = []
         for raw in payload["scopes"]:
-            if not isinstance(raw, list) or len(raw) != 5:
+            if not isinstance(raw, list) or len(raw) != 6:
                 return None
-            qualname, body, skeleton, refs, decorated = raw
+            qualname, body, skeleton, refs, decorated, local = raw
             if not isinstance(qualname, str) \
                     or not isinstance(body, str) \
                     or not isinstance(skeleton, str) \
-                    or type(decorated) is not bool:
+                    or type(decorated) is not bool \
+                    or type(local) is not bool:
                 return None
             scopes.append(C.ScopeIndex(
                 qualname=qualname, body=body, skeleton=skeleton,
-                refs=_chains(refs), decorated=decorated))
+                refs=_chains(refs), decorated=decorated, local=local))
         classes = []
         for raw in payload["classes"]:
-            if not isinstance(raw, list) or len(raw) != 4:
+            if not isinstance(raw, list) or len(raw) != 5:
                 return None
-            qualname, skeleton, body, refs = raw
+            qualname, skeleton, body, refs, plain = raw
             if not isinstance(qualname, str) \
                     or not isinstance(skeleton, str) \
-                    or not isinstance(body, str):
+                    or not isinstance(body, str) \
+                    or type(plain) is not bool:
                 return None
             classes.append(C.ClassIndex(
                 qualname=qualname, skeleton=skeleton, body=body,
-                refs=_chains(refs)))
+                refs=_chains(refs), plain=plain))
         statements = []
         for raw in payload["statements"]:
             if not isinstance(raw, list) or len(raw) != 4:

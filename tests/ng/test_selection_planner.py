@@ -31,15 +31,16 @@ TEST = "tests/test_lib.py"
 # VB must be shared between RUN digests and NODE deps so path ids align.
 # ---------------------------------------------------------------------------
 
-def SC(q, body="b:" + "x", skel="s:" + "x", refs=(), decorated=False):
+def SC(q, body="b:" + "x", skel="s:" + "x", refs=(), decorated=False,
+       local=False):
     return C.ScopeIndex(qualname=q, body=body, skeleton=skel,
                         refs=tuple(tuple(r) for r in refs),
-                        decorated=decorated)
+                        decorated=decorated, local=local)
 
 
-def CL(q, skel="s:" + "x", body="c:" + "x", refs=()):
+def CL(q, skel="s:" + "x", body="c:" + "x", refs=(), plain=False):
     return C.ClassIndex(qualname=q, skeleton=skel, body=body,
-                        refs=tuple(tuple(r) for r in refs))
+                        refs=tuple(tuple(r) for r in refs), plain=plain)
 
 
 def ST(kind, bound=(), refs=(), fp="fp"):
@@ -1889,3 +1890,173 @@ def test_body_change_of_an_ambient_module_function_not_run_stays_precise():
     inputs, nid = _ambient_case(old, new, ambient_mods=[LIB],
                                 ambient_funcs=[(LIB, "create_app")])
     assert not PL.is_selected(PL.plan(inputs), nid)
+
+
+# --- caller-local import-time edits stay precise (persea default mutants) --
+# A default of a plain function or an attribute of a plain class reaches
+# only code that runs it: a test that merely imported the module skips,
+# as long as some selected test still imports it (an edit that breaks the
+# import fails there).
+
+def _caller_and_importer(old, new, *, caller=(LIB, "f"), importer=True,
+                         ambient_mods=(), lib_refs=None, lib_stmt_refs=None,
+                         lib_stmt_bound=None):
+    """One test runs ``caller``; another only ran ``other`` in LIB."""
+    vb = VB()
+    test_fi = FI(scopes=[SC("test_f"), SC("test_other")])
+    index = IDX({
+        LIB: PF(LIB, "dn", new, scope_refs=lib_refs,
+                stmt_refs=lib_stmt_refs, stmt_bound=lib_stmt_bound),
+        TEST: PF(TEST, "dt", test_fi, test=True, imports=(LIB,)),
+    })
+    nodes = []
+    if caller is not None:
+        nodes.append(NODE(vb, TEST + "::test_f", TEST, "r1", funcs=[caller]))
+    if importer:
+        nodes.append(NODE(vb, TEST + "::test_other", TEST, "r1",
+                          funcs=[(LIB, "other")]))
+    run = RUN(vb, "r1", {LIB: "do", TEST: "dt"},
+              ambient=CT(vb, mods=ambient_mods))
+    deps = SNAP(vb, [run], nodes)
+    inputs = INP(index, deps, versions={"do": old, "dt": test_fi},
+                 changed=(LIB,))
+    return PL.plan(inputs)
+
+
+CALLER = TEST + "::test_f"
+IMPORTER = TEST + "::test_other"
+
+
+def _default_edit(local, *, decorated=False):
+    old = FI(scopes=[SC("f", skel="s1", local=local, decorated=decorated),
+                     SC("other")])
+    new = FI(scopes=[SC("f", skel="s2", local=local, decorated=decorated),
+                     SC("other")])
+    return old, new
+
+
+def test_plain_default_edit_skips_tests_that_only_imported_it():
+    d = _caller_and_importer(*_default_edit(True))
+
+    assert PL.is_selected(d, CALLER)
+    assert not PL.is_selected(d, IMPORTER)
+
+
+def test_plain_default_edit_in_an_ambient_module_stays_precise():
+    d = _caller_and_importer(*_default_edit(True), ambient_mods=[LIB])
+
+    assert PL.is_selected(d, CALLER)
+    assert not PL.is_selected(d, IMPORTER)
+
+
+def test_plain_default_edit_no_test_runs_still_runs_an_importer():
+    """Nothing runs ``f``: only an importer can show that the new default
+    breaks the import (e.g. an undefined name)."""
+    d = _caller_and_importer(*_default_edit(True), caller=None)
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def test_plain_default_edit_no_test_runs_reaches_the_ambient_run():
+    d = _caller_and_importer(*_default_edit(True), caller=None,
+                             ambient_mods=[LIB])
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def test_computed_default_edit_in_an_ambient_module_reaches_the_run():
+    d = _caller_and_importer(*_default_edit(False), ambient_mods=[LIB])
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def test_registered_default_edit_in_an_ambient_module_reaches_the_run():
+    d = _caller_and_importer(*_default_edit(False, decorated=True),
+                             ambient_mods=[LIB])
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def _method_edit(method):
+    """Plain class C with an edited method default; ``route`` (registered)
+    names C in its signature, as a FastAPI dependency would."""
+    stmts = [ST("class", bound=("C",), fp="c"),
+             ST("def", bound=("route",), refs=(("C",),), fp="r")]
+    old = FI(classes=[CL("C", plain=True)],
+             scopes=[SC(method, skel="s1", local=True),
+                     SC("route", decorated=True), SC("other")],
+             stmts=stmts)
+    new = FI(classes=[CL("C", plain=True)],
+             scopes=[SC(method, skel="s2", local=True),
+                     SC("route", decorated=True), SC("other")],
+             stmts=stmts)
+    return _caller_and_importer(
+        old, new, caller=(LIB, method), ambient_mods=[LIB],
+        lib_stmt_refs=[(), (key(LIB, "C"),)],
+        lib_stmt_bound=[(key(LIB, "C"),), (key(LIB, "route"),)])
+
+
+def test_plain_method_default_edit_does_not_reach_class_users():
+    d = _method_edit("C.get")
+
+    assert PL.is_selected(d, CALLER)
+    assert not PL.is_selected(d, IMPORTER)
+
+
+def test_constructor_default_edit_reaches_signature_readers():
+    """A framework reads ``C.__init__`` when C is a dependency."""
+    d = _method_edit("C.__init__")
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def _class_edit(plain):
+    old = FI(classes=[CL("Config", body="c1", plain=plain)],
+             scopes=[SC("use", refs=(("Config",),)), SC("other")],
+             stmts=[ST("class", bound=("Config",), fp="k")])
+    new = FI(classes=[CL("Config", body="c2", plain=plain)],
+             scopes=[SC("use", refs=(("Config",),)), SC("other")],
+             stmts=[ST("class", bound=("Config",), fp="k")])
+    return _caller_and_importer(
+        old, new, caller=(LIB, "use"), ambient_mods=[LIB],
+        lib_refs={"use": (key(LIB, "Config"),)},
+        lib_stmt_refs=[()], lib_stmt_bound=[(key(LIB, "Config"),)])
+
+
+def test_plain_class_attribute_edit_selects_only_its_users():
+    d = _class_edit(True)
+
+    assert PL.is_selected(d, CALLER)
+    assert not PL.is_selected(d, IMPORTER)
+
+
+def test_framework_class_attribute_edit_reaches_the_run():
+    d = _class_edit(False)
+
+    assert PL.is_selected(d, IMPORTER)
+
+
+def _constant_into_default(local):
+    stmts_old = [ST("assign", bound=("TIMEOUT",), fp="t1"),
+                 ST("def", bound=("fetch",), refs=(("TIMEOUT",),), fp="f")]
+    stmts_new = [ST("assign", bound=("TIMEOUT",), fp="t2"),
+                 ST("def", bound=("fetch",), refs=(("TIMEOUT",),), fp="f")]
+    scopes = [SC("fetch", local=local, decorated=not local), SC("other")]
+    return _caller_and_importer(
+        FI(scopes=scopes, stmts=stmts_old), FI(scopes=scopes, stmts=stmts_new),
+        caller=(LIB, "fetch"), ambient_mods=[LIB],
+        lib_stmt_refs=[(), (key(LIB, "TIMEOUT"),)],
+        lib_stmt_bound=[(key(LIB, "TIMEOUT"),), (key(LIB, "fetch"),)])
+
+
+def test_constant_feeding_a_plain_default_stays_precise():
+    d = _constant_into_default(True)
+
+    assert PL.is_selected(d, CALLER)
+    assert not PL.is_selected(d, IMPORTER)
+
+
+def test_constant_feeding_a_registered_signature_reaches_the_run():
+    d = _constant_into_default(False)
+
+    assert PL.is_selected(d, IMPORTER)

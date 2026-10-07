@@ -939,3 +939,66 @@ def test_ensure_cached_indexes_only_missing_current_versions(tmp_path):
     assert decoded == S.index_source(files["pkg/b.py"])
     assert S.ensure_cached(tmp_path, digests, key=key,
                            cache=_BrokenCache()) == 0
+
+
+# --- caller-local skeletons and plain classes (import-time narrowing) ---
+# A skeleton or class edit is local when only code that runs the function
+# or reads the class can notice it: no framework sees it at import.
+
+@pytest.mark.parametrize("source", [
+    "def f(x, y=2):\n    pass\n",
+    "def f(x: int = 1) -> str:\n    pass\n",
+    "class K:\n    @classmethod\n    def f(cls, extra=()):\n        pass\n",
+    "class K:\n    @staticmethod\n    def f(x=None):\n        pass\n",
+    "class K:\n    @property\n    def f(self):\n        pass\n",
+    "class K:\n    @f.setter\n    def f(self, value=None):\n        pass\n",
+    "import functools\n@functools.lru_cache(maxsize=8)\ndef f(x=1):\n    pass\n",
+])
+def test_plain_signature_is_caller_local(source):
+    scope = [s for s in S.index_source(source.encode()).scopes
+             if s.qualname.endswith("f")][0]
+
+    assert scope.local
+
+
+@pytest.mark.parametrize("source", [
+    "@router.get('/x')\ndef f():\n    pass\n",
+    "def f(x=Query(5)):\n    pass\n",
+    "def f(x: Annotated[int, Depends(dep)] = 1):\n    pass\n",
+    "def f() -> make_type():\n    pass\n",
+    "@register\ndef f():\n    pass\n",
+])
+def test_registered_or_computed_signature_is_not_local(source):
+    scope = _scopes(S.index_source(source.encode()))["f"]
+
+    assert not scope.local
+
+
+@pytest.mark.parametrize("source", [
+    "class K:\n    LIMIT = 5\n    def f(self):\n        pass\n",
+    "class K(object):\n    name: str = 'x'\n",
+    "class K(ValueError):\n    code = 3\n",
+])
+def test_plain_class_is_plain(source):
+    assert _classes(S.index_source(source.encode()))["K"].plain
+
+
+@pytest.mark.parametrize("source", [
+    "class K(BaseModel):\n    name: str = 'x'\n",
+    "class K(Base):\n    LIMIT = 5\n",
+    "@dataclass\nclass K:\n    name: str = 'x'\n",
+    "class K(metaclass=Meta):\n    LIMIT = 5\n",
+    "class K:\n    col = Column(String)\n",
+    "class K(Enum):\n    A = 1\n",
+])
+def test_framework_class_is_not_plain(source):
+    assert not _classes(S.index_source(source.encode()))["K"].plain
+
+
+def test_local_and_plain_survive_the_cache_round_trip():
+    index = S.index_source(b"class K:\n    LIMIT = 5\n"
+                           b"def f(x=1):\n    pass\n")
+
+    decoded = S.decode_index(S.encode_index(index))
+
+    assert _classes(decoded)["K"].plain and _scopes(decoded)["f"].local
