@@ -289,39 +289,66 @@ def _normalize_scope(scope: str) -> str:
     return scope.rstrip("/")
 
 
+def _match_child(scope: str, by_name: dict[str, ChildTarget]) -> tuple[str, str]:
+    """Match a normalized scope to the longest declared child prefix.
+
+    Returns ``(declaration, local)`` where ``local`` is the scope rebased
+    past the child ("" for a bare child name). Raises the unknown-child
+    problem when no declared child is a path-segment prefix of the scope.
+    Segment comparison (not string prefix) keeps ``services/api`` from
+    matching ``services/api-v2/...``.
+    """
+    parts = _safe_segments(scope)
+    best: str | None = None
+    best_len = 0
+    for name in by_name:
+        segments = name.split("/")
+        if (len(segments) > best_len
+                and len(parts) >= len(segments)
+                and tuple(parts[:len(segments)]) == tuple(segments)):
+            best, best_len = name, len(segments)
+    if best is None:
+        # Declarations are validated manifest names, safe to show.
+        where = " or ".join(f'"{name}/..."' for name in by_name)
+        whole = " or ".join(f'"{name}"' for name in by_name)
+        raise _problem(f"name a test path inside a project: {where}, "
+                       f'or a whole project: {whole}; '
+                       'to run every project use "ptest --full"')
+    return best, "/".join(parts[best_len:])
+
+
 def route_scopes(scopes: tuple[str, ...], children: tuple[ChildTarget, ...]) -> RoutedChildRequest:
     if not scopes:
         raise _problem("a monorepo scope is required")
     by_name = {child.declaration: child for child in children}
     # Declarations are validated manifest names, safe to show.
     where = " or ".join(f'"{name}/..."' for name in by_name)
-    whole = " or ".join(f'"{name}"' for name in by_name)
     selected: str | None = None
     rebased: list[str] = []
     for scope in scopes:
         scope = _normalize_scope(scope)
         try:
-            parts = _safe_segments(scope)
+            child_name, local = _match_child(scope, by_name)
         except C.Problem:
-            first = next(iter(by_name))
-            raise _problem("test paths must be relative to the repository root, "
-                           f'without ".." (for example "{first}/tests")') from None
-        child_name = parts[0]
-        if child_name not in by_name:
-            raise _problem(f"name a test path inside a project: {where}, "
-                           f'or a whole project: {whole}; '
-                           'to run every project use "ptest --full"')
+            # Preserve the exact 0.4 unsafe-path wording for bad segments.
+            try:
+                _safe_segments(scope)
+            except C.Problem:
+                first = next(iter(by_name))
+                raise _problem("test paths must be relative to the repository root, "
+                               f'without ".." (for example "{first}/tests")') from None
+            raise
         if selected is not None and selected != child_name:
             raise _problem("run one project at a time: all paths must be "
                            f"inside the same project ({where})")
         selected = child_name
-        if len(parts) == 1:
+        if not local:
             # A bare child name runs that child's own tests: its
             # configured test roots as a scoped run, never the full
             # gate (which stays `ptest --full` only).
             rebased.extend(_child_test_roots(by_name[child_name]))
         else:
-            rebased.append("/".join(parts[1:]))
+            rebased.append(local)
     assert selected is not None
     return RoutedChildRequest(target=by_name[selected], scopes=tuple(rebased))
 
@@ -361,15 +388,17 @@ def split_scopes(scopes: tuple[str, ...],
         raise _problem("a monorepo scope is required")
     routed = route_scopes(scopes, children)
     target = routed.target
+    by_name = {child.declaration: child for child in children}
     files: list[FileScope] = []
     folders: list[FolderScope] = []
     for scope in scopes:
         typed = _normalize_scope(scope)
-        parts = _safe_segments(typed)
-        if len(parts) == 1:
+        # route_scopes already validated this scope; the same longest-prefix
+        # match rebases it past a nested child declaration.
+        _declaration, local = _match_child(typed, by_name)
+        if not local:
             folders.append(FolderScope(typed=typed, local=""))
             continue
-        local = "/".join(parts[1:])
         if "::" in local or not (target.directory / local).is_dir():
             files.append(FileScope(typed=typed, local=local))
         else:

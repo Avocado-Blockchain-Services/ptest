@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+- Dependency-recorded test selection for pytest projects. Once a project
+  has a full run behind it, changed runs execute only the tests whose
+  recorded code, data or fixture dependencies changed, down to single test
+  node ids inside a file (G1). Anything unknown or unprovable falls back to
+  the 0.4 static rule per test, or to the full suite when the whole picture
+  is unknown; falling back is never an error (G2). Recording runs on every
+  pytest run with a bounded overhead, and planning reuses a per-file parse
+  cache (G3). The start line states the engine, test and file counts and
+  the main changed units, e.g. `changed: <path> (+N files) → T tests in F
+  of M files (dynamic · …)`; without usable records the static fallback
+  prints `… → N of M test files (static: <reason> · D direct · V via
+  importers)` (G6). A changed green, dynamic or static, is iteration only;
+  only `ptest --full` completes the change. Disable with `[selection]
+  dynamic = false` (default true).
+- Self-audit on every full run (G4): ptest checks whether the selector
+  would have missed any test that failed and prints `ptest: selection
+  audit: N failing tests would not have been selected — they now run
+  whenever a change statically reaches them`; the affected tests are
+  demoted to the static rule. A builder worktree's records serve the gate
+  worktree on the same code, so unchanged code reports `… → no tests
+  affected: R tests reach these changes and already passed on this code`
+  without running anything (G5). `scripts/selection_eval.py` is the
+  committed seeded mutation harness behind the release thresholds (G7);
+  the measured numbers land here once the A1-A5 campaign runs.
+- Nested monorepo child scopes: `route_scopes` matches the longest declared
+  child prefix, so `ptest services/control-plane/tests` and `ptest --full
+  services/control-plane` reach the nested child, and `services/api-v2`
+  no longer routes to `services/api`. Sibling and error behavior is
+  unchanged.
+- History compatibility (N9): no new persisted RunResult fields and no new
+  persisted reason codes; 0.4.10 decodes everything 0.5 writes.
+
 ## 0.4.10
 
 - Post-test stall detection (pytest runner only): once the tests have

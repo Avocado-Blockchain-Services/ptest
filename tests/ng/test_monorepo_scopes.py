@@ -148,3 +148,70 @@ def test_scopes_across_children_are_refused_plainly():
     with pytest.raises(C.Problem) as exc:
         monorepo.route_scopes(("api/tests", "web/src"), _children())
     assert "one project at a time" in exc.value.message
+
+
+def _nested_children():
+    return tuple(monorepo.ChildTarget(declaration=name, directory=Path(name), config=None)
+                 for name in ("services/api", "services/control-plane", "web"))
+
+
+def _prefix_children():
+    return tuple(monorepo.ChildTarget(declaration=name, directory=Path(name), config=None)
+                 for name in ("services/api", "services/api-v2"))
+
+
+@pytest.mark.parametrize(("scope", "declaration", "rebased"), [
+    ("services/control-plane", "services/control-plane", ()),
+    ("services/control-plane/tests", "services/control-plane", ("tests",)),
+    ("services/control-plane/tests/test_x.py",
+     "services/control-plane", ("tests/test_x.py",)),
+    ("services/control-plane/tests/test_x.py::test_q",
+     "services/control-plane", ("tests/test_x.py::test_q",)),
+    ("services/api/tests", "services/api", ("tests",)),
+    ("web/tests", "web", ("tests",)),
+])
+def test_nested_children_route_by_longest_prefix(scope, declaration, rebased):
+    routed = monorepo.route_scopes((scope,), _nested_children())
+    assert routed.target.declaration == declaration
+    assert routed.scopes == rebased
+
+
+@pytest.mark.parametrize(("scope", "declaration"), [
+    ("services/api/tests", "services/api"),
+    ("services/api-v2/tests", "services/api-v2"),
+    ("services/api-v2", "services/api-v2"),
+])
+def test_prefix_sibling_names_route_to_the_longest_match(scope, declaration):
+    routed = monorepo.route_scopes((scope,), _prefix_children())
+    assert routed.target.declaration == declaration
+
+
+def test_nested_scopes_across_children_are_refused_plainly():
+    with pytest.raises(C.Problem) as exc:
+        monorepo.route_scopes(
+            ("services/api/tests", "services/control-plane/tests"),
+            _nested_children())
+    assert "one project at a time" in exc.value.message
+
+
+def test_unknown_nested_scope_names_the_declared_children():
+    with pytest.raises(C.Problem) as exc:
+        monorepo.route_scopes(("services/unknown/tests",), _nested_children())
+    assert '"services/api/..."' in exc.value.message
+    assert '"services/api"' in exc.value.message
+    assert "ptest --full" in exc.value.message
+
+
+def test_nested_folder_and_file_scopes_split_on_the_child_prefix(tmp_path):
+    children = tuple(monorepo.ChildTarget(
+        declaration=name, directory=tmp_path / name, config=None)
+        for name in ("services/api", "services/control-plane"))
+    (tmp_path / "services" / "control-plane" / "tests").mkdir(parents=True)
+    split = monorepo.split_scopes(
+        ("services/control-plane/tests",
+         "services/control-plane/tests/test_x.py"), children)
+    assert split.target.declaration == "services/control-plane"
+    assert [(item.typed, item.local) for item in split.folders] == [
+        ("services/control-plane/tests", "tests")]
+    assert [(item.typed, item.local) for item in split.files] == [
+        ("services/control-plane/tests/test_x.py", "tests/test_x.py")]

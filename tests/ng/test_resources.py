@@ -32,6 +32,15 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
             "files-ports, processes, time-network." in flat)
 
 
+def test_agent_guide_names_dynamic_selection_lines():
+    guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
+    assert "(dynamic ·" in guide
+    assert "(static:" in guide
+    assert "selection audit:" in guide
+    flat = " ".join(guide.split())
+    assert "dynamic or static, is iteration only" in flat
+
+
 def test_agent_guide_describes_sampled_review_first():
     guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
     first = " ".join(guide.split("\n\n")[1].split())
@@ -55,8 +64,10 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     assert "joined the running full run" in guide
     # Output table: every documented line is present.
     for row in ("→ N of M test files", "via importers",
+                "(dynamic ·", "(static:",
                 "changed → full suite:", "vitest changed delegation",
-                "no tests affected", "nothing to test",
+                "no tests affected", "tests reach these changes",
+                "selection audit:", "nothing to test",
                 "no changes under <folder>",
                 "next: ptest --full before handoff",
                 "<project> · no changes", "waiting for N slots",
@@ -110,6 +121,10 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     assert "One test file (always runs it)" in guide
     assert "All tests under one folder" in guide
     assert "`ptest --full <folder>`" in guide
+    # Dependency-recorded selection rows: a changed green, dynamic or
+    # static, stays iteration-only.
+    flat = " ".join(guide.split())
+    assert "dynamic or static, is iteration only" in flat
 
 
 def test_repository_guide_documents_post_test_stall():

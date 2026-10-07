@@ -1303,3 +1303,38 @@ def test_released_3ab75e8_guide_upgrades_in_place(tmp_path):
     (guide_dir / "ptest-agent.md").write_bytes(old + b"\n# user note\n")
     with pytest.raises(Problem, match="already exists"):
         apply(tmp_path)
+
+
+def test_released_f478189_guide_upgrades_in_place(tmp_path):
+    """Twin: a repo holding the 0.4.10 guide upgrades cleanly.
+
+    Uses the real `_PREVIOUS_GUIDE_SHA256S` (no monkeypatch): the fixture
+    bytes must hash to the registered fa30a22c… digest, `_guide_kind`
+    must say "previous", and `apply` must rewrite it to the current
+    bytes. An edited copy still raises already-exists.
+    """
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+    from ptest.contracts import Problem
+
+    fixture = (Path(__file__).resolve().parent / "fixtures" / "previous-guides"
+               / "f478189-ptest-agent.md")
+    old = fixture.read_bytes()
+    assert hashlib.sha256(old).hexdigest() == (
+        "fa30a22ce8eb88a1687437fe8f8578c16e81b46ce54af2a955db6b565b8fc062")
+    assert rules_module._guide_kind(
+        old.decode("utf-8"), rules_module._guide()) == "previous"
+
+    guide_dir = tmp_path / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+
+    result = apply(tmp_path)
+
+    assert result.changed is True
+    assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
+
+    (guide_dir / "ptest-agent.md").write_bytes(old + b"\n# user note\n")
+    with pytest.raises(Problem, match="already exists"):
+        apply(tmp_path)

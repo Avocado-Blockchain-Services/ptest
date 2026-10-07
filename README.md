@@ -238,7 +238,16 @@ load. The agent guide tells coding agents never to add them on their own.
 Untouched projects in a monorepo print `<project> · no changes` and run
 nothing.
 
----
+## Dependency-recorded selection
+
+Once a project has a full run behind it, ptest records which code, data and
+fixture each test actually depends on, and a changed run executes only the
+tests whose dependencies changed — down to single tests inside a file:
+
+```toml
+[selection]
+dynamic = false  # opt out of dependency-recorded selection (default true)
+```
 
 ## Monorepos
 
@@ -316,6 +325,10 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | Line | Meaning |
 | --- | --- |
 | `changed: <path> → N of M test files` | the tests your change reaches |
+| `changed: <path> (+N files) → T tests in F of M files (dynamic · …)` | dependency records selected the tests your change reaches |
+| `changed: <path> (+N files) → N of M test files (static: <reason> · D direct · V via importers)` | the static fallback selected the tests your change reaches |
+| `changed: <path> → no tests affected: R tests reach these changes and already passed on this code` | the change reaches no new tests (exit 0) |
+| `ptest: selection audit: N failing tests would not have been selected — they now run whenever a change statically reaches them` | a full run pinned failing tests to static reach |
 | `changed → full suite: <reason>` | this run *is* the full suite (trigger file, too many affected tests, selection off) |
 | `no changes … — nothing to test` | nothing to run (exit 0) |
 | `waiting for N slots …` / `waiting: <reason>` | queued behind other ptest runs (the reason names what holds it); it starts by itself |
