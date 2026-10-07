@@ -503,6 +503,76 @@ def test_activation_arms_modules_imported_before_it(tmp_path):
     assert "walk-ok" in done.stdout
 
 
+def test_activation_arms_decorated_members_imported_before_it(tmp_path):
+    """Spec 6.1/N6: the sys.modules walk arms wrappers, caches and containers."""
+    (tmp_path / "pkgx").mkdir()
+    (tmp_path / "pkgx" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkgx" / "late.py").write_text(
+        "import contextlib\n"
+        "import functools\n"
+        "\n"
+        "def plain():\n"
+        "    return 'hi'\n"
+        "\n"
+        "@functools.lru_cache(maxsize=None)\n"
+        "def cached():\n"
+        "    return 'c'\n"
+        "\n"
+        "def deco(fn):\n"
+        "    @functools.wraps(fn)\n"
+        "    def wrapper(*a, **k):\n"
+        "        return fn(*a, **k)\n"
+        "    return wrapper\n"
+        "\n"
+        "@deco\n"
+        "def decorated():\n"
+        "    return 'd'\n"
+        "\n"
+        "@contextlib.contextmanager\n"
+        "def cm():\n"
+        "    yield 'v'\n"
+        "\n"
+        "HANDLERS = {'ping': lambda: 'pong'}\n"
+        "CALLBACKS = [lambda: 'cb']\n",
+        encoding="utf-8")
+    code = (_CHILD_PREAMBLE.format(recorder_path=str(
+        REPO_ROOT / "src" / "ptest" / "runtime" / "selection_recorder.py"))
+        + "import sys\n"
+        + "sys.path.insert(0, " + repr(str(tmp_path)) + ")\n"
+        + "import pkgx.late as late\n"
+        + f"rec = module.Recorder(checkout_root={str(tmp_path)!r}, run_id={'r' * 32!r},\n"
+        + f"                      report_path={str(tmp_path / 'rep.json')!r}, role='controller')\n"
+        + "assert rec.activate() is True, rec.inactive_reason\n"
+        + "m = sys.monitoring\n"
+        + "assert m.get_local_events(rec._tool, late.plain.__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, late.cached.__wrapped__.__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, late.decorated.__wrapped__.__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, late.cm.__wrapped__.__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, late.HANDLERS['ping'].__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, late.CALLBACKS[0].__code__) != 0\n"
+        + "rec.enter_test('t.py::t1')\n"
+        + "assert late.plain() == 'hi'\n"
+        + "assert late.cached() == 'c'\n"
+        + "assert late.decorated() == 'd'\n"
+        + "with late.cm() as v:\n"
+        + "    assert v == 'v'\n"
+        + "assert late.HANDLERS['ping']() == 'pong'\n"
+        + "assert late.CALLBACKS[0]() == 'cb'\n"
+        + "rec.exit_test()\n"
+        + "node = rec._nodes['t.py::t1']\n"
+        + "# co_firstlineno is the decorator line for decorated defs.\n"
+        + "assert ('pkgx/late.py', 'plain', 4) in node.ctx.functions\n"
+        + "assert ('pkgx/late.py', 'cached', 7) in node.ctx.functions\n"
+        + "assert ('pkgx/late.py', 'decorated', 17) in node.ctx.functions\n"
+        + "assert ('pkgx/late.py', 'cm', 21) in node.ctx.functions\n"
+        + "assert 'pkgx/late.py' in node.ctx.modules\n"
+        + "rec.deactivate()\n"
+        + "print('walk-decorated-ok')\n")
+    done = _run_child(code, cwd=tmp_path)
+    assert done.returncode == 0, done.stderr
+    assert "walk-decorated-ok" in done.stdout
+
+
 def test_no_free_tool_id_records_nothing_and_says_why(tmp_path):
     code = (_CHILD_PREAMBLE.format(recorder_path=str(
         REPO_ROOT / "src" / "ptest" / "runtime" / "selection_recorder.py"))

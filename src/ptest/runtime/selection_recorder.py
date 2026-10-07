@@ -448,6 +448,15 @@ class Recorder:
         ``vars()`` reads the namespace without invoking descriptors, so
         this has no import or execution side effects. Anything that is
         not project code is filtered by ``_discover`` itself.
+
+        Decorated functions hide their original code behind the
+        wrapper: ``functools.wraps``/``lru_cache``/``contextmanager``
+        wrappers expose it as ``__wrapped__``, bare decorators keep it
+        in ``__closure__`` cells, and ``lru_cache`` wrappers are not
+        functions at all. Containers (dict/list/tuple) in a namespace
+        may hold further callables. All of these are followed so that
+        pre-activation imports record the same code as the post-
+        activation audit ``exec`` walk.
         """
         try:
             stack = [value]
@@ -461,6 +470,34 @@ class Recorder:
                         code = getattr(current, "__code__", None)
                         if isinstance(code, types.CodeType):
                             self._discover(code)
+                        try:
+                            wrapped = getattr(
+                                current, "__wrapped__", None)
+                        except Exception:
+                            wrapped = None
+                        if wrapped is not None:
+                            stack.append(wrapped)
+                        try:
+                            closure = getattr(
+                                current, "__closure__", None)
+                        except Exception:
+                            closure = None
+                        if closure:
+                            try:
+                                cells = list(closure)
+                            except TypeError:
+                                cells = []
+                            for cell in cells:
+                                try:
+                                    stack.append(cell.cell_contents)
+                                except Exception:
+                                    pass
+                        continue
+                    if isinstance(current, types.MethodType):
+                        try:
+                            stack.append(current.__func__)
+                        except Exception:
+                            pass
                         continue
                     if isinstance(current, (staticmethod, classmethod)):
                         try:
@@ -474,13 +511,57 @@ class Recorder:
                             if isinstance(accessor, types.FunctionType):
                                 stack.append(accessor)
                         continue
+                    if isinstance(current, dict):
+                        try:
+                            stack.extend(current.values())
+                        except Exception:
+                            pass
+                        continue
+                    if isinstance(current, (list, tuple)):
+                        try:
+                            stack.extend(current)
+                        except Exception:
+                            pass
+                        continue
                     namespace = None
-                    if isinstance(current,
-                                  (types.ModuleType, type)):
+                    if isinstance(current, types.ModuleType):
+                        # Containers may smuggle in non-project modules,
+                        # so re-check here (nested imports are already
+                        # project-checked in the member loop below).
+                        try:
+                            if not self._module_is_project(current):
+                                continue
+                        except Exception:
+                            continue
                         try:
                             namespace = vars(current)
                         except TypeError:
                             namespace = None
+                    elif isinstance(current, type):
+                        try:
+                            namespace = vars(current)
+                        except TypeError:
+                            namespace = None
+                    else:
+                        # A non-function member carrying ``__wrapped__``
+                        # (``functools.lru_cache`` wrappers and friends):
+                        # prefer the instance dict so no descriptor fires.
+                        try:
+                            own = vars(current)
+                        except TypeError:
+                            own = None
+                        if isinstance(own, dict):
+                            if "__wrapped__" in own:
+                                stack.append(own["__wrapped__"])
+                        else:
+                            try:
+                                wrapped = getattr(
+                                    current, "__wrapped__", None)
+                            except Exception:
+                                wrapped = None
+                            if wrapped is not None:
+                                stack.append(wrapped)
+                        continue
                     if namespace is None:
                         continue
                     try:
@@ -497,9 +578,7 @@ class Recorder:
                                     stack.append(member)
                             except Exception:
                                 pass
-                        elif isinstance(member, (types.FunctionType, type,
-                                                 staticmethod, classmethod,
-                                                 property)):
+                        else:
                             stack.append(member)
                 except Exception:
                     continue
