@@ -224,6 +224,16 @@ def _propagate(index, analysis, olds):
                         if key not in names:
                             names.add(key)
                             growing = True
+                    if kind == "def":
+                        # A def whose skeleton references a changed name
+                        # (decorators, defaults, module constants) affects
+                        # the function itself (N1); bound names alone never
+                        # match a recorded (path, qual) function id.
+                        prefix = path + ":"
+                        for key in bound:
+                            qual = (key[len(prefix):]
+                                    if key.startswith(prefix) else key)
+                            af.add((path, qual))
                 elif kind == "effect" and path not in am:
                     am.add(path)
                     growing = True

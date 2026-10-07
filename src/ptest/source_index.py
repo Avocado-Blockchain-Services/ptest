@@ -163,6 +163,14 @@ def _classify(stmt: ast.stmt) -> str:
     return "effect"
 
 
+def _skeleton_nodes(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    """Nodes carrying skeleton refs: decorators, signature/defaults,
+    returns and type params (spec 5.2/5.4 name-change sources)."""
+    return [*func.decorator_list, func.args] \
+        + ([func.returns] if func.returns is not None else []) \
+        + list(getattr(func, "type_params", []))
+
+
 def _skeleton_dumps(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     parts = [_dump(decorator) for decorator in func.decorator_list]
     parts.append(_dump(func.args))
@@ -236,7 +244,10 @@ def index_source(raw: bytes) -> C.FileIndex:
             qualname, {"body": [], "skeleton": [], "refs": set()})
         entry["body"].extend(_body_dumps(node.body))
         entry["skeleton"].extend(_skeleton_dumps(node))
+        # Body chains plus skeleton chains: a default, decorator or
+        # annotation referencing a changed name affects the scope (N1).
         entry["refs"].update(_chains_of(node.body))
+        entry["refs"].update(_chains_of(_skeleton_nodes(node)))
 
     def add_class(node: ast.ClassDef, parts: tuple[str, ...]) -> None:
         qualname = ".".join(parts)
@@ -249,10 +260,18 @@ def index_source(raw: bytes) -> C.FileIndex:
         # Class docstrings are runtime-observable (__doc__); keep them in
         # the body fingerprint. Only top-level "doc" statements are ignored.
         entry["body"].extend(_dump(stmt) for stmt in members)
+        # Member-function skeletons: a method default, decorator or
+        # annotation referencing a changed name changes the class (N1).
+        # Method bodies stay out: they are covered per-scope (AF).
+        method_skeleton: list[ast.AST] = []
+        for stmt in node.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                method_skeleton.extend(_skeleton_nodes(stmt))
         entry["refs"].update(
             _chains_of([*node.decorator_list, *node.bases,
                         *[keyword.value for keyword in node.keywords],
-                        *getattr(node, "type_params", []), *members]))
+                        *getattr(node, "type_params", []), *members,
+                        *method_skeleton]))
 
     def walk(stmts: list[ast.stmt], parts: tuple[str, ...],
              in_function: bool) -> None:
@@ -279,10 +298,7 @@ def index_source(raw: bytes) -> C.FileIndex:
         kind = _classify(stmt)
         bound = tuple(sorted(set(_bound_names(stmt))))
         if kind == "def":
-            refs = _chains_of([*stmt.decorator_list, stmt.args]
-                              + ([stmt.returns] if stmt.returns is not None
-                                 else [])
-                              + list(getattr(stmt, "type_params", [])))
+            refs = _chains_of(_skeleton_nodes(stmt))
             fingerprint = _fingerprint(_skeleton_dumps(stmt))
         elif kind == "class":
             refs = _chains_of([*stmt.decorator_list, *stmt.bases,

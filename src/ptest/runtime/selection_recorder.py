@@ -219,6 +219,59 @@ def _force_opaque_event(event: object) -> bool:
         return False
 
 
+def _forkserver_socket_path() -> str | None:
+    """Live forkserver socket path, or None (never imports; N10/N11).
+
+    ``multiprocessing`` sets ``forkserver._forkserver_address`` when the
+    server starts. Reading it from ``sys.modules`` avoids importing
+    anything inside the audit hook; a missing module or attribute simply
+    means no forkserver is running in this process.
+    """
+    try:
+        module = sys.modules.get("multiprocessing.forkserver")
+        address = getattr(module, "_forkserver_address", None) \
+            if module is not None else None
+    except Exception:
+        return None
+    if isinstance(address, str) and address and "\x00" not in address:
+        return address
+    return None
+
+
+def _is_forkserver_connect(args: object) -> bool:
+    """True when ``socket.connect`` args dial the live forkserver (N3).
+
+    Once the forkserver runs, worker requests raise no spawn audit event
+    in this process — only a Unix-socket connect to the server. Project
+    functions then execute in forked workers, unrecorded, so the context
+    must go opaque. Only the exact live server address matches; every
+    other socket use is unaffected.
+    """
+    try:
+        if not isinstance(args, (tuple, list)) or len(args) < 2:
+            return False
+        address = args[1]
+        if not isinstance(address, str) or not address:
+            return False
+        server = _forkserver_socket_path()
+        return server is not None and address == server
+    except Exception:
+        return False
+
+
+def _fork_exec_arg(value: object) -> object:
+    """Unwrap one ``_posixsubprocess.fork_exec`` executable/argv slot.
+
+    The executable arrives as a one-element bytes list; argv as a list.
+    """
+    try:
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return value[0]
+    except Exception:
+        pass
+    return value
+
+
 def _is_pure_write(mode: object, flags: object) -> bool:
     """True for opens that cannot observe file content."""
     try:
@@ -1000,6 +1053,26 @@ class Recorder:
                 executable = args[0] if len(args) > 0 else None
                 rest = args[1] if len(args) > 1 else None
                 if _spawn_opaque(executable, rest, self._checkout):
+                    try:
+                        self._current.opaque = True
+                    except Exception:
+                        pass
+            elif name == "_posixsubprocess.fork_exec":
+                # spawn/forkserver workers (multiprocessing.Pool and
+                # ProcessPoolExecutor): the executable arrives as a
+                # one-element bytes list. Classify it like any spawn (N3).
+                executable = _fork_exec_arg(
+                    args[0] if len(args) > 0 else None)
+                rest = args[1] if len(args) > 1 else None
+                if _spawn_opaque(executable, rest, self._checkout):
+                    try:
+                        self._current.opaque = True
+                    except Exception:
+                        pass
+            elif name == "socket.connect":
+                # A live forkserver serves later pools/process executors
+                # with no further spawn event in this process (N3).
+                if _is_forkserver_connect(args):
                     try:
                         self._current.opaque = True
                     except Exception:

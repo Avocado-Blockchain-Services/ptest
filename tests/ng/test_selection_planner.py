@@ -1886,3 +1886,54 @@ class TestWithSourceIndex:
                      changed=(LIB,))
         d = PL.plan(inputs)
         assert PL.is_selected(d, node.nodeid)
+
+
+def test_changed_default_selects_top_level_function_caller():
+    """N1: a def whose skeleton refs a changed name is AF on itself.
+
+    TIMEOUT 5->6 changes only the assign fingerprint, so NAMES gains
+    pkg/lib.py:TIMEOUT. The `def fetch(timeout=TIMEOUT)` statement refs
+    match; propagation must mark (pkg/lib.py, fetch) affected or the
+    recorded caller is skipped. Failed before the fix: only the bound
+    name propagated, never AF on the function.
+    """
+    timeout = key(LIB, "TIMEOUT")
+    fetch = key(LIB, "fetch")
+    old = FI(scopes=[SC("fetch")],
+             stmts=[ST("assign", bound=("TIMEOUT",), fp="t1"),
+                    ST("def", bound=("fetch",), refs=[("TIMEOUT",)],
+                       fp="f1")])
+    new = FI(scopes=[SC("fetch")],
+             stmts=[ST("assign", bound=("TIMEOUT",), fp="t2"),
+                    ST("def", bound=("fetch",), refs=[("TIMEOUT",)],
+                       fp="f1")])
+    inputs, nid = pair(
+        old, new,
+        node_kw={"funcs": [(LIB, "fetch")]},
+        lib_stmt_refs=[frozenset(), {timeout}],
+        lib_stmt_bound=[{timeout}, {fetch}])
+    d = PL.plan(inputs)
+    assert PL.is_selected(d, nid)
+
+
+def test_changed_default_selects_method_caller():
+    """N1: a method default referencing a changed constant selects callers.
+
+    The class refs carry the method-skeleton chain (TIMEOUT) and the
+    Client.get scope refs match, so (pkg/lib.py, Client.get) lands in
+    CF/AF and the recorded `client.Client().get()` caller is selected.
+    """
+    timeout = key(LIB, "TIMEOUT")
+    old = FI(scopes=[SC("Client.get")], classes=[CL("Client")],
+             stmts=[ST("assign", bound=("TIMEOUT",), fp="t1")])
+    new = FI(scopes=[SC("Client.get")], classes=[CL("Client")],
+             stmts=[ST("assign", bound=("TIMEOUT",), fp="t2")])
+    inputs, nid = pair(
+        old, new,
+        node_kw={"funcs": [(LIB, "Client.get")]},
+        lib_refs={"Client.get": {timeout}},
+        lib_class_refs={"Client": {timeout}},
+        lib_stmt_refs=[frozenset()],
+        lib_stmt_bound=[{timeout}])
+    d = PL.plan(inputs)
+    assert PL.is_selected(d, nid)

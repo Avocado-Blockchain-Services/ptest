@@ -128,7 +128,7 @@ else:  # Local frozen shapes; replaced by the barrier, never diverged from it.
         ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "htmlcov",
         ".hypothesis",
     })
-    SOURCE_INDEX_VERSION = 1
+    SOURCE_INDEX_VERSION = 2
 
     def selection_ids(values: Iterable[int]) -> array:
         return array("I", sorted(set(values)))
@@ -918,13 +918,41 @@ class SelectionStore:
                         for f in _unpack_ids(fixtures)
                         if f in fixture_key_of))
 
+            # N1: fixture_deps holds one row per (fixture, run), and a
+            # narrowed re-record must not drop deps other retained runs'
+            # nodes still rely on (a higher-scope fixture behaving
+            # differently per consumer, e.g. request.param). Merge every
+            # retained run's record into one union per fixture; opaque is
+            # sticky. Rows merge oldest-first so run_id names the newest
+            # contributing run deterministically.
+            recorded_at_of = {run_id: recorded_at
+                              for run_id, recorded_at, _, _ in run_rows}
+            ordered = sorted(
+                fixture_rows,
+                key=lambda row: (recorded_at_of.get(row[1], float("-inf")),
+                                 row[1]))
             fixtures_out: dict[int, FixtureRecord] = {}
-            for fixture_id, run_id, deps in fixture_rows:
+            for fixture_id, run_id, deps in ordered:
                 if fixture_id in fixture_key_of:
                     dense = fixture_index[fixture_key_of[fixture_id]]
-                    fixtures_out[dense] = FixtureRecord(
+                    record = FixtureRecord(
                         fixture=dense, run_id=run_id,
                         deps=remap(_unpack_ctx(deps)))
+                    prev = fixtures_out.get(dense)
+                    fixtures_out[dense] = record if prev is None else \
+                        FixtureRecord(
+                            fixture=dense, run_id=record.run_id,
+                            deps=ContextDeps(
+                                functions=selection_ids(
+                                    (*prev.deps.functions,
+                                     *record.deps.functions)),
+                                modules=selection_ids(
+                                    (*prev.deps.modules,
+                                     *record.deps.modules)),
+                                data=selection_ids(
+                                    (*prev.deps.data, *record.deps.data)),
+                                opaque=(prev.deps.opaque
+                                        or record.deps.opaque)))
 
             vocabulary = DepVocabulary(
                 paths=tuple(sorted(used_paths)),

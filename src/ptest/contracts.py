@@ -1305,7 +1305,7 @@ def stack_dump_pid(report_name: str, name: str) -> int | None:
 # a separate SQLite file that older ptest never opens.
 
 SELECTION_PROTOCOL = "ptest-selection-v1"
-SOURCE_INDEX_VERSION = 1
+SOURCE_INDEX_VERSION = 2
 SELECTION_STORE_DIR = "projects"
 SELECTION_STORE_NAME = "selection.db"
 SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024
@@ -1526,7 +1526,7 @@ class ScopeIndex:
     qualname: str              # selection_normalize_qualname form, never "<locals>"
     body: str                  # sha256 hex of the AST-normalised body
     skeleton: str              # sha256 hex: decorators, signature, defaults, returns, type params, async
-    refs: tuple[tuple[str, ...], ...]   # raw dotted Load chains in the body, sorted, unique
+    refs: tuple[tuple[str, ...], ...]   # raw dotted Load chains in the body and skeleton, sorted, unique
 
 
 @dataclass(frozen=True, slots=True)
@@ -1536,7 +1536,7 @@ class ClassIndex:
     qualname: str
     skeleton: str              # bases, keywords, decorators, type params
     body: str                  # non-function class-body statements in order
-    refs: tuple[tuple[str, ...], ...]   # raw chains in the skeleton and non-function body
+    refs: tuple[tuple[str, ...], ...]   # raw chains in the skeleton, non-function body and member-function skeletons
 
 
 @dataclass(frozen=True, slots=True)

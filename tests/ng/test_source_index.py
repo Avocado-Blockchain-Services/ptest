@@ -311,7 +311,8 @@ def test_decode_rejects_truncated_garbage_wrong_version():
     assert S.decode_index(bad_magic) is None
     # A well-formed header with a foreign version word is also rejected.
     at = len(S._MAGIC)
-    bad_version = blob[:at] + b"\x00\x00\x00\x02" + blob[at + 4:]
+    foreign = (C.SOURCE_INDEX_VERSION + 1).to_bytes(4, "big")
+    bad_version = blob[:at] + foreign + blob[at + 4:]
     assert S.decode_index(bad_version) is None
 
 
@@ -819,3 +820,28 @@ def test_index_source_docstring_edit_changes_fingerprint():
 
     assert gone.body != changed.body
     assert gone.skeleton == changed.skeleton
+
+
+def test_scope_refs_include_skeleton_chains():
+    """N1: defaults, decorators and annotations are indexed refs (2.3).
+
+    A scope whose default argument references a module constant must
+    carry that chain, or a constant change never affects the scope.
+    Failed before the fix: refs held body chains only.
+    """
+    raw = (b"TIMEOUT = 5\n"
+           b"def fetch(timeout=TIMEOUT):\n"
+           b"    return timeout\n"
+           b"class Client:\n"
+           b"    def get(self, timeout=TIMEOUT):\n"
+           b"        return timeout\n"
+           b"@TIMEOUT\n"
+           b"def decorated():\n"
+           b"    return 1\n")
+    index = S.index_source(raw)
+    scopes = _scopes(index)
+    assert ("TIMEOUT",) in scopes["fetch"].refs
+    assert ("TIMEOUT",) in scopes["Client.get"].refs
+    assert ("TIMEOUT",) in scopes["decorated"].refs
+    classes = _classes(index)
+    assert ("TIMEOUT",) in classes["Client"].refs

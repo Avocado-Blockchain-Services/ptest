@@ -797,3 +797,78 @@ def test_ingest_accepts_real_serial_output(tmp_path):
     assert run.complete is True
 
 
+
+
+def test_fork_exec_python_marks_opaque(tmp_path):
+    """N3: spawn/forkserver pool workers via _posixsubprocess.fork_exec.
+
+    Multiprocessing Pool and ProcessPoolExecutor start workers through
+    _posixsubprocess.fork_exec (the audit event the recorder ignored);
+    the executable arrives as a one-element bytes list. Spawning the
+    running interpreter must mark the context opaque. Failed before the
+    fix: no branch handled the event and opaque stayed False.
+    """
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    assert rec._current.opaque is False
+    exe = sys.executable.encode()
+    rec._handle_audit("_posixsubprocess.fork_exec",
+                      ([exe], [exe, b"-c", b"pass"], None))
+    assert rec._current.opaque is True
+
+
+def test_fork_exec_outside_binary_stays_clean(tmp_path):
+    outside = shutil.which("true")
+    if outside is None:
+        pytest.skip("no true binary on PATH")
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    blob = outside.encode()
+    rec._handle_audit("_posixsubprocess.fork_exec",
+                      ([blob], [blob], None))
+    assert rec._current.opaque is False
+
+
+def test_forkserver_connect_marks_opaque(tmp_path, monkeypatch):
+    """N3: a pool served by an already-running forkserver still taints.
+
+    Once the forkserver runs, later pools raise no spawn audit event in
+    this process — only socket.connect to the server socket. Dialling
+    that exact address must mark the context opaque; any other socket
+    use must stay clean.
+    """
+    server = "/tmp/pymp-test/sock-abc123"
+    fake = SimpleNamespace(_forkserver_address=server)
+    monkeypatch.setitem(sys.modules, "multiprocessing.forkserver", fake)
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    assert rec._current.opaque is False
+    rec._handle_audit("socket.connect", (object(), server))
+    assert rec._current.opaque is True
+
+
+def test_other_socket_connect_stays_clean(tmp_path, monkeypatch):
+    fake = SimpleNamespace(_forkserver_address="/tmp/pymp-test/sock-abc123")
+    monkeypatch.setitem(sys.modules, "multiprocessing.forkserver", fake)
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    rec._handle_audit("socket.connect", (object(), "/tmp/pymp-test/sock-other"))
+    assert rec._current.opaque is False
+    rec._handle_audit("socket.connect", (object(), ("127.0.0.1", 8080)))
+    assert rec._current.opaque is False
+    rec._handle_audit("socket.connect", ())
+    assert rec._current.opaque is False
+
+
+def test_no_forkserver_socket_connect_stays_clean(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "multiprocessing.forkserver",
+                        SimpleNamespace())
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    rec._handle_audit("socket.connect", (object(), "/tmp/pymp-test/sock-abc123"))
+    assert rec._current.opaque is False

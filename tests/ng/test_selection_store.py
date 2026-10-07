@@ -12,6 +12,7 @@ boundary.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import sqlite3
@@ -861,3 +862,58 @@ def test_update_error_mapping_is_typed():
     assert io_error.value.code == "state-unavailable"
     with pytest.raises(sqlite3.OperationalError):
         S._map_update_error(sqlite3.OperationalError("no such table: nope"))
+
+
+def test_snapshot_unions_fixture_rows_across_runs(domain_factory):
+    """N1: a narrowed re-record must not drop another run's fixture deps.
+
+    R1 records a module-scoped fixture executing both setup_sqlite and
+    setup_pg; a later scoped run R2 re-records the same fixture with only
+    setup_sqlite. The snapshot must carry the union, so nodes from R1
+    still resolve the setup_pg dependency. Would fail before the fix:
+    the last row scanned won and the union assertion below missed index 1.
+    """
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        paths = ("tests/test_x.py", "pkg/db.py")
+        funcs = ((1, "setup_sqlite"), (1, "setup_pg"))
+        fx_vocab = (("tests/test_x.py", "backend", "module"),)
+        digests = {path: "bb" * 32 for path in paths}
+        full_run = _run(
+            {
+                "tests/test_x.py::test_x[sqlite]": _node(
+                    "tests/test_x.py::test_x[sqlite]",
+                    "passed", _ctx(), fixtures=(0,)),
+                "tests/test_x.py::test_x[pg]": _node(
+                    "tests/test_x.py::test_x[pg]",
+                    "passed", _ctx(), fixtures=(0,)),
+            },
+            paths=paths, funcs=funcs,
+            fixtures={0: _ctx(funcs=(0, 1))},
+        )
+        full_run = dataclasses.replace(
+            full_run, vocabulary=_vocab(paths, funcs, fx_vocab))
+        store.update(full_run, run_id=RUN_A, recorded_at=100.0,
+                     compatibility=COMPAT, digests=digests, full=True)
+        scoped_run = _run(
+            {
+                "tests/test_x.py::test_x[sqlite]": _node(
+                    "tests/test_x.py::test_x[sqlite]",
+                    "passed", _ctx(), fixtures=(0,)),
+            },
+            paths=paths, funcs=funcs,
+            fixtures={0: _ctx(funcs=(0,))},
+        )
+        scoped_run = dataclasses.replace(
+            scoped_run, vocabulary=_vocab(paths, funcs, fx_vocab))
+        store.update(scoped_run, run_id=RUN_B, recorded_at=200.0,
+                     compatibility=COMPAT, digests=digests, full=False)
+        snap = store.snapshot()
+        assert len(snap.fixtures) == 1
+        record = snap.fixtures[0]
+        assert sorted(record.deps.functions) == [0, 1]
+        assert record.run_id == RUN_B
+        assert snap.nodes["tests/test_x.py::test_x[pg]"].run_id == RUN_A
+    finally:
+        store.close()

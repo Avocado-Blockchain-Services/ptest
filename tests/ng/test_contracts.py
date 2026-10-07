@@ -2322,7 +2322,7 @@ def test_selection_policy_dynamic_accepts_bool_only(value):
 
 def test_selection_protocol_and_store_constants():
     assert C.SELECTION_PROTOCOL == "ptest-selection-v1"
-    assert C.SOURCE_INDEX_VERSION == 1
+    assert C.SOURCE_INDEX_VERSION == 2
     assert C.SELECTION_STORE_DIR == "projects"
     assert C.SELECTION_STORE_NAME == "selection.db"
     assert C.SELECTION_STORE_MAX_BYTES == 64 * 1024 * 1024
