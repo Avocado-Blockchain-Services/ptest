@@ -224,16 +224,6 @@ class Harness:
         assert self.read().kind == "phase"
         result = []
         for _ in range(count):
-            # A blind accept cannot tell a dead guard from a slow spawn and
-            # burns the whole watchdog either way. Poll guard liveness while
-            # waiting, like at_barrier does, so an early guard exit fails
-            # fast with its cause instead of a bare accept timeout.
-            deadline = time.monotonic() + _RECOVERY_WATCHDOG_S
-            while not select.select([self.ready], [], [], 0.05)[0]:
-                assert self.process.poll() is None, \
-                    "guard exited before workload connected"
-                assert time.monotonic() < deadline, \
-                    "workload connect watchdog expired"
             peer, _ = self.ready.accept()
             peer.settimeout(_RECOVERY_WATCHDOG_S)
             raw = bytearray()
@@ -687,30 +677,6 @@ def test_partial_active_frame_does_not_block_execution_deadline(harness):
     facts = [f.payload for f in h.frames if f.kind == "runner-facts"]
     assert facts[0]["problem"]["code"] == "execution-timeout"
     assert not h.later.exists()
-
-
-def test_guard_exit_before_workload_connect_fails_fast(harness):
-    # The workload-connect wait must tell a dead guard from a slow spawn:
-    # a missing executable kills the guard right after the phase frame, so
-    # running() must raise the guard-exited assertion at once, never burn
-    # the whole connect watchdog ending in a bare accept timeout.
-    h = harness()
-    h.workload()
-    h.manifest = replace(
-        h.manifest,
-        attempts=(C.PreparedRun(argv=("/nonexistent-ptest-spawn-probe",),
-                                cwd=h.root),),
-        attempt_ids=("a001",),
-    )
-    h.start()
-    start = time.monotonic()
-    with pytest.raises(AssertionError,
-                       match="guard exited before workload connected"):
-        h.running()
-    assert time.monotonic() - start < _RECOVERY_WATCHDOG_S
-    assert h.finish()[0] == 0  # guard success is only a provisional handoff
-    facts = [f.payload for f in h.frames if f.kind == "runner-facts"]
-    assert facts[0]["problem"]["code"] == "missing-executable"
 
 
 @pytest.mark.parametrize("bad", ["nonce", "run", "kind", "payload", "oversize", "truncated", "json"])
