@@ -429,13 +429,13 @@ class Recorder:
         # cached; anything else resolves again on its next sighting.
         self._code_cache: dict[int, tuple[object, tuple[str, str | None, int]]] = {}
         self._path_memo: dict[str, str | None] = {}
-        # Lazy initialisation: the first sighting in this process of each
-        # project function (entry), module ("M", rel) and data file
-        # ("D", rel), with the context that saw it and the project code
-        # that caused it. State built once and reused by later tests is a
-        # dependency of every test that runs the code that built it.
-        self._first: dict[object, tuple[object, object]] = {}
-        self._seen_codes: set[int] = set()
+        # Lazy initialisation: the context that first ran each project
+        # function (entry), module ("M", rel) and data file ("D", rel) in
+        # this process, and the ownership edges (owner, state) seen while
+        # an owner ran for the first time. State built once and reused by
+        # later tests is a dependency of every test that runs its owner.
+        self._first: dict[object, object] = {}
+        self._edges: set[tuple[object, object]] = set()
         self._test_ctx: _Ctx | None = None
         self._fixture_owners: list[object] = []
         self._file_project: dict[str, bool] = {}
@@ -995,8 +995,7 @@ class Recorder:
                 self._store_code(code, entry)
             if entry is not None:
                 rel, qualname, firstlineno = entry
-                if id(code) not in self._seen_codes:
-                    self._first_sighting(code, entry)
+                self._sighting(entry)
                 if qualname is None:
                     try:
                         self._current.modules.add(rel)
@@ -1020,43 +1019,51 @@ class Recorder:
             return self._open_node
         return current
 
-    def _first_sighting(self, code: object,
-                        entry: tuple[str, str | None, int]) -> None:
-        """First run of one project code object in this process."""
+    def _sighting(self, entry: tuple[str, str | None, int]) -> None:
+        """One project code object starting in the current context."""
         try:
-            self._seen_codes.add(id(code))
             rel, qualname, _ = entry
             key = ("M", rel) if qualname is None else entry
-            if key in self._first:
-                return
             try:
                 frame = sys._getframe(2).f_back
             except Exception:
                 frame = None
-            self._note_first(key, frame)
+            self._note(key, frame)
         except Exception:
             pass
 
-    def _note_first(self, key: object, frame: object) -> None:
-        """Record where ``key`` was first seen and the code that caused it:
-        the nearest project frame from ``frame`` up, else the function
-        fixture being set up. Ambient sightings need no owner."""
+    def _note(self, key: object, frame: object) -> None:
+        """Note ``key`` in the current context and, while its owner runs
+        for the first time in this process, the edge owner → key.
+
+        The owner is the nearest project frame from ``frame`` up, else the
+        function fixture being set up (code started on another thread or
+        a greenlet has no project caller). Everything an owner ran on its
+        first run is state later runs may reuse instead of rebuilding. A
+        module body runs once per process, so its importer always owns it.
+        Ambient sightings need no owner: ambient is shared by every test.
+        """
         try:
             token = self._token()
+            if key not in self._first:
+                self._first[key] = token
+            if token is self._ambient:
+                return
             owner = None
-            if token is not self._ambient:
-                depth = 0
-                while frame is not None and depth < _OWNER_MAX_DEPTH:
-                    entry = self._frame_entry(frame.f_code)
-                    if entry is not None:
-                        owner = (("M", entry[0]) if entry[1] is None
-                                 else entry)
-                        break
-                    frame = frame.f_back
-                    depth += 1
-                if owner is None and self._fixture_owners:
-                    owner = self._fixture_owners[-1]
-            self._first[key] = (token, owner)
+            depth = 0
+            while frame is not None and depth < _OWNER_MAX_DEPTH:
+                entry = self._frame_entry(frame.f_code)
+                if entry is not None:
+                    owner = ("M", entry[0]) if entry[1] is None else entry
+                    break
+                frame = frame.f_back
+                depth += 1
+            if owner is None and self._fixture_owners:
+                owner = self._fixture_owners[-1]
+            if owner is None or owner == key:
+                return
+            if key[0] == "M" or self._first.get(owner) is token:
+                self._edges.add((owner, key))
         except Exception:
             pass
 
@@ -1098,39 +1105,14 @@ class Recorder:
     def _lazy_edges(self) -> list[tuple[object, object]]:
         """Ownership edges ``(owner, state)`` of lazily built state.
 
-        A function or data file first seen in one context, seen in no
-        other, and caused by code first run in that same context, is
-        state built once and reused (memoised engines, ``lru_cache``, a
-        template database). A module body runs once per process, so a
-        lazily imported module always belongs to its importer. Ingest
-        applies the edges of every process of the run to every test, so
-        state one xdist worker built and the others reused through an
-        external store (a database marker) reaches them all.
+        Ingest applies the edges of every process of the run to every
+        test, so state one xdist worker built and the others reused
+        through an external store (a database marker) reaches them all.
         """
-        edges: list[tuple[object, object]] = []
         try:
-            contexts = [self._ambient, *self._fixtures.values(),
-                        *(node.ctx for node in self._nodes.values())]
-            seen_in: dict[object, int] = {}
-            for ctx in contexts:
-                for entry in ctx.functions:
-                    seen_in[entry] = seen_in.get(entry, 0) + 1
-                for rel in ctx.data:
-                    key = ("D", rel)
-                    seen_in[key] = seen_in.get(key, 0) + 1
-            for key, (token, owner) in self._first.items():
-                if owner is None or token is self._ambient:
-                    continue
-                first_owner = self._first.get(owner)
-                if first_owner is None:
-                    continue
-                if key[0] != "M" and (first_owner[0] is not token
-                                      or seen_in.get(key, 0) != 1):
-                    continue
-                edges.append((owner, key))
+            return list(self._edges)
         except Exception:
             return []
-        return edges
 
     def _discover(self, code: object) -> None:
         """Arm every project code object under ``code`` for PY_START."""
@@ -1295,9 +1277,8 @@ class Recorder:
                     return
                 rel = self._resolve_data(path)
                 if rel is not None:
-                    key = ("D", rel)
-                    if key not in self._first:
-                        self._note_first(key, frame)
+                    if rel not in self._current.data:
+                        self._note(("D", rel), frame)
                     self._record_data(rel)
             elif _force_opaque_event(name):
                 try:

@@ -1104,6 +1104,12 @@ def third():
 def fourth():
     lazy.dispatch(False)
 
+def zeroth():
+    # Runs the builder directly first (like a migration test running
+    # alembic itself): build and _read are then seen in two contexts.
+    lazy.build()
+
+run("tests/test_l.py::test_zeroth", zeroth)
 run("tests/test_l.py::test_first", first)
 run("tests/test_l.py::test_second", second)
 run("tests/test_l.py::test_third", third)
@@ -1160,6 +1166,18 @@ def test_memoised_state_reaches_every_later_caller(tmp_path):
     assert "data/seed.txt" in first["data"]
     assert "data/seed.txt" in second["data"]
     assert not second["opaque"]
+
+
+def test_builder_also_run_directly_still_reaches_reusers(tmp_path):
+    """The builder ran elsewhere too (a migration test runs alembic
+    directly): the code the owner called on its first run is still its
+    state. Before the fix a function seen in two contexts lost its owner
+    (control-plane: 554 misses even with cross-worker edges)."""
+    nodes = _lazy_project(tmp_path)
+    assert "pkg/lazy.py::build" in nodes["test_zeroth"]["functions"]
+    assert "pkg/lazy.py::build" in nodes["test_second"]["functions"]
+    assert "pkg/lazy.py::_read" in nodes["test_second"]["functions"]
+    assert "pkg/migr.py" in nodes["test_second"]["modules"]
 
 
 def test_thread_started_by_a_fixture_reaches_later_fixture_users(tmp_path):
