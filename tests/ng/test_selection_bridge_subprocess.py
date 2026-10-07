@@ -580,3 +580,73 @@ def test_ingest_accepts_real_xdist_output(tmp_path):
     assert run.complete is True
     assert run.recording is True
     assert run.ambient.opaque is False
+
+
+# ---------------------------------------------------------------------------
+# Lazy state: a per-process template built by the first fixture user.
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_CONFTEST = '''\
+import importlib.util
+import threading
+from pathlib import Path
+
+import pytest
+
+_engine = None
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _migrate():
+    global _engine
+    path = _ROOT / "migrations" / "m0001.py"
+    spec = importlib.util.spec_from_file_location("m0001", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _engine = module.upgrade()
+
+
+def _worker_engine():
+    if _engine is None:
+        worker = threading.Thread(target=_migrate)
+        worker.start()
+        worker.join()
+    return _engine
+
+
+@pytest.fixture
+def db():
+    return _worker_engine()
+'''
+
+
+def test_memoised_template_reaches_every_fixture_user(tmp_path):
+    """The persea control-plane shape: a function fixture migrates a
+    template once per process on another thread, through importlib; every
+    later user of the fixture depends on the migration code. Before the
+    fix only the first user recorded it."""
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "migrations").mkdir()
+    (root / "migrations" / "m0001.py").write_text(
+        "REVISION = '0001'\n\n\ndef upgrade():\n    return REVISION\n",
+        encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text(_TEMPLATE_CONFTEST,
+                                                encoding="utf-8")
+    (root / "tests" / "test_db.py").write_text(
+        "def test_a(db):\n    assert db == '0001'\n\n\n"
+        "def test_b(db):\n    assert db == '0001'\n\n\n"
+        "def test_c():\n    assert True\n", encoding="utf-8")
+    twin = _run_bridge(root, ["-p", "no:cacheprovider", "tests/test_db.py"],
+                       record=True)
+    assert twin.returncode == 0, twin.stdout + twin.stderr
+    (_, payload), = _read_deps(twin.report_path)
+    nodes = _decode(payload)["nodes"]
+    for name in ("test_a", "test_b"):
+        node = nodes[f"tests/test_db.py::{name}"]
+        assert "migrations/m0001.py" in node["modules"], name
+        assert {entry[1] for entry in node["functions"]} >= {
+            "_migrate", "upgrade"}, name
+    lone = nodes["tests/test_db.py::test_c"]
+    assert "migrations/m0001.py" not in lone["modules"]
+    assert "_migrate" not in {entry[1] for entry in lone["functions"]}

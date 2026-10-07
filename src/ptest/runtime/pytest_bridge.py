@@ -2796,8 +2796,9 @@ class OwnedPlugin:
     def pytest_fixture_setup(self, fixturedef: Any, request: Any) -> Any:
         """Record higher-scope fixture setups in their own context.
 
-        Function-scoped fixtures stay in the test context; every other
-        scope switches to the fixture key context for the setup and
+        Function-scoped fixtures stay in the test context (their setup is
+        noted as the owner of code they start on other threads); every
+        other scope switches to the fixture key context for the setup and
         restores the previous context afterwards. Without a recorder this
         yields straight through.
         """
@@ -2808,8 +2809,20 @@ class OwnedPlugin:
                 key = recorder.fixture_key(fixturedef)
             except Exception:
                 key = None
-        if key is None:
+        if recorder is None:
             return (yield)
+        if key is None:
+            try:
+                recorder.enter_function_fixture(fixturedef)
+            except Exception:
+                pass
+            try:
+                return (yield)
+            finally:
+                try:
+                    recorder.exit_function_fixture()
+                except Exception:
+                    pass
         try:
             recorder.enter_fixture(key)
         except Exception:

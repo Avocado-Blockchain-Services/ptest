@@ -52,6 +52,8 @@ _TOOL_IDS = (3, 4, 2)
 _TOOL_NAME = "ptest-selection"
 _CONTEXT_MAX_FUNCTIONS = 100000
 _CONTEXT_MAX_DATA = 4096
+# Frames searched for the project caller that owns a first execution.
+_OWNER_MAX_DEPTH = 256
 # Frozen literal pinned to contracts (SELECTION_DATA_MAX_BYTES): the bound the
 # engine applies to its own digest reads. The recorder records data paths
 # regardless of size and never uses this as a drop filter (spec N1).
@@ -427,6 +429,17 @@ class Recorder:
         # cached; anything else resolves again on its next sighting.
         self._code_cache: dict[int, tuple[object, tuple[str, str | None, int]]] = {}
         self._path_memo: dict[str, str | None] = {}
+        # Lazy initialisation: the first sighting in this process of each
+        # project function (entry), module ("M", rel) and data file
+        # ("D", rel), with the context that saw it and the project code
+        # that caused it. State built once and reused by later tests is a
+        # dependency of every test that runs the code that built it.
+        self._first: dict[object, tuple[object, object]] = {}
+        self._seen_codes: set[int] = set()
+        self._test_ctx: _Ctx | None = None
+        self._fixture_owners: list[object] = []
+        self._file_project: dict[str, bool] = {}
+        self._own_files: frozenset[str] = frozenset()
 
     def _lookup_code(
             self, code: object) -> tuple[str, str | None, int] | None:
@@ -754,6 +767,7 @@ class Recorder:
             self._switch()
             self._stack.append(self._current)
             self._current = self._new_ctx()
+            self._test_ctx = self._current
             node = self._nodes.get(nodeid)
             if node is None:
                 node = _Node(nodeid)
@@ -767,6 +781,8 @@ class Recorder:
         try:
             keys = self.fixture_keys_for_item(item) if item is not None else []
             node, self._open_node = self._open_node, None
+            self._test_ctx = None
+            self._fixture_owners.clear()
             if node is not None:
                 for key in keys:
                     if key not in node.fixtures:
@@ -801,6 +817,33 @@ class Recorder:
             else:
                 self._current = self._ambient
             self._switch()
+        except Exception:
+            pass
+
+    def enter_function_fixture(self, fixturedef: object) -> None:
+        """Note a function-scoped fixture setup as the owner of code that
+        runs without a project caller on its stack (another thread)."""
+        try:
+            func = getattr(fixturedef, "func", None)
+            for _ in range(16):
+                wrapped = getattr(func, "__wrapped__", None)
+                if wrapped is None:
+                    break
+                func = wrapped
+            code = getattr(func, "__code__", None)
+            owner = None
+            if isinstance(code, types.CodeType):
+                entry = self._frame_entry(code)
+                if entry is not None and entry[1] is not None:
+                    owner = entry
+            self._fixture_owners.append(owner)
+        except Exception:
+            pass
+
+    def exit_function_fixture(self) -> None:
+        try:
+            if self._fixture_owners:
+                self._fixture_owners.pop()
         except Exception:
             pass
 
@@ -952,6 +995,8 @@ class Recorder:
                 self._store_code(code, entry)
             if entry is not None:
                 rel, qualname, firstlineno = entry
+                if id(code) not in self._seen_codes:
+                    self._first_sighting(code, entry)
                 if qualname is None:
                     try:
                         self._current.modules.add(rel)
@@ -965,6 +1010,165 @@ class Recorder:
                 return sys.monitoring.DISABLE
             except Exception:
                 return None
+
+    # -- lazy initialisation ------------------------------------------------
+
+    def _token(self) -> object:
+        """The context a sighting lands in: the open node or a context."""
+        current = self._current
+        if current is self._test_ctx and self._open_node is not None:
+            return self._open_node
+        return current
+
+    def _first_sighting(self, code: object,
+                        entry: tuple[str, str | None, int]) -> None:
+        """First run of one project code object in this process."""
+        try:
+            self._seen_codes.add(id(code))
+            rel, qualname, _ = entry
+            key = ("M", rel) if qualname is None else entry
+            if key in self._first:
+                return
+            try:
+                frame = sys._getframe(2).f_back
+            except Exception:
+                frame = None
+            self._note_first(key, frame)
+        except Exception:
+            pass
+
+    def _note_first(self, key: object, frame: object) -> None:
+        """Record where ``key`` was first seen and the code that caused it:
+        the nearest project frame from ``frame`` up, else the function
+        fixture being set up. Ambient sightings need no owner."""
+        try:
+            token = self._token()
+            owner = None
+            if token is not self._ambient:
+                depth = 0
+                while frame is not None and depth < _OWNER_MAX_DEPTH:
+                    entry = self._frame_entry(frame.f_code)
+                    if entry is not None:
+                        owner = (("M", entry[0]) if entry[1] is None
+                                 else entry)
+                        break
+                    frame = frame.f_back
+                    depth += 1
+                if owner is None and self._fixture_owners:
+                    owner = self._fixture_owners[-1]
+            self._first[key] = (token, owner)
+        except Exception:
+            pass
+
+    def _frame_entry(self, code: object) -> tuple[str, str | None, int] | None:
+        """Project identity of a frame's code (memoised per filename)."""
+        try:
+            entry = self._lookup_code(code)
+            if entry is not None:
+                return entry
+            filename = getattr(code, "co_filename", None)
+            if not isinstance(filename, str):
+                return None
+            known = self._file_project.get(filename)
+            if known is False:
+                return None
+            if known is None and filename in self._own_files_set():
+                self._file_project[filename] = False
+                return None
+            entry = self._resolve_code(code)
+            self._file_project[filename] = entry is not None
+            self._store_code(code, entry)
+            return entry
+        except Exception:
+            return None
+
+    def _own_files_set(self) -> frozenset[str]:
+        """Source files of the recorder and the bridge (never owners)."""
+        if not self._own_files:
+            names = set()
+            for name in (__name__, "ptest.runtime.pytest_bridge",
+                         "pytest_bridge"):
+                filename = getattr(sys.modules.get(name), "__file__", None)
+                if isinstance(filename, str):
+                    names.add(filename)
+            names.add(__file__)
+            self._own_files = frozenset(names)
+        return self._own_files
+
+    def _apply_lazy_owners(self) -> None:
+        """Give every context that ran an owner the state it built.
+
+        A function or data file first seen in one context, seen in no
+        other, and caused by code first run in that same context, is
+        lazily built state: later contexts that run the owner reuse it
+        instead of rebuilding it. A module body runs once per process, so
+        a lazily imported module always belongs to its importer.
+        """
+        try:
+            contexts = [*self._fixtures.values(),
+                        *(node.ctx for node in self._nodes.values())]
+            seen_in: dict[object, int] = {}
+            for ctx in (self._ambient, *contexts):
+                for entry in ctx.functions:
+                    seen_in[entry] = seen_in.get(entry, 0) + 1
+                for rel in ctx.data:
+                    key = ("D", rel)
+                    seen_in[key] = seen_in.get(key, 0) + 1
+            children: dict[object, list[object]] = {}
+            for key, (token, owner) in self._first.items():
+                if owner is None or token is self._ambient:
+                    continue
+                first_owner = self._first.get(owner)
+                if first_owner is None:
+                    continue
+                if key[0] != "M" and (first_owner[0] is not token
+                                      or seen_in.get(key, 0) != 1):
+                    continue
+                children.setdefault(owner, []).append(key)
+            if not children:
+                return
+            closures: dict[object, set[object]] = {}
+
+            def closure(root: object) -> set[object]:
+                done = closures.get(root)
+                if done is not None:
+                    return done
+                found: set[object] = set()
+                stack = list(children.get(root, ()))
+                while stack:
+                    key = stack.pop()
+                    if key in found:
+                        continue
+                    found.add(key)
+                    stack.extend(children.get(key, ()))
+                closures[root] = found
+                return found
+
+            for ctx in contexts:
+                gained: set[object] = set()
+                for entry in ctx.functions:
+                    if entry in children:
+                        gained |= closure(entry)
+                for rel in ctx.modules:
+                    key = ("M", rel)
+                    if key in children:
+                        gained |= closure(key)
+                for key in gained:
+                    if key[0] == "M":
+                        ctx.modules.add(key[1])
+                    elif key[0] == "D":
+                        if key[1] not in ctx.data:
+                            if len(ctx.data) >= _CONTEXT_MAX_DATA:
+                                ctx.opaque = True
+                            else:
+                                ctx.data.add(key[1])
+                    elif key not in ctx.functions:
+                        if len(ctx.functions) >= _CONTEXT_MAX_FUNCTIONS:
+                            ctx.opaque = True
+                        else:
+                            ctx.functions.add(key)
+        except Exception:
+            pass
 
     def _discover(self, code: object) -> None:
         """Arm every project code object under ``code`` for PY_START."""
@@ -1095,7 +1299,11 @@ class Recorder:
                 return
             self._in_hook = True
             try:
-                self._handle_audit(event, args)
+                try:
+                    frame = sys._getframe(1)
+                except Exception:
+                    frame = None
+                self._handle_audit(event, args, frame)
             finally:
                 self._in_hook = False
         except Exception:
@@ -1107,7 +1315,8 @@ class Recorder:
                 and self._current is self._ambient
                 and _is_xdist_gateway(executable, argv))
 
-    def _handle_audit(self, event: object, args: object) -> None:
+    def _handle_audit(self, event: object, args: object,
+                      frame: object = None) -> None:
         try:
             name = str(event) if isinstance(event, str) else ""
             if not name or not isinstance(args, (tuple, list)):
@@ -1124,6 +1333,9 @@ class Recorder:
                     return
                 rel = self._resolve_data(path)
                 if rel is not None:
+                    key = ("D", rel)
+                    if key not in self._first:
+                        self._note_first(key, frame)
                     self._record_data(rel)
             elif _force_opaque_event(name):
                 try:
@@ -1141,6 +1353,14 @@ class Recorder:
                         self._current.opaque = True
                     except Exception:
                         pass
+                    cwd = (args[2] if name == "subprocess.Popen"
+                           and len(args) > 2 else None)
+                    entry = self._spawn_entry(executable, rest, cwd)
+                    if entry is not None:
+                        try:
+                            self._current.modules.add(entry)
+                        except Exception:
+                            pass
             elif name == "_posixsubprocess.fork_exec":
                 # spawn/forkserver workers (multiprocessing.Pool and
                 # ProcessPoolExecutor): the executable arrives as a
@@ -1165,6 +1385,98 @@ class Recorder:
                         pass
         except Exception:
             pass
+
+    def _spawn_entry(self, executable: object, argv: object,
+                     cwd: object) -> str | None:
+        """Project module or script a spawned Python interpreter runs.
+
+        Only ``python [options] -m module`` and ``python [options]
+        script.py`` resolve; ``-c`` code, other programs and anything
+        outside the checkout give None. The child's imports from that
+        entry are then followed by the static rule.
+        """
+        try:
+            if not isinstance(argv, (list, tuple)) or not argv:
+                return None
+            texts: list[str] = []
+            for item in argv[:64]:
+                if isinstance(item, os.PathLike):
+                    item = os.fspath(item)
+                if isinstance(item, bytes):
+                    item = item.decode("utf-8", "strict")
+                if not isinstance(item, str) or "\x00" in item:
+                    return None
+                texts.append(item)
+            program = executable if executable is not None else texts[0]
+            if isinstance(program, os.PathLike):
+                program = os.fspath(program)
+            if isinstance(program, bytes):
+                program = program.decode("utf-8", "strict")
+            if not isinstance(program, str) or not program:
+                return None
+            base = os.path.basename(program)
+            if (not re.fullmatch(r"(?:python|pypy)[0-9.]*(?:\.exe)?", base)
+                    and os.path.realpath(program)
+                    != os.path.realpath(sys.executable)):
+                return None
+            if isinstance(cwd, os.PathLike):
+                cwd = os.fspath(cwd)
+            if isinstance(cwd, bytes):
+                cwd = cwd.decode("utf-8", "strict")
+            if not isinstance(cwd, str) or not cwd:
+                cwd = os.getcwd()
+            args = texts[1:]
+            index = 0
+            while index < len(args):
+                arg = args[index]
+                if arg == "-c" or arg.startswith("-c"):
+                    return None
+                if arg == "-m" or (arg.startswith("-m")
+                                   and not arg.startswith("--")):
+                    module = (args[index + 1] if arg == "-m"
+                              and index + 1 < len(args) else arg[2:])
+                    return self._module_entry(module, cwd)
+                if arg in ("-W", "-X"):
+                    index += 2
+                    continue
+                if arg.startswith("-"):
+                    index += 1
+                    continue
+                path = arg if os.path.isabs(arg) else os.path.join(cwd, arg)
+                return self._entry_rel(path)
+            return None
+        except Exception:
+            return None
+
+    def _module_entry(self, module: str, cwd: str) -> str | None:
+        """File ``python -m module`` runs, searched like the child would."""
+        try:
+            parts = module.split(".")
+            if not module or not all(part.isidentifier() for part in parts):
+                return None
+            for root in [cwd, *sys.path]:
+                if not isinstance(root, str):
+                    continue
+                if not root:
+                    root = cwd
+                base = os.path.join(root, *parts)
+                for candidate in (os.path.join(base, "__main__.py"),
+                                  base + ".py"):
+                    if os.path.isfile(candidate):
+                        return self._entry_rel(candidate)
+            return None
+        except Exception:
+            return None
+
+    def _entry_rel(self, path: str) -> str | None:
+        try:
+            real = os.path.realpath(path)
+            if not os.path.isfile(real) or not _is_within(real, self._checkout):
+                return None
+            rel = os.path.relpath(real, self._checkout).replace(os.sep, "/")
+            return rel if _code_path(rel) else None
+        except Exception:
+            return None
 
     # -- output ---------------------------------------------------------------
 
@@ -1310,6 +1622,7 @@ class Recorder:
         try:
             if not self._report_path:
                 return None
+            self._apply_lazy_owners()
             payload = self._payload()
             try:
                 raw = json.dumps(payload, ensure_ascii=True,

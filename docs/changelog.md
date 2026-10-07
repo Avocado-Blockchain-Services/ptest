@@ -27,6 +27,13 @@
   without running anything (G5). `scripts/selection_eval.py` is the
   committed seeded mutation harness behind the release thresholds (G7);
   the measured numbers land here once the A1-A5 campaign runs.
+- State built once per process counts for every test that reuses it: code,
+  lazily imported modules and data files first run by one test, caused by a
+  caller or fixture that later tests also run, are dependencies of those
+  tests too (a template database migrated by the first user of a fixture, a
+  memoised engine, an `lru_cache` loader). Tests that start the project's
+  own interpreter (`python -m pkg`, a checkout script) follow that entry
+  module's imports under the static rule.
 - Nested monorepo child scopes: `route_scopes` matches the longest declared
   child prefix, so `ptest services/control-plane/tests` and `ptest --full
   services/control-plane` reach the nested child, and `services/api-v2`

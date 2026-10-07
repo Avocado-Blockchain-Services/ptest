@@ -464,11 +464,14 @@ def plan(inputs):
     # run, so they are built once here; per node only membership tests
     # remain.
     reach_b = {}
+    reach_all = {}
     touch = {}
     ambient_pre = {}
     for rid in compat_runs:
         _, stale_py, stale_data = stale_of[rid]
         reach_b[rid] = _reach(index, test_roots, set(stale_py) | changed_py)
+        reach_all[rid] = C.selection_static_reach(
+            index.reverse, set(stale_py) | changed_py)
         touch[rid] = (frozenset(set(stale_py) | set(stale_data))
                       | frozenset(changed))
     for rid, analysis in per_run.items():
@@ -552,8 +555,13 @@ def plan(inputs):
             # Clause b is definitive for opaque/demoted nodes (N3): the
             # static rule alone decides, and no precise clause applies.
             fallbacks[nodeid] = _DEMOTED_REASON if demoted else opaque_why
+            # A recorded module that statically reaches the change counts
+            # like the test file: it covers the entry module of a spawned
+            # project interpreter, whose imports run in the child.
             if (node.test_file in reach_b[node.run_id]
-                    or stale_data or nonpy_changed):
+                    or stale_data or nonpy_changed
+                    or (own is not None
+                        and not reach_all[node.run_id].isdisjoint(own[1]))):
                 _select()
             elif own is not None:
                 funcs, mods, data = own

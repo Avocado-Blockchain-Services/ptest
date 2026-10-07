@@ -1008,3 +1008,201 @@ def test_directory_and_dir_fd_opens_are_not_data(tmp_path, monkeypatch):
     rec._handle_audit("open", ("data/cfg.json", None, os.O_RDONLY))
     rec._handle_audit("open", ("data/missing.json", "r", None))
     assert rec._current.data == {"data/cfg.json", "data/missing.json"}
+
+
+# ---------------------------------------------------------------------------
+# Lazy initialisation: state the first caller built and later tests reuse.
+# ---------------------------------------------------------------------------
+
+_LAZY_MODULE = '''\
+import threading
+
+_engine = None
+_built = None
+
+
+def _read():
+    with open(DATA) as fh:
+        return fh.read()
+
+
+def build():
+    from pkg import migr
+    return migr.VALUE + _read()
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = build()
+    return _engine
+
+
+def branch_only():
+    return 1
+
+
+def dispatch(flag):
+    return branch_only() if flag else 0
+
+
+def thread_init():
+    global _built
+    _built = "built"
+
+
+def fixture_body():
+    if _built is None:
+        worker = threading.Thread(target=thread_init)
+        worker.start()
+        worker.join()
+    return _built
+'''
+
+_LAZY_SCRIPT = r'''
+import json, sys
+from types import SimpleNamespace
+checkout = sys.argv[1]
+sys.path.insert(0, checkout)
+from ptest.runtime import selection_recorder as module
+rec = module.Recorder(checkout_root=checkout, run_id="c" * 32,
+                      report_path=checkout + "/rep.json", role="controller")
+assert rec.activate() is True, rec.inactive_reason
+import pkg.lazy as lazy
+lazy.DATA = checkout + "/data/seed.txt"
+fixture = SimpleNamespace(scope="function", baseid="", argname="state",
+                          func=lazy.fixture_body)
+
+def run(nodeid, body):
+    rec.enter_test(nodeid)
+    body()
+    rec.exit_test()
+
+def first():
+    rec.enter_function_fixture(fixture)
+    try:
+        lazy.fixture_body()
+    finally:
+        rec.exit_function_fixture()
+    lazy.get_engine()
+    lazy.dispatch(False)
+
+def second():
+    rec.enter_function_fixture(fixture)
+    try:
+        lazy.fixture_body()
+    finally:
+        rec.exit_function_fixture()
+    lazy.get_engine()
+    lazy.dispatch(True)
+
+def third():
+    lazy.dispatch(False)
+
+def fourth():
+    lazy.dispatch(False)
+
+run("tests/test_l.py::test_first", first)
+run("tests/test_l.py::test_second", second)
+run("tests/test_l.py::test_third", third)
+run("tests/test_l.py::test_fourth", fourth)
+path = rec.write_deps()
+rec.deactivate()
+payload = json.loads(open(path).read())
+paths = payload["paths"]
+funcs = payload["functions"]
+out = {}
+for node in payload["nodes"]:
+    out[node["nodeid"].rsplit("::", 1)[1]] = {
+        "functions": sorted(paths[funcs[i][0]] + "::" + funcs[i][1]
+                            for i in node["functions"]),
+        "modules": sorted(paths[i] for i in node["modules"]),
+        "data": sorted(paths[i] for i in node["data"]),
+        "opaque": node["opaque"],
+    }
+print(json.dumps(out))
+'''
+
+
+def _lazy_project(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "lazy.py").write_text(_LAZY_MODULE, encoding="utf-8")
+    (tmp_path / "pkg" / "migr.py").write_text("VALUE = 'v'\n",
+                                              encoding="utf-8")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "seed.txt").write_text("s", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-c", _LAZY_SCRIPT, str(tmp_path)],
+        capture_output=True, text=True, timeout=60, cwd=str(tmp_path),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")})
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_memoised_state_reaches_every_later_caller(tmp_path):
+    """A test that reuses state the first caller built depends on the code,
+    lazily imported modules and data that built it. Before the fix only the
+    first caller recorded them (persea control-plane: a template database
+    migrated once per worker, 575 missed failures on a migration edit)."""
+    nodes = _lazy_project(tmp_path)
+    first, second = nodes["test_first"], nodes["test_second"]
+    for name in ("pkg/lazy.py::build", "pkg/lazy.py::_read"):
+        assert name in first["functions"]
+        assert name in second["functions"]
+    assert "pkg/migr.py" in first["modules"]
+    assert "pkg/migr.py" in second["modules"]
+    assert "data/seed.txt" in first["data"]
+    assert "data/seed.txt" in second["data"]
+    assert not second["opaque"]
+
+
+def test_thread_started_by_a_fixture_reaches_later_fixture_users(tmp_path):
+    """Code a fixture setup ran on another thread has no project caller on
+    its stack; the active function-scoped fixture owns it."""
+    nodes = _lazy_project(tmp_path)
+    assert "pkg/lazy.py::thread_init" in nodes["test_first"]["functions"]
+    assert "pkg/lazy.py::thread_init" in nodes["test_second"]["functions"]
+
+
+def test_one_shot_branch_of_a_shared_caller_stays_local(tmp_path):
+    """Precision: a branch only one test takes, under a caller other tests
+    ran first, is that test's alone; tests that never ran the lazy caller
+    get none of its state."""
+    nodes = _lazy_project(tmp_path)
+    assert "pkg/lazy.py::branch_only" in nodes["test_second"]["functions"]
+    for name in ("test_first", "test_third", "test_fourth"):
+        assert "pkg/lazy.py::branch_only" not in nodes[name]["functions"]
+    for name in ("test_third", "test_fourth"):
+        assert "pkg/lazy.py::build" not in nodes[name]["functions"]
+        assert "pkg/migr.py" not in nodes[name]["modules"]
+        assert nodes[name]["data"] == []
+
+
+@pytest.mark.parametrize("argv_tail, expected", [
+    (["-m", "pkg"], "pkg/__main__.py"),
+    (["-u", "-X", "dev", "-m", "pkg.tool"], "pkg/tool.py"),
+    (["-mpkg.tool", "--flag"], "pkg/tool.py"),
+    (["scripts/run.py", "-m", "x"], "scripts/run.py"),
+    (["-c", "import pkg"], None),
+    (["-m", "absent_mod"], None),
+])
+def test_spawned_project_interpreter_records_its_entry(tmp_path, argv_tail,
+                                                       expected):
+    """A test that starts this interpreter on a project module or script
+    stays opaque and records the entry, so the static rule can follow the
+    child's imports."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "__main__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "tool.py").write_text("", encoding="utf-8")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "run.py").write_text("", encoding="utf-8")
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    argv = [sys.executable, *argv_tail]
+    rec._handle_audit("subprocess.Popen",
+                      (sys.executable, argv, str(tmp_path), None))
+    assert rec._current.opaque is True
+    assert rec._current.modules == ({expected} if expected else set())

@@ -1113,6 +1113,45 @@ def test_opaque_node_skipped_on_static_miss():
     assert not PL.is_selected(d, node.nodeid)
 
 
+def _spawn_entry_inputs(entry_imports):
+    vb = VB()
+    entry = "pkg/__main__.py"
+    old = FI(scopes=[SC("f", body="b1")])
+    new = FI(scopes=[SC("f", body="b2")])
+    main = FI(scopes=[SC("main", body="bm")])
+    index = IDX({
+        LIB: PF(LIB, "dn", new),
+        entry: PF(entry, "dm", main, imports=entry_imports),
+        TEST: PF(TEST, "dt", FI(scopes=[SC("test_f")]), test=True),
+    })
+    node = NODE(vb, TEST + "::test_f", TEST, "r1", opaque=True,
+                mods=(entry,))
+    run = RUN(vb, "r1", {LIB: "do", entry: "dm", TEST: "dt"})
+    deps = SNAP(vb, [run], [node])
+    inputs = INP(index, deps,
+                 versions={"do": old, "dm": main,
+                           "dt": FI(scopes=[SC("test_f")])},
+                 changed=(LIB,))
+    return inputs, node.nodeid
+
+
+def test_opaque_node_selected_when_its_spawned_entry_reaches_the_change():
+    """A test that runs ``python -m pkg`` executes the entry module's
+    imports in the child: the recorded entry module counts for the static
+    rule. Before the fix only the test file's own imports did (ptest's
+    CLI end-to-end tests were missed on planner edits)."""
+    inputs, nid = _spawn_entry_inputs((LIB,))
+    d = PL.plan(inputs)
+    assert PL.is_selected(d, nid)
+    assert dict(d.fallbacks)[nid] == "opaque: spawned a process or overflowed"
+
+
+def test_opaque_node_skipped_when_its_spawned_entry_misses_the_change():
+    inputs, nid = _spawn_entry_inputs(())
+    d = PL.plan(inputs)
+    assert not PL.is_selected(d, nid)
+
+
 def test_demoted_node_selected_on_static_hit():
     old = FI(scopes=[SC("f", body="b1")])
     new = FI(scopes=[SC("f", body="b2")])
