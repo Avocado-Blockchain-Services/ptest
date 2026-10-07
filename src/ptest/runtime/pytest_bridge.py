@@ -107,6 +107,7 @@ _BRIDGE_HOOK_MARKS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("pytest_runtestloop", {"wrapper": True, "tryfirst": True}),
     ("pytest_runtest_protocol", {"wrapper": True, "tryfirst": True}),
     ("pytest_runtest_call", {"wrapper": True, "tryfirst": True}),
+    ("pytest_fixture_setup", {"wrapper": True, "tryfirst": True}),
     ("pytest_runtest_logreport", {"tryfirst": True}),
     ("pytest_collectreport", {"tryfirst": True}),
     ("pytest_sessionfinish", {"tryfirst": True}),
@@ -857,6 +858,196 @@ def _report_binding() -> tuple[Path, dict[str, str]] | None:
 _STALL_MARKER_SUFFIX = ".done"
 _STACK_DUMP_INFIX = ".stack-"
 _STACK_DUMP_HEADER_PREFIX = "ptest stack dump: "
+
+# ---------------------------------------------------------------------------
+# Dependency-recorded selection (T4).
+#
+# The literals below duplicate the contracts.py selection values (pinned
+# equal by tests/ng/test_selection_bridge_subprocess.py) because this file
+# must stay importable without any ptest module. The recorder sibling
+# (runtime/selection_recorder.py) is imported with the same fallback pair
+# and realpath-beside check: tests copy or shadow this bridge file alone,
+# and the bridge must still import and run with recording inactive.
+_SELECTION_DEPS_INFIX = ".deps-"
+_SELECTION_DEPS_FORMAT = "ptest-selection-deps-v1"
+_SELECTION_DESELECT_SUFFIX = ".deselect"
+_SELECTION_DESELECT_FORMAT = "ptest-selection-deselect-v1"
+_SELECTION_DESELECT_MAX_BYTES = 16 * 1024 * 1024
+_SELECTION_DESELECT_MAX_IDS = 200000
+_SELECTION_RECORD_ENV = "PTEST_SELECTION_RECORD"
+_SELECTION_DESELECT_ENV = "PTEST_SELECTION_DESELECT"
+_SELECTION_TOOL_NAME = "ptest-selection"
+
+_selection_recorder_module: Any = None
+_selection_recorder_probed = False
+
+
+def _load_selection_recorder() -> Any | None:
+    """Import the sibling recorder, or None when it cannot be used.
+
+    Both import spellings sit inside one guard, and the module's realpath
+    must sit beside this file: a shadowed copy fails closed to inactive
+    recording, never to a failed run.
+    """
+    global _selection_recorder_module, _selection_recorder_probed
+    if _selection_recorder_probed:
+        return _selection_recorder_module
+    _selection_recorder_probed = True
+    try:
+        try:
+            from . import selection_recorder as module  # type: ignore[import-not-found]
+        except ImportError:
+            import selection_recorder as module  # type: ignore[no-redef]
+    except Exception:
+        return None
+    try:
+        here = os.path.dirname(os.path.realpath(__file__))
+        candidate = getattr(module, "__file__", None)
+        if not isinstance(candidate, str) or not candidate:
+            return None
+        if os.path.dirname(os.path.realpath(candidate)) != here:
+            return None
+    except Exception:
+        return None
+    _selection_recorder_module = module
+    return module
+
+
+def _write_inactive_deps(report_path: Path, run_id: str, role: str,
+                         reason: str, worker_id: str | None = None) -> Path | None:
+    """Best-effort recording:false deps file when the recorder is unusable.
+
+    Only for the import-failure path (a shadowed bridge copy): every other
+    inactive case goes through the recorder module itself, which handles
+    old Pythons with the exact inactive reason. Never raises.
+    """
+    try:
+        pid = os.getpid()
+        text = reason if isinstance(reason, str) else "recorder could not start"
+        payload = {
+            "format": _SELECTION_DEPS_FORMAT,
+            "run_id": run_id,
+            "role": role,
+            "worker_id": worker_id,
+            "pid": pid,
+            "python": [sys.version_info[0], sys.version_info[1]],
+            "recording": False,
+            "inactive_reason": text[:200],
+            "workers": [],
+            "overflow": False,
+            "tamper": False,
+            "deselect": "none",
+            "deselected": 0,
+            "paths": [],
+            "functions": [],
+            "ambient": {"functions": [], "modules": [], "data": [],
+                        "opaque": False},
+            "fixtures": [],
+            "nodes": [],
+        }
+        raw = json.dumps(payload, ensure_ascii=True,
+                         separators=(",", ":")).encode("utf-8")
+        path = Path(f"{report_path}{_SELECTION_DEPS_INFIX}{pid}")
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | nofollow | cloexec, 0o600)
+        try:
+            view = memoryview(raw)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("deps write made no progress")
+                view = view[written:]
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            return None
+        try:
+            os.close(fd)
+        except OSError:
+            return None
+        return path
+    except Exception:
+        return None
+
+
+def _read_deselect_binding(report_path: Path, run_id: str) -> tuple[list[str] | None, str]:
+    """Validate the private deselect binding: (nodeids|None, status).
+
+    ``"none"`` when no binding was published, ``"applied"`` when the
+    binding validated in scoped execution, ``"ignored"`` otherwise. An
+    ignored binding deselects nothing, so every test in the argv files
+    runs (a safe superset). Never raises.
+    """
+    try:
+        binding_env = os.environ.get(_SELECTION_DESELECT_ENV, "")
+        if not binding_env:
+            return None, "none"
+        expected = str(report_path) + _SELECTION_DESELECT_SUFFIX
+        if binding_env != expected:
+            return None, "ignored"
+        if os.environ.get("PTEST_EXECUTION") != "scoped":
+            return None, "ignored"
+        try:
+            stamp = os.lstat(binding_env)
+        except OSError:
+            return None, "ignored"
+        if (not stat.S_ISREG(stamp.st_mode)
+                or stamp.st_uid != os.getuid()
+                or stamp.st_mode & 0o077
+                or stamp.st_nlink != 1
+                or stamp.st_size <= 0
+                or stamp.st_size > _SELECTION_DESELECT_MAX_BYTES):
+            return None, "ignored"
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(binding_env,
+                         os.O_RDONLY | nofollow | cloexec)
+        except (OSError, ValueError, TypeError):
+            return None, "ignored"
+        try:
+            raw = b""
+            remaining = _SELECTION_DESELECT_MAX_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    break
+                raw += chunk
+                remaining -= len(chunk)
+        except OSError:
+            return None, "ignored"
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if len(raw) > _SELECTION_DESELECT_MAX_BYTES:
+            return None, "ignored"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            return None, "ignored"
+        if (not isinstance(payload, dict)
+                or payload.get("format") != _SELECTION_DESELECT_FORMAT
+                or payload.get("run_id") != run_id):
+            return None, "ignored"
+        nodeids = payload.get("nodeids")
+        if (not isinstance(nodeids, list)
+                or len(nodeids) > _SELECTION_DESELECT_MAX_IDS
+                or any(not isinstance(item, str) for item in nodeids)):
+            return None, "ignored"
+        return list(nodeids), "applied"
+    except Exception:
+        return None, "ignored"
 
 _FINAL_CALL_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
@@ -1683,6 +1874,10 @@ class OwnedPlugin:
         # Post-test stall arm (controller only): run() attaches one when
         # a report binding exists; worker-half plugins never get one.
         self._stall_arm: _StallArm | None = None
+        # Dependency recorder (T4): attached by run() on the controller
+        # and by the worker bootstrap on xdist workers, only when the
+        # executor enabled recording. None otherwise: zero overhead.
+        self._selection: Any | None = None
 
     def _test_identity(self, nodeid: str) -> str:
         """Normalise one native node id to its bounded test identity.
@@ -2455,6 +2650,95 @@ class OwnedPlugin:
             if arm is not None:
                 arm.loop_returned()
 
+    def _selection_deselect(self, session: Any) -> None:
+        """Deselect the binding's node ids in scoped execution. Never raises."""
+        try:
+            recorder = self._selection
+            if recorder is None:
+                return
+            try:
+                report_path = Path(recorder._report_path)
+                run_id = str(recorder.run_id)
+            except Exception:
+                return
+            if self.execution != "scoped":
+                try:
+                    _, status = _read_deselect_binding(report_path, run_id)
+                except Exception:
+                    status = "ignored"
+                if status != "none":
+                    try:
+                        recorder.set_deselect("ignored", 0)
+                    except Exception:
+                        pass
+                return
+            try:
+                nodeids, status = _read_deselect_binding(report_path, run_id)
+            except Exception:
+                nodeids, status = None, "ignored"
+            if status != "applied" or not nodeids:
+                try:
+                    recorder.set_deselect(status, 0)
+                except Exception:
+                    pass
+                return
+            try:
+                wanted = set(nodeids)
+                items = list(getattr(session, "items", ()))
+            except Exception:
+                try:
+                    recorder.set_deselect("ignored", 0)
+                except Exception:
+                    pass
+                return
+            doomed = [item for item in items
+                      if str(getattr(item, "nodeid", "")) in wanted]
+            kept = [item for item in items
+                    if str(getattr(item, "nodeid", "")) not in wanted]
+            if not doomed:
+                try:
+                    recorder.set_deselect("applied", 0)
+                except Exception:
+                    pass
+                return
+            try:
+                session.items[:] = kept
+            except Exception:
+                try:
+                    recorder.set_deselect("ignored", 0)
+                except Exception:
+                    pass
+                return
+            try:
+                hook = getattr(getattr(session, "config", None), "hook", None)
+                if hook is not None:
+                    hook.pytest_deselected(items=doomed)
+            except Exception:
+                pass
+            try:
+                recorder.set_deselect("applied", len(doomed))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _selection_write(self, workers: Any = ()) -> None:
+        """Write this process's dependency file. Never raises."""
+        try:
+            recorder = self._selection
+            if recorder is None:
+                return
+            try:
+                recorder.set_workers(workers)
+            except Exception:
+                pass
+            try:
+                recorder.write_deps()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def pytest_collection_modifyitems(self, session: Any) -> Any:
         """Snapshot the final collected inventory after all narrowing hooks.
 
@@ -2465,6 +2749,7 @@ class OwnedPlugin:
         fixture mutating session.items) is an unrun collected item.
         """
         result = yield
+        self._selection_deselect(session)
         if self.execution == "full":
             seen: set[str] = set()
             collected: list[str] = []
@@ -2508,9 +2793,44 @@ class OwnedPlugin:
         if bool(getattr(report, "failed", False)):
             self._report_failures += 1
 
+    def pytest_fixture_setup(self, fixturedef: Any, request: Any) -> Any:
+        """Record higher-scope fixture setups in their own context.
+
+        Function-scoped fixtures stay in the test context; every other
+        scope switches to the fixture key context for the setup and
+        restores the previous context afterwards. Without a recorder this
+        yields straight through.
+        """
+        recorder = self._selection
+        key: Any = None
+        if recorder is not None:
+            try:
+                key = recorder.fixture_key(fixturedef)
+            except Exception:
+                key = None
+        if key is None:
+            return (yield)
+        try:
+            recorder.enter_fixture(key)
+        except Exception:
+            pass
+        try:
+            return (yield)
+        finally:
+            try:
+                recorder.exit_fixture()
+            except Exception:
+                pass
+
     def pytest_runtest_logreport(self, report: Any) -> None:
         """Observe every native test report; the verdict never trusts pytest's code."""
         self._note_native_report(report)
+        recorder = self._selection
+        if recorder is not None:
+            try:
+                recorder.observe(report)
+            except Exception:
+                pass
         # Parallel collected-versus-run reconciliation runs on the node ids
         # the controller actually receives (forwarded worker reports and
         # crash reports alike).
@@ -2609,7 +2929,23 @@ class OwnedPlugin:
                 self._protocol_seen.add(self._test_identity(nodeid))
             self._worker_protocol_ids.add(id(item))
         self._validate(item.config, generated=True)
-        return (yield)
+        recorder = self._selection
+        if recorder is None:
+            return (yield)
+        nodeid = str(getattr(item, "nodeid", "") or "")
+        if not nodeid:
+            return (yield)
+        try:
+            recorder.enter_test(nodeid)
+        except Exception:
+            pass
+        try:
+            return (yield)
+        finally:
+            try:
+                recorder.exit_test(item)
+            except Exception:
+                pass
 
     def pytest_runtest_call(self, item: Any) -> Any:
         """Check per-item registrations at the test-body execution boundary."""
@@ -2649,6 +2985,10 @@ class OwnedPlugin:
             }
         except TypeError:
             self._refuse("a parallel worker was not observed by the bridge")
+        # Each xdist worker writes its own dependency file here, in its
+        # worker-half sessionfinish. A crashed worker never reaches this
+        # hook, so it leaves no file and its tests stay unrecorded.
+        self._selection_write()
 
     def pytest_xdist_node_collection_finished(self, node: Any, ids: Any) -> None:
         """Record one worker's collection on the parallel controller."""
@@ -3278,6 +3618,18 @@ def _parallel_narrowing_report(plugin: OwnedPlugin) -> dict[str, Any]:
 def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     """Run pytest natively after validating the immutable bridge descriptor."""
     binding = _report_binding()
+    # Dependency recording for the controller (serial or xdist): only when
+    # launched as __main__ with a report binding. This runs before the
+    # sys.path swap below, while the runtime directory is still importable.
+    # An in-process run(), which ptest's own suite uses, never records.
+    _controller_selection: Any | None = None
+    if binding is not None and __name__ == "__main__":
+        try:
+            _controller_selection = _activate_controller_selection(
+                binding[0], binding[1].get("run_id", ""),
+                os.environ.get("PTEST_PYTEST_CHECKOUT_ROOT"))
+        except Exception:
+            _controller_selection = None
     runtime = "unknown"
     native_exit: int | None = None
     bridge_exit = 70
@@ -3386,8 +3738,26 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         # in-process callers must never steal the outer run's registration.
         if binding is not None and __name__ == "__main__":
             _register_stack_dump(binding[0], role="controller")
+        if _controller_selection is not None:
+            plugin._selection = _controller_selection
         native_exit = int(pytest.main(native_argv, plugins=[plugin]))
         bridge_exit = native_exit
+        # The serial or xdist controller writes its dependency file once
+        # the native loop returned. Refused runs and raised loops leave no
+        # file. A write failure never changes the verdict: it only leaves
+        # the run unrecorded.
+        if not plugin.refused:
+            try:
+                if workers >= 2:
+                    observed = list(getattr(plugin, "_node_collections", {}))
+                    for down in getattr(plugin, "_node_down", {}):
+                        if down not in observed:
+                            observed.append(down)
+                    plugin._selection_write(observed)
+                else:
+                    plugin._selection_write()
+            except Exception:
+                pass
         # Hooks may register only after the final item boundary (for example
         # from teardown). Qualify the completed native run before allowing the
         # bridge to certify its terminal report.
@@ -3583,6 +3953,12 @@ def _worker_bootstrap(config: Any) -> OwnedPlugin | None:
                                  worker_id=worker_id)
     _worker_plugin = OwnedPlugin(workers)
     _worker_config = config
+    try:
+        recorder = _maybe_activate_worker_selection()
+        if recorder is not None:
+            _worker_plugin._selection = recorder
+    except Exception:
+        pass
     return _worker_plugin
 
 
@@ -3657,6 +4033,96 @@ def pytest_runtest_call(item: Any) -> Any:
     return result
 
 
+def _activate_controller_selection(report_path: Path, run_id: str,
+                                     checkout_root: str | None) -> Any | None:
+    """Build and activate the controller recorder, or None. Never raises.
+
+    Must run before run() swaps ``sys.path[0]`` to the checkout: the
+    sibling import relies on the runtime directory being importable, as
+    it is at startup for ``__main__`` (and for xdist workers at ``-p``
+    import). run() attaches the result to the plugin after validation.
+    """
+    try:
+        if os.environ.get(_SELECTION_RECORD_ENV) != "1":
+            return None
+        module = _load_selection_recorder()
+        checkout = checkout_root or os.getcwd()
+        if module is None:
+            _write_inactive_deps(Path(report_path), run_id, "controller",
+                                 "recorder could not start")
+            return None
+        try:
+            recorder = module.Recorder(
+                checkout_root=checkout, run_id=run_id,
+                report_path=str(report_path), role="controller")
+        except Exception:
+            return None
+        try:
+            recorder.activate()
+        except Exception:
+            pass
+        return recorder
+    except Exception:
+        return None
+
+
+def _maybe_activate_worker_selection() -> Any | None:
+    """Activate the worker-half recorder at most once per worker process.
+
+    Only for the ``-p pytest_bridge`` import in an xdist worker with the
+    record env set and a valid bound report path. Never raises.
+    """
+    global _worker_selection
+    try:
+        if _worker_selection is not None:
+            return _worker_selection
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+        if not isinstance(worker, str) or re.fullmatch(r"gw[0-9]+", worker) is None:
+            return None
+        if os.environ.get(_SELECTION_RECORD_ENV) != "1":
+            return None
+        report = _worker_report_path()
+        if report is None:
+            return None
+        run_id = os.environ.get("PTEST_RUN_ID", "")
+        if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+            return None
+        checkout = (os.environ.get("PTEST_PYTEST_CHECKOUT_ROOT")
+                    or os.getcwd())
+        module = _load_selection_recorder()
+        if module is None:
+            _write_inactive_deps(report, run_id, "worker",
+                                 "recorder could not start", worker)
+            return None
+        try:
+            recorder = module.Recorder(
+                checkout_root=checkout, run_id=run_id,
+                report_path=str(report), role="worker", worker_id=worker)
+        except Exception:
+            return None
+        try:
+            recorder.activate()
+        except Exception:
+            pass
+        _worker_selection = recorder
+        return recorder
+    except Exception:
+        return None
+
+
+_worker_selection: Any | None = None
+
+
+def pytest_fixture_setup(fixturedef: Any, request: Any) -> Any:
+    config = getattr(request, "config", None)
+    plugin = _worker_bootstrap(config if config is not None else _worker_config)
+    if plugin is None:
+        result = yield
+        return result
+    result = yield from plugin.pytest_fixture_setup(fixturedef, request)
+    return result
+
+
 def pytest_runtest_logreport(report: Any) -> None:
     plugin = _worker_bootstrap(_worker_config)
     if plugin is None:
@@ -3697,6 +4163,10 @@ if __name__ != "__main__":
     # via adapters/pytest.py) must leave os.environ untouched.
     if __name__ == "pytest_bridge":
         _claim_import_time_worker_identity()
+        # Worker-half recorder activation at import: the sys.modules walk
+        # then covers conftest import-time code as well. A no-op unless
+        # this is an xdist worker with the record env and a bound report.
+        _maybe_activate_worker_selection()
     try:
         _mark_bridge_hooks(sys.modules[__name__])
     except ImportError:

@@ -1,0 +1,82 @@
+"""Fixture tests covering F/M/X/D/opaque and the outcome kinds."""
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from pkg import core
+
+DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
+
+
+def test_add(booted):
+    """F(T) plus a session-fixture use (X(T))."""
+    assert booted["status"] == "ready"
+    assert core.add(1, 2) == 3
+
+
+def test_lazy_import():
+    """M(T): the lazy module body executes inside this test's context."""
+    from pkg import lazy
+    assert lazy.message() == "lazy-loaded"
+
+
+def test_reads_data():
+    """D(T): a project data file is opened inside this test's context."""
+    payload = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    assert payload["mode"] == "fixture"
+
+
+def test_spawns_python():
+    """Opaque: spawning the running interpreter can run project Python."""
+    subprocess.run([sys.executable, "-c", "pass"], check=True)
+
+
+def test_runs_true():
+    """Not opaque: an outside binary that cannot run project Python."""
+    true = shutil.which("true")
+    if true is None:
+        pytest.skip("no true binary on PATH")
+    subprocess.run([true], check=True)
+
+
+def test_fails():
+    """Outcome failed."""
+    assert core.greet("nobody") == "wrong"
+
+
+@pytest.fixture
+def broken():
+    """A function-scoped fixture that errors in setup."""
+    raise RuntimeError("setup boom")
+
+
+def test_setup_error(broken):
+    """Outcome error; unreachable body."""
+    assert False, "unreachable"
+
+
+def test_skips():
+    """Outcome skipped."""
+    pytest.skip("not today")
+
+
+@pytest.mark.xfail(reason="known gap")
+def test_xfail():
+    """Outcome xfailed."""
+    assert False
+
+
+@pytest.mark.parametrize("value", [1, 2], ids=["plain[0]", "ünïcode-ß"])
+def test_parametrized(value):
+    """Ids with brackets and unicode survive the deselect binding."""
+    assert value in (1, 2)
+
+
+@pytest.mark.parametrize("value", [1], ids=["line1\nline2"])
+def test_newline_id(value):
+    """An id with a newline survives the deselect binding."""
+    assert value == 1

@@ -1,0 +1,6 @@
+"""Imported lazily inside a test (M(T) module-body record)."""
+
+
+def message():
+    """Only executed when a test imports this module."""
+    return "lazy-loaded"
