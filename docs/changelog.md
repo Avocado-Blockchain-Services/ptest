@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - Dependency-recorded test selection for pytest projects. Once a project
   has a full run behind it, changed runs execute only the tests whose
@@ -25,8 +25,20 @@
   worktree on the same code, so unchanged code reports `… → no tests
   affected: R tests reach these changes and already passed on this code`
   without running anything (G5). `scripts/selection_eval.py` is the
-  committed seeded mutation harness behind the release thresholds (G7);
-  the measured numbers land here once the A1-A5 campaign runs.
+  committed seeded mutation harness behind the release thresholds (G7).
+  Measured on persea's control-plane (1002 tests, xdist, FastAPI) from one
+  recording: 150 seeded mutants planned; ground truth from full runs for
+  24 of them, weighted to the import-time classes. Zero confirmed misses
+  (every other candidate passed on a mutant rerun: load flakes), where the
+  0.4.10 static plan missed failing tests on 5 of the 6 mutants first
+  measured, among them a dynamically loaded router (18 of 18) and a
+  migration edit (585 of 585). Median tests selected,
+  0.4.10 → 0.5: function bodies 199 → 73 (comparison) and 271 → 77
+  (raise), import edits 331 → 15, defaults 309 → 103. Decorators,
+  framework classes and constants they read still run every test that
+  shared the import (route tables and schemas are read without running
+  project code), where 0.4.10 often ran fewer and missed. The full
+  150-mutant truth campaign and the overhead benchmark (A4) were not run.
 - State built once per process counts for every test that reuses it: code,
   lazily imported modules and data files first run by one test, caused by a
   caller or fixture that later tests also run, are dependencies of those
