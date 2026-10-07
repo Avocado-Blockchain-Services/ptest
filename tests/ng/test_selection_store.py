@@ -17,6 +17,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from array import array
 from pathlib import Path
 
@@ -702,3 +703,161 @@ def test_context_manager_and_idempotent_close(domain_factory):
         assert set(store.snapshot().nodes) == {"tests/test_a.py::test_one"}
     with pytest.raises(C.Problem):
         store.snapshot()
+
+
+def test_eviction_removes_only_oldest_run(domain_factory, monkeypatch):
+    """A target that fits all-but-one run evicts exactly the oldest."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        vocab_funcs = tuple((1, f"f{n}") for n in range(20))
+
+        def big(index):
+            nodes = {f"tests/test_a.py::t{index}_{n}": _node(
+                f"tests/test_a.py::t{index}_{n}",
+                deps=_ctx(funcs=range(20))) for n in range(150)}
+            return S.RunDependencies(
+                vocabulary=_vocab(("tests/test_a.py", "pkg/a.py"),
+                                  vocab_funcs),
+                nodes=nodes, fixtures={}, ambient=_ctx(), complete=True,
+                recording=True, python=(3, 12), inactive_reason=None,
+                notes=())
+
+        store.update(big(0), run_id=RUN_A, recorded_at=0.0,
+                     compatibility=COMPAT, digests=_digests(), full=False)
+        store.update(big(1), run_id=RUN_B, recorded_at=1.0,
+                     compatibility=COMPAT, digests=_digests(), full=False)
+        size_two = store._db_size(store._conn)
+        store.update(big(2), run_id="33" * 16, recorded_at=2.0,
+                     compatibility=COMPAT, digests=_digests(), full=False)
+        size_three = store._db_size(store._conn)
+        assert len(store.snapshot().runs) == 3
+        # One equal-shaped run's measured growth. The target leaves room
+        # for that growth minus three pages: a drained eviction frees a
+        # whole run (many pages) and stops after the oldest, while an
+        # undrained one frees a single page per eviction and must keep
+        # going until only the newest run is left.
+        growth = size_three - size_two
+        page = store._conn.execute("PRAGMA page_size").fetchone()[0]
+        assert growth > 4 * page
+        monkeypatch.setattr(S, "SELECTION_STORE_TARGET_BYTES",
+                            size_three + growth - 3 * page)
+        newest = "44" * 16
+        store.update(big(3), run_id=newest, recorded_at=3.0,
+                     compatibility=COMPAT, digests=_digests(), full=False)
+        snap = store.snapshot()
+        assert set(snap.runs) == {RUN_B, "33" * 16, newest}
+        assert len(snap.nodes) == 450
+    finally:
+        store.close()
+
+
+def test_concurrent_create_from_two_connections(domain_factory):
+    """Two racers creating the same fresh store never see corruption."""
+    domain = domain_factory()
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def opener(project_id: str):
+        barrier.wait(timeout=30)
+        try:
+            store = S.open_store(domain, project_id, create=True)
+        except BaseException as exc:  # never leak; asserted below
+            errors.append(exc)
+        else:
+            try:
+                store.update(_run({"tests/test_a.py::test_one": _node(
+                    "tests/test_a.py::test_one")}),
+                    run_id=RUN_A, recorded_at=1.0,
+                    compatibility=COMPAT, digests=_digests(), full=False)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                store.close()
+
+    for iteration in range(25):
+        project_id = f"{iteration:032x}"
+        errors.clear()
+        threads = [threading.Thread(target=opener, args=(project_id,))
+                   for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert not any(isinstance(exc, C.Problem)
+                       and exc.code == "coordinator-corrupt"
+                       for exc in errors), errors
+        assert errors == [], errors
+        store = S.open_store(domain, project_id, create=False)
+        try:
+            assert RUN_A in store.snapshot().runs
+        finally:
+            store.close()
+
+
+def test_concurrent_update_while_lock_held(domain_factory):
+    """An update blocked past busy_timeout waits instead of failing raw."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        store.update(_run({"tests/test_a.py::test_one": _node(
+            "tests/test_a.py::test_one")}),
+            run_id=RUN_A, recorded_at=1.0, compatibility=COMPAT,
+            digests=_digests(), full=False)
+        # Shrink this connection's busy wait so the test stays fast; the
+        # bounded retry in _begin_immediate is independent of it.
+        store._conn.execute("PRAGMA busy_timeout=50")
+        holder = sqlite3.connect(str(_db_path(domain)), timeout=5.0)
+        try:
+            holder.execute("PRAGMA busy_timeout=5000")
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("CREATE TABLE IF NOT EXISTS _hold(x)")
+            errors: list[BaseException] = []
+
+            def writer():
+                try:
+                    second = S.open_store(domain, PROJ, create=False)
+                    # Same shrink as the main handle: without the
+                    # bounded retry, one 50 ms busy wait cannot outlast
+                    # the 0.5 s hold below.
+                    second._conn.execute("PRAGMA busy_timeout=50")
+                except BaseException as exc:  # asserted below
+                    errors.append(exc)
+                    return
+                try:
+                    second.update(_run({"tests/test_a.py::test_two": _node(
+                        "tests/test_a.py::test_two")}),
+                        run_id=RUN_B, recorded_at=2.0,
+                        compatibility=COMPAT, digests=_digests(),
+                        full=False)
+                except BaseException as exc:  # asserted below
+                    errors.append(exc)
+                finally:
+                    second.close()
+
+            thread = threading.Thread(target=writer)
+            thread.start()
+            time.sleep(0.5)  # hold the lock past the 50 ms busy_timeout
+            holder.execute("COMMIT")
+            thread.join(timeout=60)
+            assert errors == [], errors
+            assert not any(isinstance(exc, sqlite3.Error)
+                           for exc in errors)
+            assert RUN_B in store.snapshot().runs
+        finally:
+            holder.close()
+    finally:
+        store.close()
+
+
+def test_update_error_mapping_is_typed():
+    """Lock and I/O failures map to C.Problem, nothing else changes."""
+    with pytest.raises(C.Problem) as busy:
+        S._map_update_error(sqlite3.OperationalError("database is locked"))
+    assert busy.value.code == "coordinator-unavailable"
+    assert busy.value.retryable
+    with pytest.raises(C.Problem) as io_error:
+        S._map_update_error(sqlite3.OperationalError("disk I/O error"))
+    assert io_error.value.code == "state-unavailable"
+    with pytest.raises(sqlite3.OperationalError):
+        S._map_update_error(sqlite3.OperationalError("no such table: nope"))

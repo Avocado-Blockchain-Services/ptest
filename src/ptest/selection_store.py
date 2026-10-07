@@ -374,37 +374,95 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
     for statement in _SCHEMA_SQL.split(";"):
         if statement.strip():
-            conn.execute(statement)
-    conn.execute("INSERT INTO kv(key, value) VALUES('schema_version', ?)",
-                 (_SCHEMA_VERSION,))
-    conn.execute("INSERT INTO kv(key, value) VALUES('audit_checked', '0')")
-    conn.execute("INSERT INTO kv(key, value) VALUES('audit_misses', '0')")
+            conn.execute(statement.replace(
+                "CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+    conn.execute("INSERT OR IGNORE INTO kv(key, value)"
+                 " VALUES('schema_version', ?)", (_SCHEMA_VERSION,))
+    conn.execute("INSERT OR IGNORE INTO kv(key, value)"
+                 " VALUES('audit_checked', '0')")
+    conn.execute("INSERT OR IGNORE INTO kv(key, value)"
+                 " VALUES('audit_misses', '0')")
 
 
-def _check_schema(conn: sqlite3.Connection) -> None:
+def _tables_present(conn: sqlite3.Connection) -> set[str]:
     try:
-        tables = {row[0] for row in conn.execute(
+        return {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
     except sqlite3.Error:
         _fail("coordinator-corrupt", "selection store is unreadable")
         raise AssertionError("unreachable")
-    if not tables:
-        try:
-            _create_schema(conn)
-        except sqlite3.Error:
-            _fail("coordinator-corrupt",
-                  "selection store cannot be initialised")
-        return
-    if not set(_TABLES) <= tables:
-        _fail("coordinator-corrupt", "selection store has an unknown schema")
+
+
+def _read_schema_version(conn: sqlite3.Connection) -> str | None:
     try:
         row = conn.execute(
             "SELECT value FROM kv WHERE key = 'schema_version'").fetchone()
     except sqlite3.Error:
         _fail("coordinator-corrupt", "selection store is unreadable")
         raise AssertionError("unreachable")
-    if row is None or row[0] != _SCHEMA_VERSION:
+    return row[0] if row else None
+
+
+def _check_schema_version(conn: sqlite3.Connection) -> None:
+    if _read_schema_version(conn) != _SCHEMA_VERSION:
         _fail("coordinator-corrupt", "selection store has an unknown schema")
+
+
+def _check_schema(conn: sqlite3.Connection) -> None:
+    tables = _tables_present(conn)
+    if (set(_TABLES) <= tables
+            and _read_schema_version(conn) == _SCHEMA_VERSION):
+        return
+    # Empty, partial, or version-row-not-yet-visible: another process may
+    # be creating the schema right now (its CREATE TABLE batch is not
+    # atomic across connections, and its kv rows land after the last
+    # CREATE). Serialize on the RESERVED lock, then look again — only a
+    # store that is still incomplete under the lock is corrupt.
+    try:
+        _begin_immediate(conn)
+    except sqlite3.Error as exc:
+        if storage.is_transient_sqlite(exc):
+            _fail_retryable("coordinator-unavailable",
+                            "selection store is busy")
+            raise AssertionError("unreachable")
+        if _is_io_error(exc):
+            _fail("state-unavailable", "selection store is unavailable")
+            raise AssertionError("unreachable")
+        _fail("coordinator-corrupt", "selection store is unreadable")
+        raise AssertionError("unreachable")
+    try:
+        tables = _tables_present(conn)
+        if not tables:
+            try:
+                _create_schema(conn)
+            except sqlite3.Error:
+                _fail("coordinator-corrupt",
+                      "selection store cannot be initialised")
+                raise AssertionError("unreachable")
+        elif not set(_TABLES) <= tables:
+            _fail("coordinator-corrupt",
+                  "selection store has an unknown schema")
+            raise AssertionError("unreachable")
+        _check_schema_version(conn)
+        try:
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            if storage.is_transient_sqlite(exc):
+                _fail_retryable("coordinator-unavailable",
+                                "selection store is busy")
+                raise AssertionError("unreachable")
+            if _is_io_error(exc):
+                _fail("state-unavailable", "selection store is unavailable")
+                raise AssertionError("unreachable")
+            _fail("coordinator-corrupt",
+                  "selection store cannot be initialised")
+            raise AssertionError("unreachable")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
 
 
 # -- open / remove ------------------------------------------------------------
@@ -564,6 +622,57 @@ def _is_full(exc: sqlite3.Error) -> bool:
         if code & 0xFF == 13:
             return True
     return "full" in str(exc).lower()
+
+
+def _fail_retryable(code: str, message: str) -> None:
+    raise C.Problem(code=code, message=message, phase=_PHASE, retryable=True)
+
+
+def _is_io_error(exc: sqlite3.Error) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        if code & 0xFF == 10:
+            return True
+    return "disk i/o error" in str(exc).lower()
+
+
+# Upper bound for acquiring the RESERVED lock. A full-size update holds
+# it for several seconds (measured ~6.5 s for 20k nodes), far past the
+# connection's 2 s busy_timeout, so one busy_timeout wait is not enough.
+_BEGIN_IMMEDIATE_BUDGET_S = 60.0
+_BEGIN_IMMEDIATE_POLL_S = 0.05
+
+
+def _map_update_error(exc: sqlite3.Error) -> None:
+    """Raise the typed ``C.Problem`` for a failed update (never returns
+    without raising: a lock/I-O failure becomes a Problem, anything else
+    is re-raised unchanged)."""
+    if storage.is_transient_sqlite(exc):
+        _fail_retryable("coordinator-unavailable",
+                        "selection store is busy")
+    if _is_io_error(exc):
+        _fail("state-unavailable", "selection store is unavailable")
+    raise exc
+
+
+def _begin_immediate(conn: sqlite3.Connection) -> None:
+    """Take the RESERVED lock, waiting past a concurrent big writer.
+
+    Each ``BEGIN IMMEDIATE`` waits only one busy_timeout; a realistic
+    update holds the lock longer than that, so retry a busy/locked
+    failure until the budget runs out. Anything else raises at once.
+    """
+    deadline = time.monotonic() + _BEGIN_IMMEDIATE_BUDGET_S
+    while True:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.Error as exc:
+            if not storage.is_transient_sqlite(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_BEGIN_IMMEDIATE_POLL_S)
 
 
 def _chunks(items: list, size: int):
@@ -869,7 +978,9 @@ class SelectionStore:
 
         Never fails for size (oldest-first eviction keeps the newest run);
         raises ``capacity-exceeded`` only when even that cannot fit, after
-        one evict-and-retry.
+        one evict-and-retry. A lock held past the wait budget raises
+        retryable ``coordinator-unavailable`` and an I/O failure raises
+        ``state-unavailable`` (never a raw sqlite error).
         """
         planned = self._plan_update(run, run_id=run_id,
                                     recorded_at=recorded_at,
@@ -883,7 +994,8 @@ class SelectionStore:
                 return
             except sqlite3.Error as exc:
                 if not _is_full(exc):
-                    raise
+                    _map_update_error(exc)
+                    raise AssertionError("unreachable")
                 try:
                     conn.execute("ROLLBACK")
                 except sqlite3.Error:
@@ -902,6 +1014,7 @@ class SelectionStore:
                     if _is_full(retry_exc):
                         _fail("capacity-exceeded",
                               "selection store cannot fit the newest run")
+                    _map_update_error(retry_exc)
                     raise
 
     def _plan_update(self, run, *, run_id, recorded_at, compatibility,
@@ -1032,7 +1145,7 @@ class SelectionStore:
     def _apply_update(self, conn: sqlite3.Connection,
                       planned: _PlannedUpdate) -> bool:
         """Run the update transaction; True when rows were evicted."""
-        conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(conn)
         try:
             path_ids = self._intern_paths(conn, planned)
             func_ids = self._intern_funcs(conn, planned, path_ids)
@@ -1217,8 +1330,9 @@ class SelectionStore:
 
     def _db_size(self, conn: sqlite3.Connection) -> int:
         page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-        return int(page_count) * int(page_size)
+        return int(page_count - freelist_count) * int(page_size)
 
     def _evict_to_target(self, conn: sqlite3.Connection,
                          *, exclude: str) -> bool:
@@ -1243,14 +1357,14 @@ class SelectionStore:
                 " (SELECT DISTINCT run_id FROM nodes)")
             evicted = True
             try:
-                conn.execute("PRAGMA incremental_vacuum")
+                conn.execute("PRAGMA incremental_vacuum").fetchall()
             except sqlite3.Error:
                 pass
 
     def _evict_oldest(self, conn: sqlite3.Connection, *,
                       exclude: str) -> None:
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            _begin_immediate(conn)
         except sqlite3.Error:
             return
         try:
@@ -1266,7 +1380,7 @@ class SelectionStore:
                     "DELETE FROM runs WHERE run_id NOT IN"
                     " (SELECT DISTINCT run_id FROM nodes)")
             try:
-                conn.execute("PRAGMA incremental_vacuum")
+                conn.execute("PRAGMA incremental_vacuum").fetchall()
             except sqlite3.Error:
                 pass
             conn.execute("COMMIT")
