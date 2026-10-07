@@ -314,6 +314,19 @@ def explain_changed_full_reason(reason: C.Reason | None, *,
     return "a full run is required"
 
 
+def _unclean_detail(before: C.InputSnapshot, after: C.InputSnapshot) -> str:
+    """Name undeclared gitignored inputs when they alone made the tree
+    unclean; any other change stays "uncommitted changes"."""
+    changes = [*before.changes, *after.changes]
+    if not changes or any(change.kind != "ignored" for change in changes):
+        return "uncommitted changes"
+    paths = list(dict.fromkeys(change.new or change.old for change in changes))
+    more = f" (+{len(paths) - 1} more)" if len(paths) > 1 else ""
+    return (f"gitignored files count as test inputs: "
+            f"{render.terminal_text(paths[0])}{more} · declare them in "
+            f"[selection] non_input_outputs or ignored_inputs")
+
+
 def _no_baseline_detail(result: C.RunResult) -> str:
     """Plain words for why a full run recorded no baseline."""
     counts = result.counts
@@ -330,7 +343,7 @@ def _no_baseline_detail(result: C.RunResult) -> str:
     if before.digest != after.digest:
         return "files changed during the run"
     if not before.clean or not after.clean:
-        return "uncommitted changes"
+        return _unclean_detail(before, after)
     if any(reason.code == "incomplete-inventory" for reason in result.reasons):
         return "incomplete results"
     if any(reason.code == "changed-during-run" for reason in result.reasons):

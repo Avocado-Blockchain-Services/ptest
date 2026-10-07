@@ -302,6 +302,30 @@ def test_no_baseline_recorded_uncommitted_changes(case):
         "ptest: no baseline recorded: uncommitted changes")
 
 
+def test_no_baseline_recorded_names_undeclared_ignored_files(case):
+    """Only gitignored files inside the scope made the tree unclean: say
+    which and how to declare them, not "uncommitted changes" (a persea
+    agent chased untracked root notes for days over a gitignored .env)."""
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new=".env", kind="ignored"),
+        C.Change(old=None, new="build/lib/a.py", kind="ignored"),
+        C.Change(old=None, new="build/lib/b.py", kind="ignored")))
+    result = _result(case, input_before=dirty, input_after=dirty)
+    assert progress.format_baseline_note(result) == (
+        "ptest: no baseline recorded: gitignored files count as test "
+        "inputs: .env (+2 more) · declare them in [selection] "
+        "non_input_outputs or ignored_inputs")
+
+
+def test_no_baseline_recorded_real_changes_stay_uncommitted(case):
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new=".env", kind="ignored"),
+        C.Change(old="src/a.py", new="src/a.py", kind="modified")))
+    result = _result(case, input_before=dirty, input_after=dirty)
+    assert progress.format_baseline_note(result) == (
+        "ptest: no baseline recorded: uncommitted changes")
+
+
 def test_no_baseline_recorded_changed_during_run(case):
     before = case.snapshot(digest="aa" * 32)
     after = case.snapshot(digest="bb" * 32)
