@@ -129,6 +129,15 @@ class MutantRecord:
     # they never classify, they only suggest where a human should look.
     suggestions: tuple = ()
     planning_ms: Mapping = field(default_factory=dict)
+    # Selection sizes in tests (v1 selects whole files: their recorded
+    # test counts; v2 is node-level), the v2 engine, its static reason
+    # when it fell back, and its -v detail lines for diagnosis.
+    v1_tests: int = 0
+    v2_tests: int = 0
+    total_tests: int = 0
+    v2_engine: str = ""
+    v2_reason: str = ""
+    v2_details: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +634,12 @@ def render_json(report: EvalReport) -> str:
                 "miss_classes": list(record.miss_classes),
                 "suggestions": list(record.suggestions),
                 "planning_ms": dict(record.planning_ms),
+                "v1_tests": record.v1_tests,
+                "v2_tests": record.v2_tests,
+                "total_tests": record.total_tests,
+                "v2_engine": record.v2_engine,
+                "v2_reason": record.v2_reason,
+                "v2_details": list(record.v2_details),
             }
             for record in report.mutants
         ],
@@ -937,6 +952,35 @@ def store_db_path(project_id: str) -> Path:
     return Path(contracts_mod.selection_store_path(domain.root, project_id))
 
 
+def tests_per_file(project_id: str) -> dict:
+    """Recorded tests per test file in the campaign store (seed state)."""
+    from ptest import platform as platform_mod  # noqa: lazy import
+    from ptest import selection_store  # noqa: lazy import
+    store = selection_store.open_store(platform_mod.domain_paths(None),
+                                       project_id, create=False)
+    try:
+        counts: dict = {}
+        for node in store.snapshot().nodes.values():
+            counts[node.test_file] = counts.get(node.test_file, 0) + 1
+        return counts
+    finally:
+        store.close()
+
+
+def selection_tests(plan, counts: Mapping, *, dynamic: bool) -> int:
+    """Tests a plan runs: everything when full, node-level for dynamic
+    plans, every recorded test of each selected file otherwise."""
+    total = sum(counts.values())
+    if getattr(plan, "kind", "selected") == "full":
+        return total
+    if getattr(plan, "kind", "selected") == "none":
+        return 0
+    if dynamic and getattr(plan, "engine", "") == "dynamic":
+        return int(getattr(plan, "tests", 0) or 0)
+    return sum(counts.get(path, 0)
+               for path in (getattr(plan, "files", ()) or ()))
+
+
 def _journal(store_db: Path) -> Path:
     return store_db.with_name(store_db.name + "-journal")
 
@@ -1206,7 +1250,8 @@ def _scope_node(prefix: str, nodeid: str) -> str:
 
 def _run_mutant(args, project: Path, out: Path, store_db, backup,
                 mutant: Mutant, project_id: str,
-                seed_failed: tuple = ()) -> MutantRecord:
+                seed_failed: tuple = (),
+                counts: Mapping | None = None) -> MutantRecord:
     """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
     if store_db is not None:
         restore_store(store_db, backup)  # pristine store for planning
@@ -1295,7 +1340,15 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
             failed=mutant_failed, baseline_failed=baseline_failed,
             misses=misses, miss_classes=miss_classes,
             suggestions=suggestions,
-            planning_ms={"v1": v1_ms, "v2": v2_ms})
+            planning_ms={"v1": v1_ms, "v2": v2_ms},
+            v1_tests=selection_tests(v1, counts or {}, dynamic=False),
+            v2_tests=selection_tests(v2, counts or {}, dynamic=True),
+            total_tests=sum((counts or {}).values()),
+            v2_engine=str(getattr(v2, "engine", "") or ""),
+            v2_reason=str(getattr(v2, "static_reason", "")
+                          or getattr(v2, "reason", "") or ""),
+            v2_details=tuple(str(line) for line in
+                             (getattr(v2, "details", ()) or ())[:12]))
     finally:
         if baseline_scratch is not None:
             remove_scratch(project, baseline_scratch)
@@ -1322,10 +1375,15 @@ def run_campaign(args) -> int:
         seed_failed = seed_records(args, project, out, project_id)
         backup = (backup_store(store_db, out / "scratch" / "store-backup")
                   if store_db is not None else None)
+        try:
+            counts = tests_per_file(project_id)
+        except Exception:
+            counts = {}
         records = []
         for mutant in mutants:
             records.append(_run_mutant(args, project, out, store_db, backup,
-                                       mutant, project_id, seed_failed))
+                                       mutant, project_id, seed_failed,
+                                       counts))
             # Partial reports survive an interrupted multi-hour campaign.
             _write_reports(out, EvalReport(seed=args.seed,
                                            mutants=tuple(records)))

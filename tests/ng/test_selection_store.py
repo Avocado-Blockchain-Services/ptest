@@ -559,6 +559,52 @@ def test_ambient_functions_round_trip(domain_factory):
         store.close()
 
 
+def test_successive_scoped_updates_keep_every_id_resolvable(domain_factory):
+    """Two scoped runs with different vocabularies: every id in the merged
+    snapshot must resolve to the names each run recorded."""
+    from ptest import selection_planner as PL
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        store.update(
+            _run({"tests/test_a.py::test_one": _node(
+                "tests/test_a.py::test_one", deps=_ctx(funcs=[0], data=[2]))},
+                paths=("tests/test_a.py", "pkg/a.py", "data/a.json"),
+                funcs=((1, "f"),), ambient=_ctx(funcs=[0])),
+            run_id=RUN_A, recorded_at=1.0, compatibility=COMPAT,
+            digests=_digests(paths=("tests/test_a.py", "pkg/a.py",
+                                    "data/a.json")), full=False)
+        store.update(
+            _run({"tests/test_b.py::test_two": _node(
+                "tests/test_b.py::test_two", deps=_ctx(funcs=[0, 1],
+                                                      modules=[3]))},
+                paths=("pkg/b.py", "tests/test_b.py", "pkg/a.py",
+                       "pkg/c.py"),
+                funcs=((0, "g"), (2, "h")), ambient=_ctx(funcs=[1])),
+            run_id=RUN_B, recorded_at=2.0, compatibility=COMPAT,
+            digests=_digests(paths=("pkg/b.py", "tests/test_b.py",
+                                    "pkg/a.py", "pkg/c.py")), full=False)
+        snap = store.snapshot()
+        resolved = {}
+        for nodeid, node in snap.nodes.items():
+            paths = PL._context_paths(snap.vocabulary, snap.fixtures,
+                                      node.deps, list(node.fixtures))
+            assert paths is not None, nodeid
+            resolved[nodeid] = paths
+        assert resolved["tests/test_a.py::test_one"][0] == {("pkg/a.py", "f")}
+        assert resolved["tests/test_a.py::test_one"][2] == {"data/a.json"}
+        assert resolved["tests/test_b.py::test_two"][0] == {
+            ("pkg/b.py", "g"), ("pkg/a.py", "h")}
+        assert resolved["tests/test_b.py::test_two"][1] == {"pkg/c.py"}
+        for run_id, expected in ((RUN_A, {("pkg/a.py", "f")}),
+                                 (RUN_B, {("pkg/a.py", "h")})):
+            ambient = {PL._resolve_function(snap.vocabulary, fid)
+                       for fid in snap.runs[run_id].ambient.functions}
+            assert ambient == expected
+    finally:
+        store.close()
+
+
 def test_engine_rebuilds_damaged_store_on_write_open(domain_factory):
     """A damaged store would pin every later run to the static rule."""
     from ptest import selection_engine as E

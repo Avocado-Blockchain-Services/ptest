@@ -699,6 +699,26 @@ def test_isolate_scratch_links_env_never_copies(tmp_path):
     assert not (workdir / ".env").exists()
 
 
+def test_selection_tests_counts_files_nodes_and_full():
+    counts = {"tests/test_a.py": 5, "tests/test_b.py": 3}
+
+    class Plan:
+        def __init__(self, kind, files=(), engine="static", tests=0):
+            self.kind, self.files, self.engine, self.tests = (
+                kind, files, engine, tests)
+
+    assert se.selection_tests(Plan("full"), counts, dynamic=False) == 8
+    assert se.selection_tests(Plan("none"), counts, dynamic=True) == 0
+    assert se.selection_tests(Plan("selected", ("tests/test_a.py",)),
+                              counts, dynamic=False) == 5
+    assert se.selection_tests(
+        Plan("selected", ("tests/test_a.py",), "dynamic", 2),
+        counts, dynamic=True) == 2
+    # A static fallback in v2 counts whole files like v1.
+    assert se.selection_tests(Plan("selected", ("tests/test_b.py",)),
+                              counts, dynamic=True) == 3
+
+
 def test_median_of_three():
     assert se.median([3.0, 1.0, 2.0]) == 2.0
 
