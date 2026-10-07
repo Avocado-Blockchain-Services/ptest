@@ -1231,8 +1231,11 @@ def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
     try:
         return failing_nodeids(export, scratch, done.returncode != 0)
     except RuntimeError as exc:
-        tail = "\n".join(str(getattr(done, "stderr", "") or "")
-                         .strip().splitlines()[-12:])
+        lines = str(getattr(done, "stderr", "") or "").strip().splitlines()
+        # The reason lines (ptest: / code: …) matter, not runner chatter.
+        tail = "\n".join([line for line in lines
+                          if line.startswith("ptest:") or ": " in line[:40]
+                          ][-40:])
         raise RuntimeError(f"{exc}; ptest exit {done.returncode}:\n{tail}") \
             from exc
 
