@@ -503,6 +503,8 @@ def test_xdist_recording_merges_workers(tmp_path):
     assert controller["worker_id"] is None
     assert sorted(controller["workers"]) == ["gw0", "gw1"]
     assert controller["nodes"] == []
+    # Starting the workers is accounted for: it must not taint every test.
+    assert controller["ambient"]["opaque"] is False
     merged: dict[str, dict] = {}
     for payload in by_role["worker"]:
         assert payload["worker_id"] in ("gw0", "gw1")
@@ -577,3 +579,4 @@ def test_ingest_accepts_real_xdist_output(tmp_path):
                                     expected_workers=2)
     assert run.complete is True
     assert run.recording is True
+    assert run.ambient.opaque is False

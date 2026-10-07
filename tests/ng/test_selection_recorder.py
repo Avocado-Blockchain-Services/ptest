@@ -806,6 +806,60 @@ def test_fork_exec_python_marks_opaque(tmp_path):
     assert rec._current.opaque is True
 
 
+_BOOT = "import sys;exec(eval(sys.stdin.readline()))"
+
+
+def _gateway_argv(exe=None):
+    exe = exe or sys.executable
+    return [exe, "-u", "-c", _BOOT]
+
+
+def test_xdist_gateway_spawn_keeps_controller_ambient_clean(tmp_path):
+    """The controller starting xdist workers is accounted for (each worker
+    records its own deps file). Before the fix this one spawn made the
+    ambient context, and so every test of an xdist run, opaque."""
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec._handle_audit("subprocess.Popen",
+                      (sys.executable, _gateway_argv(), None, None))
+    exe = sys.executable.encode()
+    rec._handle_audit("_posixsubprocess.fork_exec",
+                      ([exe], [part.encode() for part in _gateway_argv()],
+                       None))
+    assert rec._ambient.opaque is False
+
+
+def test_xdist_gateway_spawn_inside_a_test_is_opaque(tmp_path):
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    rec._handle_audit("subprocess.Popen",
+                      (sys.executable, _gateway_argv(), None, None))
+    assert rec._current.opaque is True
+
+
+def test_xdist_gateway_spawn_from_a_worker_is_opaque(tmp_path):
+    rec = recorder.Recorder(checkout_root=str(tmp_path), run_id="r" * 32,
+                            report_path=str(tmp_path / "rep.json"),
+                            role="worker", worker_id="gw0")
+    rec.recording = True
+    rec._handle_audit("subprocess.Popen",
+                      (sys.executable, _gateway_argv(), None, None))
+    assert rec._ambient.opaque is True
+
+
+@pytest.mark.parametrize("argv", [
+    [sys.executable, "-c", _BOOT],
+    [sys.executable, "-u", "-c", _BOOT + ";print(1)"],
+    [sys.executable, "-u", "-c", "import sys"],
+])
+def test_near_gateway_spawns_stay_opaque(tmp_path, argv):
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec._handle_audit("subprocess.Popen", (argv[0], argv, None, None))
+    assert rec._ambient.opaque is True
+
+
 def test_fork_exec_outside_binary_stays_clean(tmp_path):
     outside = shutil.which("true")
     if outside is None:

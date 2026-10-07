@@ -962,7 +962,7 @@ class SelectionStore:
             path_ids = self._intern_paths(conn, planned)
             func_ids = self._intern_funcs(conn, planned, path_ids)
             fixture_ids = self._intern_fixtures(conn, planned)
-            self._store_run(conn, planned, path_ids)
+            self._store_run(conn, planned, path_ids, func_ids)
             self._store_nodes(conn, planned, path_ids, func_ids,
                               fixture_ids)
             self._store_fixtures(conn, planned, path_ids, func_ids,
@@ -1056,8 +1056,9 @@ class SelectionStore:
             opaque=opaque)
 
     def _store_run(self, conn: sqlite3.Connection,
-                   planned: _PlannedUpdate, path_ids: dict[str, int]) -> None:
-        ambient = self._opaque(planned.ambient, planned, path_ids, {})
+                   planned: _PlannedUpdate, path_ids: dict[str, int],
+                   func_ids: dict) -> None:
+        ambient = self._opaque(planned.ambient, planned, path_ids, func_ids)
         conn.execute(
             "INSERT OR REPLACE INTO runs(run_id, recorded_at,"
             " compatibility, ambient) VALUES(?, ?, ?, ?)",

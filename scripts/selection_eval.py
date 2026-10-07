@@ -25,6 +25,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import random
 import re
 import shlex
@@ -749,14 +750,15 @@ def ground_truth_argv(ptest_cmd: str, files: tuple, export_name: str,
     """
     base = shlex.split(ptest_cmd)
     if full:
-        # --again: the baseline scratch is a pristine checkout of an
-        # already-passed tree, which `ptest --full` would skip as
-        # "already verified"; --again forces the fresh run the campaign
-        # needs for flaky/pre-existing failure marking.
-        # ``scope`` names a monorepo child so a full run never spreads
-        # to its siblings.
-        return base + ["--full", "--again", "--result-json", export_name,
-                       *list(scope)]
+        # --again: a pristine checkout of an already-passed tree would be
+        # skipped as "already verified"; --again forces the fresh run.
+        # ``scope`` names a monorepo child so a full run never spreads to
+        # its siblings; --again takes no path, and a scoped child never
+        # reuses a green here because the campaign project id is fresh.
+        if scope:
+            return base + ["--full", "--result-json", export_name,
+                           *list(scope)]
+        return base + ["--full", "--again", "--result-json", export_name]
     return base + ["--result-json", export_name, *list(files)]
 
 
@@ -897,9 +899,13 @@ def plan_v2(top: Path, project_root: Path, changed: tuple):
                                     config, tuple(changed))
 
 
-def campaign_project_id(project: Path, seed: int) -> str:
-    """The campaign-private 32-hex project id (stable per project and seed)."""
-    text = f"selection-eval:{Path(project).resolve()}:{int(seed)}"
+def campaign_project_id(project: Path, seed: int, nonce: str = "") -> str:
+    """The campaign-private 32-hex project id.
+
+    ``nonce`` makes each invocation fresh, so no green or verified result
+    from an earlier campaign can be reused and skip a run.
+    """
+    text = f"selection-eval:{Path(project).resolve()}:{int(seed)}:{nonce}"
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
@@ -1135,8 +1141,19 @@ def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
     done = _run(ground_truth_argv(ptest_cmd, tuple(files), export_name, full,
                                   scope=scope),
                 cwd=scratch, timeout=_RUN_TIMEOUT_S)
-    return failing_nodeids(scratch / export_name, scratch,
-                           done.returncode != 0)
+    # ptest writes the export relative to the project it routed to: the
+    # child dir for a monorepo child, the scratch root otherwise.
+    export = scratch / export_name
+    for candidate in (scratch / part / export_name for part in scope):
+        if candidate.is_file():
+            export = candidate
+    try:
+        return failing_nodeids(export, scratch, done.returncode != 0)
+    except RuntimeError as exc:
+        tail = "\n".join(str(getattr(done, "stderr", "") or "")
+                         .strip().splitlines()[-12:])
+        raise RuntimeError(f"{exc}; ptest exit {done.returncode}:\n{tail}") \
+            from exc
 
 
 def _project_prefix(project: Path) -> str:
@@ -1294,17 +1311,17 @@ def run_campaign(args) -> int:
     tree = read_tree_files(project)
     sites = [site for site in collect_sites(tree) if site.site_class in args.classes]
     mutants = sample_mutants(sites, args.mutants, args.seed)
-    project_id = campaign_project_id(project, args.seed)
+    project_id = campaign_project_id(project, args.seed,
+                                     os.urandom(8).hex())
     try:
         store_db = store_db_path(project_id)
     except Exception:
         store_db = None
-    if store_db is not None:
-        restore_store(store_db, None)  # a fresh store for this campaign
-    seed_failed = seed_records(args, project, out, project_id)
-    backup = (backup_store(store_db, out / "scratch" / "store-backup")
-              if store_db is not None else None)
+    backup = None
     try:
+        seed_failed = seed_records(args, project, out, project_id)
+        backup = (backup_store(store_db, out / "scratch" / "store-backup")
+                  if store_db is not None else None)
         records = []
         for mutant in mutants:
             records.append(_run_mutant(args, project, out, store_db, backup,
@@ -1327,8 +1344,13 @@ def run_campaign(args) -> int:
     # discard the records already computed: write the reports with
     # empty overhead first, then re-raise.
     try:
-        overhead = (benchmark_overhead(project, out, args.ptest, project_id)
-                    if args.benchmark_overhead else {})
+        try:
+            overhead = (benchmark_overhead(project, out, args.ptest,
+                                           project_id)
+                        if args.benchmark_overhead else {})
+        finally:
+            if store_db is not None:
+                restore_store(store_db, None)
     except Exception:
         _write_reports(out, EvalReport(seed=args.seed,
                                        mutants=tuple(records),

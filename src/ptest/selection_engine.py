@@ -969,6 +969,9 @@ def _ingest_run(run, domain, config, project_id, run_id, key,
                          compatibility=compatibility, digests=digests,
                          full=str(execution) == "full")
         except Exception:
+            if verbose:
+                progress.emit(progress.format_selection_not_recorded(
+                    "the dependency store rejected the update"), quiet=quiet)
             return
         try:
             # Recording worked: any remembered inactivity is stale.

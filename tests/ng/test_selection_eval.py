@@ -367,7 +367,7 @@ def test_ground_truth_argv_uses_ptest_with_result_json():
                     "--result-json", "run-1.json"]
     child = se.ground_truth_argv("uv run ptest", (), "run-1.json",
                                  full=True, scope=("services/cp",))
-    assert child == ["uv", "run", "ptest", "--full", "--again",
+    assert child == ["uv", "run", "ptest", "--full",
                      "--result-json", "run-1.json", "services/cp"]
 
 
@@ -479,6 +479,7 @@ def test_campaign_project_id_is_private_and_stable(tmp_path):
     assert re.fullmatch(r"[0-9a-f]{32}", first)
     assert se.campaign_project_id(tmp_path, 7) == first
     assert se.campaign_project_id(tmp_path, 8) != first
+    assert se.campaign_project_id(tmp_path, 7, "n1") != first
 
 
 def test_overlay_project_id_rewrites_only_the_id(tmp_path):
@@ -586,7 +587,8 @@ def test_campaign_never_touches_the_real_project_store(tmp_path, monkeypatch):
     (project / "pkg" / "core.py").write_text(core)
     (project / ".ptest.toml").write_text(config_text)
     out = tmp_path / "out"
-    campaign = se.campaign_project_id(project, 5)
+    monkeypatch.setattr(se.os, "urandom", lambda size: b"\x01" * size)
+    campaign = se.campaign_project_id(project, 5, "01" * 8)
     store = tmp_path / "state" / "projects" / campaign / "selection.db"
     real_store = tmp_path / "state" / "projects" / real_id / "selection.db"
     real_store.parent.mkdir(parents=True)
@@ -926,7 +928,8 @@ def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
         runs.append((list(cmd), Path(cwd)))
         export = cmd[cmd.index("--result-json") + 1]
         assert cmd[:3] == ["uv", "run", "ptest"]
-        Path(cwd, export).write_text("{}\n")
+        # ptest writes the export in the child it routed to.
+        Path(cwd, "services", "cp", export).write_text("{}\n")
         # Pytest records lastfailed under the child's rootdir with
         # child-relative ids — never repo-root-prefixed ids at the
         # scratch root.
@@ -972,8 +975,8 @@ def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
     # so siblings never run.
     seed_cmd, seed_cwd = runs.pop(0)
     assert seed_cwd == created["seed"]
-    assert seed_cmd[3:6] == ["--full", "--again", "--result-json"]
-    assert seed_cmd[7:] == ["services/cp"]
+    assert seed_cmd[3:5] == ["--full", "--result-json"]
+    assert seed_cmd[6:] == ["services/cp"]
     # ptest runs from the scratch repo root with child-prefixed scopes,
     # options before paths so the export is produced.
     assert len(runs) == 2

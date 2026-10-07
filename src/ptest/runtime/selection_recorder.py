@@ -211,6 +211,39 @@ def _spawn_opaque(executable: object, argv: object, checkout: str) -> bool:
     return False
 
 
+# execnet's popen bootstrap: how pytest-xdist starts its worker interpreters.
+_XDIST_BOOTSTRAP = "import sys;exec(eval(sys.stdin.readline()))"
+
+
+def _is_xdist_gateway(executable: object, argv: object) -> bool:
+    """True for the controller starting an xdist worker of this interpreter.
+
+    Each such worker records its own deps file and ingest requires one
+    per worker, so the spawn is accounted for and does not hide project
+    code. Only the exact execnet argv of the running interpreter matches.
+    """
+    try:
+        if not isinstance(argv, (list, tuple)) or len(argv) < 4:
+            return False
+        tail = []
+        for item in argv[-3:]:
+            if isinstance(item, bytes):
+                item = item.decode("utf-8", "strict")
+            if not isinstance(item, str):
+                return False
+            tail.append(item)
+        if tail != ["-u", "-c", _XDIST_BOOTSTRAP]:
+            return False
+        program = executable if executable is not None else argv[0]
+        if isinstance(program, bytes):
+            program = program.decode("utf-8", "strict")
+        if not isinstance(program, str) or not program:
+            return False
+        return os.path.realpath(program) == os.path.realpath(sys.executable)
+    except Exception:
+        return False
+
+
 def _force_opaque_event(event: object) -> bool:
     """Events that always mark the context opaque (fork/system)."""
     try:
@@ -1037,6 +1070,12 @@ class Recorder:
         except Exception:
             pass
 
+    def _spawns_xdist_worker(self, executable: object, argv: object) -> bool:
+        """The controller's ambient context starting an xdist worker."""
+        return (self._role == "controller"
+                and self._current is self._ambient
+                and _is_xdist_gateway(executable, argv))
+
     def _handle_audit(self, event: object, args: object) -> None:
         try:
             name = str(event) if isinstance(event, str) else ""
@@ -1063,6 +1102,8 @@ class Recorder:
                     or (name.startswith("os.spawn") or name.startswith("os.exec")):
                 executable = args[0] if len(args) > 0 else None
                 rest = args[1] if len(args) > 1 else None
+                if self._spawns_xdist_worker(executable, rest):
+                    return
                 if _spawn_opaque(executable, rest, self._checkout):
                     try:
                         self._current.opaque = True
@@ -1075,6 +1116,8 @@ class Recorder:
                 executable = _fork_exec_arg(
                     args[0] if len(args) > 0 else None)
                 rest = args[1] if len(args) > 1 else None
+                if self._spawns_xdist_worker(executable, rest):
+                    return
                 if _spawn_opaque(executable, rest, self._checkout):
                     try:
                         self._current.opaque = True

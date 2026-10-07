@@ -537,6 +537,28 @@ def test_corrupt_store_rebuilds_after_remove(domain_factory):
         fresh.close()
 
 
+def test_ambient_functions_round_trip(domain_factory):
+    """Collection-time code that calls project functions lands in the
+    ambient context. Before the fix every such run raised KeyError inside
+    update and was silently never recorded."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        store.update(
+            _run({"tests/test_a.py::test_one": _node(
+                "tests/test_a.py::test_one", deps=_ctx(funcs=[0]))},
+                funcs=((1, "f"), (1, "g")), ambient=_ctx(funcs=[1])),
+            run_id=RUN_A, recorded_at=1.0, compatibility=COMPAT,
+            digests=_digests(), full=False)
+        snap = store.snapshot()
+        names = {snap.vocabulary.functions[f][1]
+                 for f in snap.runs[RUN_A].ambient.functions}
+        assert names == {"g"}
+        assert set(snap.nodes) == {"tests/test_a.py::test_one"}
+    finally:
+        store.close()
+
+
 def test_engine_rebuilds_damaged_store_on_write_open(domain_factory):
     """A damaged store would pin every later run to the static rule."""
     from ptest import selection_engine as E
