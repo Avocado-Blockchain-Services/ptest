@@ -915,3 +915,27 @@ def test_parallel_indexing_matches_serial(monkeypatch):
     monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
                         lambda **kw: (_ for _ in ()).throw(OSError("no")))
     assert S._index_many(raws) == serial
+
+
+def test_ensure_cached_indexes_only_missing_current_versions(tmp_path):
+    """A record's baseline versions must be diffable later; a run that
+    did not plan first never indexed them."""
+    key = b"k" * 32
+    (tmp_path / "pkg").mkdir()
+    files = {"pkg/a.py": b"def f():\n    return 1\n",
+             "pkg/b.py": b"def g():\n    return 2\n",
+             "pkg/c.py": b"def h():\n    return 3\n"}
+    for rel, raw in files.items():
+        (tmp_path / rel).write_bytes(raw)
+    digests = {rel: _digest(key, raw) for rel, raw in files.items()}
+    cache = DictCache({digests["pkg/a.py"]: S.encode_index(
+        S.index_source(files["pkg/a.py"]))})
+    (tmp_path / "pkg" / "c.py").write_bytes(b"def h():\n    return 4\n")
+    digests["data/x.json"] = "dd" * 32
+
+    assert S.ensure_cached(tmp_path, digests, key=key, cache=cache) == 1
+    assert list(cache.put_calls[0]) == [digests["pkg/b.py"]]
+    decoded = S.decode_index(cache.blobs[digests["pkg/b.py"]])
+    assert decoded == S.index_source(files["pkg/b.py"])
+    assert S.ensure_cached(tmp_path, digests, key=key,
+                           cache=_BrokenCache()) == 0

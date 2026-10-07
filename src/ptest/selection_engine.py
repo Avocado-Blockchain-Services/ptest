@@ -965,6 +965,14 @@ def _ingest_run(run, domain, config, project_id, run_id, key,
         except Exception:
             digests = {}
         try:
+            # The versions these records were taken against must be
+            # diffable later (a run that did not plan first never
+            # indexed them).
+            _source_index().ensure_cached(project_root, digests, key=key,
+                                          cache=store)
+        except Exception:
+            pass
+        try:
             store.update(run, run_id=run_id, recorded_at=time.time(),
                          compatibility=compatibility, digests=digests,
                          full=str(execution) == "full")

@@ -197,6 +197,10 @@ class FakeSourceIndex:
     def decode_index(self, blob):
         return None
 
+    def ensure_cached(self, project_root, digests, *, key, cache):
+        self.builds.append(("ensure_cached", cache))
+        return 0
+
     def iter_python_files(self, project_root):
         return iter(())
 
@@ -964,6 +968,8 @@ def test_after_run_valid_scoped_updates_without_cleaning_up(
     assert fakes.ingest_mod.cleaned == []
     assert "mark_outcomes" not in _kinds(fakes.store.calls)
     assert "invalidate" not in _kinds(fakes.store.calls)
+    # The recorded versions are made diffable for later plans.
+    assert ("ensure_cached", fakes.store) in fakes.source_mod.builds
 
 
 def test_after_run_valid_scoped_verbose_reports_recorded(fakes, tmp_path,

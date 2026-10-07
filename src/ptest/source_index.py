@@ -894,6 +894,41 @@ def _index_many(raws: list) -> list[C.FileIndex]:
     return [_index_or_unparsed(raw) for raw in raws]
 
 
+def ensure_cached(project_root: Path, digests, *, key: bytes,
+                  cache: C.ParseCache) -> int:
+    """Index every recorded ``.py`` version the cache lacks; how many.
+
+    A record's baseline digests name the code its tests ran against. A
+    later plan diffs the current file against that version, so it must
+    be in the cache, or the whole file counts as changed. Runs that plan
+    first already cached it; this covers runs that do not (``ptest
+    <file>``, folder runs). A file that changed since its digest was
+    taken is skipped. Never raises.
+    """
+    try:
+        root = Path(project_root)
+        wanted = {digest: rel for rel, digest in dict(digests).items()
+                  if isinstance(rel, str) and rel.endswith(".py")
+                  and isinstance(digest, str) and digest}
+        if not wanted:
+            return 0
+        found = cache.get_many(sorted(wanted)) or {}
+        missing = [digest for digest in sorted(wanted) if digest not in found]
+        raws = {}
+        for digest in missing:
+            raw = read_source(root, wanted[digest])
+            if raw is not None and C.selection_file_digest(key, raw) == digest:
+                raws[digest] = raw
+        if not raws:
+            return 0
+        built = _index_many(list(raws.values()))
+        cache.put_many({digest: encode_index(index)
+                        for digest, index in zip(raws, built)})
+        return len(raws)
+    except Exception:
+        return 0
+
+
 def build_project_index(project_root: Path, config: C.Config, *,
                         key: bytes | None, cache: C.ParseCache | None,
                         conftest_edges: bool = True) -> C.ProjectIndex:
