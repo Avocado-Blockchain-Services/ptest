@@ -147,10 +147,24 @@ def _single_line(node):
     return node.end_lineno is not None and node.end_lineno == node.lineno
 
 
+def is_test_file(path: str) -> bool:
+    """A test module (``test_*.py`` / ``*_test.py``); it always runs when
+    changed, under either planner, so mutating it proves nothing."""
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(".py") and (
+        name.startswith("test_") or name.endswith("_test.py"))
+
+
 def collect_sites(tree: Mapping[str, str]) -> list[Site]:
-    """Collect one site per mutation opportunity, sorted deterministically."""
+    """Collect one site per mutation opportunity, sorted deterministically.
+
+    Test modules are skipped; conftest, factories and other test support
+    stay, since a change there must reach the tests that use it.
+    """
     sites: list[Site] = []
     for path in sorted(tree):
+        if is_test_file(path):
+            continue
         text = tree[path]
         if path.endswith(".py"):
             try:
@@ -244,21 +258,25 @@ def _decorator_constant_args(node):
 
 
 def sample_mutants(sites: list[Site], count: int, seed: int) -> list[Mutant]:
-    """Seeded deterministic sampling covering every class that fits."""
+    """Seeded deterministic sampling, stratified over the operator classes.
+
+    Classes take turns, so a class with many sites (comparisons) cannot
+    crowd out the rare ones (data, decorators); a class that runs out of
+    sites leaves its turns to the others.
+    """
     rng = random.Random(seed)
-    by_class = {name: [site for site in sites if site.site_class == name]
-                for name in MUTATION_CLASSES}
-    picked: list[Site] = []
+    pools = []
     for name in MUTATION_CLASSES:
-        if by_class[name]:
-            picked.append(rng.choice(by_class[name]))
-    chosen = set(picked)
-    rest = [site for site in sites if site not in chosen]
-    rng.shuffle(rest)
-    picked.extend(rest)
-    selected = picked[:max(0, count)]
+        pool = [site for site in sites if site.site_class == name]
+        rng.shuffle(pool)
+        pools.append(pool)
+    picked: list[Site] = []
+    while len(picked) < count and any(pools):
+        for pool in pools:
+            if pool and len(picked) < count:
+                picked.append(pool.pop())
     return [Mutant(f"m{index + 1:04d}", site)
-            for index, site in enumerate(selected)]
+            for index, site in enumerate(picked)]
 
 
 def _offsets(lines):

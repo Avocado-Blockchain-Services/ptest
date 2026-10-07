@@ -106,6 +106,29 @@ def test_sampling_covers_every_class_when_it_fits():
     assert {mutant.site.site_class for mutant in mutants} == set(se.MUTATION_CLASSES)
 
 
+def test_test_modules_are_never_mutated_but_support_is():
+    tree = dict(_tree())
+    tree["tests/test_core.py"] = FUNCS_PY
+    tree["tests/core_test.py"] = FUNCS_PY
+    tree["tests/conftest.py"] = FUNCS_PY
+    paths = {site.path for site in se.collect_sites(tree)}
+    assert "tests/test_core.py" not in paths
+    assert "tests/core_test.py" not in paths
+    assert "tests/conftest.py" in paths
+
+
+def test_sampling_is_stratified_over_classes():
+    """Plenty of comparison sites must not crowd out the rare classes."""
+    many = [se.Site("comparison-flip", f"pkg/m{i}.py", 1, "compare")
+            for i in range(100)]
+    rare = [se.Site("data-change", f"data/d{i}.json", 1, f"d{i}.json")
+            for i in range(3)]
+    mutants = se.sample_mutants(many + rare, 8, seed=3)
+    classes = [mutant.site.site_class for mutant in mutants]
+    assert classes.count("data-change") == 3
+    assert classes.count("comparison-flip") == 5
+
+
 def test_sampling_caps_at_available_sites():
     sites = se.collect_sites(_tree())
     mutants = se.sample_mutants(sites, 10_000, seed=7)
