@@ -274,6 +274,7 @@ def _decode(payload: dict) -> dict[str, dict]:
     paths = payload["paths"]
     functions = [(paths[entry[0]], entry[1], entry[2])
                  for entry in payload["functions"]]
+    fixture_list = payload["fixtures"]
     decoded = {}
     for node in payload["nodes"]:
         decoded[node["nodeid"]] = {
@@ -282,10 +283,13 @@ def _decode(payload: dict) -> dict[str, dict]:
             "functions": {functions[index] for index in node["functions"]},
             "modules": {paths[index] for index in node["modules"]},
             "data": {paths[index] for index in node["data"]},
-            "fixtures": [tuple(entry) for entry in node["fixtures"]],
+            # Frozen §2.6: node fixture refs are indexes into the
+            # top-level fixtures array.
+            "fixtures": [tuple(fixture_list[index]["key"])
+                         for index in node["fixtures"]],
         }
     fixtures = {}
-    for entry in payload["fixtures"]:
+    for entry in fixture_list:
         fixtures[tuple(entry["key"])] = {
             "functions": {functions[index] for index in entry["functions"]},
             "modules": {paths[index] for index in entry["modules"]},
@@ -521,10 +525,18 @@ def test_xdist_recording_merges_workers(tmp_path):
     opaque = {nodeid for nodeid, node in merged.items() if node["opaque"]}
     assert "tests/test_core.py::test_spawns_python" in opaque
     assert "tests/test_core.py::test_runs_true" not in opaque
-    # A session-fixture record exists on the workers that set it up.
-    assert any(any(key[1] == "booted" and key[2] == "session"
-                   for key in node["fixtures"])
-               for node in merged.values())
+    # A session-fixture record exists on the workers that set it up, and
+    # at least one node refs it by fixtures-array index (frozen §2.6).
+    seen_booted_ref = False
+    for worker_payload in by_role["worker"]:
+        keys = [tuple(entry["key"]) for entry in worker_payload["fixtures"]]
+        for node in worker_payload["nodes"]:
+            for index in node["fixtures"]:
+                assert isinstance(index, int)
+                assert 0 <= index < len(keys)
+                if keys[index][1] == "booted" and keys[index][2] == "session":
+                    seen_booted_ref = True
+    assert seen_booted_ref
 
 
 # ---------------------------------------------------------------------------

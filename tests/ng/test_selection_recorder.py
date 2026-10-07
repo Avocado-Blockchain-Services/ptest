@@ -346,6 +346,39 @@ def test_fixture_keys_for_item_uses_closure_defs():
     assert recorder.Recorder.fixture_keys_for_item(item) == [("", "booted", "session")]
 
 
+def test_node_fixture_refs_are_fixtures_indexes(tmp_path):
+    """Frozen §2.6: node 'fixtures' are indexes, not key triples."""
+    rec = _recorder(tmp_path)
+    rec.enter_test("t.py::t1")
+    alpha = ("base", "alpha", "session")
+    booted = ("base", "booted", "session")
+    rec.enter_fixture(alpha)
+    rec.exit_fixture()
+    rec.enter_fixture(booted)
+    rec.exit_fixture()
+    rec._nodes["t.py::t1"].fixtures.extend([booted, alpha])
+    rec.exit_test()
+    payload = rec._payload()
+    assert [entry["key"] for entry in payload["fixtures"]] == [
+        ["base", "alpha", "session"], ["base", "booted", "session"]]
+    (entry,) = payload["nodes"]
+    assert entry["fixtures"] == [0, 1]
+    # The T3 ingest predicate over the same shape.
+    assert all(isinstance(ref, int) and 0 <= ref < len(payload["fixtures"])
+               for ref in entry["fixtures"])
+
+
+def test_oversize_data_file_is_still_recorded(tmp_path):
+    """Spec N1: a data file above _DATA_MAX_BYTES is still D(T)."""
+    (tmp_path / "data").mkdir()
+    big = tmp_path / "data" / "big.bin"
+    with open(big, "wb") as handle:
+        handle.truncate(20 * 1024 * 1024)
+    assert big.stat().st_size == 20 * 1024 * 1024
+    rec = _recorder(tmp_path)
+    assert rec._resolve_data(str(big)) == "data/big.bin"
+
+
 def test_caps_make_context_opaque(tmp_path, monkeypatch):
     rec = _recorder(tmp_path)
     rec.recording = True
@@ -433,6 +466,41 @@ def test_activation_records_real_execution(tmp_path):
     done = _run_child(code, cwd=tmp_path)
     assert done.returncode == 0, done.stderr
     assert "wrote:" in done.stdout
+
+
+def test_activation_arms_modules_imported_before_it(tmp_path):
+    """Spec 6.1: the sys.modules walk arms pre-activation imports."""
+    (tmp_path / "pkgx").mkdir()
+    (tmp_path / "pkgx" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkgx" / "early.py").write_text(
+        "def hello():\n    return 'hi'\n"
+        "\n"
+        "class Greeter:\n"
+        "    def greet(self):\n        return 'yo'\n",
+        encoding="utf-8")
+    code = (_CHILD_PREAMBLE.format(recorder_path=str(
+        REPO_ROOT / "src" / "ptest" / "runtime" / "selection_recorder.py"))
+        + "import sys\n"
+        + "sys.path.insert(0, " + repr(str(tmp_path)) + ")\n"
+        + "import pkgx.early as early\n"
+        + f"rec = module.Recorder(checkout_root={str(tmp_path)!r}, run_id={'r' * 32!r},\n"
+        + f"                      report_path={str(tmp_path / 'rep.json')!r}, role='controller')\n"
+        + "assert rec.activate() is True, rec.inactive_reason\n"
+        + "m = sys.monitoring\n"
+        + "assert m.get_local_events(rec._tool, early.hello.__code__) != 0\n"
+        + "assert m.get_local_events(rec._tool, early.Greeter.greet.__code__) != 0\n"
+        + "rec.enter_test('t.py::t1')\n"
+        + "assert early.hello() == 'hi'\n"
+        + "assert early.Greeter().greet() == 'yo'\n"
+        + "rec.exit_test()\n"
+        + "node = rec._nodes['t.py::t1']\n"
+        + "assert ('pkgx/early.py', 'hello', 1) in node.ctx.functions\n"
+        + "assert ('pkgx/early.py', 'Greeter.greet', 5) in node.ctx.functions\n"
+        + "rec.deactivate()\n"
+        + "print('walk-ok')\n")
+    done = _run_child(code, cwd=tmp_path)
+    assert done.returncode == 0, done.stderr
+    assert "walk-ok" in done.stdout
 
 
 def test_no_free_tool_id_records_nothing_and_says_why(tmp_path):

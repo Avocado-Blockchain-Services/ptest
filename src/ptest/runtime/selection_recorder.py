@@ -52,7 +52,9 @@ _TOOL_IDS = (3, 4, 2)
 _TOOL_NAME = "ptest-selection"
 _CONTEXT_MAX_FUNCTIONS = 100000
 _CONTEXT_MAX_DATA = 4096
-# Data files larger than this are not tracked as D(T) (bounded ingest).
+# Frozen literal pinned to contracts (SELECTION_DATA_MAX_BYTES): the bound the
+# engine applies to its own digest reads. The recorder records data paths
+# regardless of size and never uses this as a drop filter (spec N1).
 _DATA_MAX_BYTES = 16 * 1024 * 1024
 _SKIP_DIRS = frozenset({
     "node_modules", "__pycache__", "site-packages", "build", "dist", "venv",
@@ -393,30 +395,116 @@ class Recorder:
             pass
 
     def _walk_modules(self) -> None:
-        """Arm project code imported before activation (best effort)."""
+        """Arm live project code imported before activation (best effort).
+
+        The loader's ``get_code`` unmarshals a fresh copy, so arming it
+        leaves the code objects module functions actually run
+        (``fn.__code__``) dark. Walk live objects reachable from each
+        project module instead: functions via ``__code__``, classes via
+        their members. Never touches loaders (no ``.pyc`` writes).
+        """
         try:
             modules = list(sys.modules.values())
         except Exception:
             return
+        seen: set[int] = set()
         for module in modules:
             try:
-                filename = getattr(module, "__file__", None)
-                if not isinstance(filename, str) or not filename:
-                    continue
                 if getattr(module, "__name__", "") in (
                         __name__, "ptest.runtime.pytest_bridge",
                         "pytest_bridge"):
                     continue
-                loader = getattr(module, "__spec__", None)
-                loader = getattr(loader, "loader", None)
-                get_code = getattr(loader, "get_code", None)
-                if not callable(get_code):
+                if not self._module_is_project(module):
                     continue
-                code = get_code(getattr(module, "__name__", ""))
-                if isinstance(code, types.CodeType):
-                    self._discover(code)
+                self._arm_live(module, seen)
             except Exception:
                 continue
+
+    def _module_is_project(self, module: object) -> bool:
+        """True when ``module.__file__`` is project code in the checkout."""
+        try:
+            filename = getattr(module, "__file__", None)
+            if (not isinstance(filename, str) or not filename
+                    or "\x00" in filename or filename.startswith("<")):
+                return False
+            try:
+                absolute = os.path.abspath(filename)
+                real = os.path.realpath(absolute)
+            except (OSError, ValueError):
+                return False
+            if real != absolute:
+                return False
+            try:
+                rel = os.path.relpath(real, self._checkout)
+            except (OSError, ValueError):
+                return False
+            return _code_path(rel.replace(os.sep, "/"))
+        except Exception:
+            return False
+
+    def _arm_live(self, value: object, seen: set[int]) -> None:
+        """Arm live functions/classes reachable from ``value`` (best effort).
+
+        ``vars()`` reads the namespace without invoking descriptors, so
+        this has no import or execution side effects. Anything that is
+        not project code is filtered by ``_discover`` itself.
+        """
+        try:
+            stack = [value]
+            while stack:
+                current = stack.pop()
+                try:
+                    if id(current) in seen:
+                        continue
+                    seen.add(id(current))
+                    if isinstance(current, types.FunctionType):
+                        code = getattr(current, "__code__", None)
+                        if isinstance(code, types.CodeType):
+                            self._discover(code)
+                        continue
+                    if isinstance(current, (staticmethod, classmethod)):
+                        try:
+                            stack.append(current.__func__)
+                        except Exception:
+                            pass
+                        continue
+                    if isinstance(current, property):
+                        for accessor in (current.fget, current.fset,
+                                         current.fdel):
+                            if isinstance(accessor, types.FunctionType):
+                                stack.append(accessor)
+                        continue
+                    namespace = None
+                    if isinstance(current,
+                                  (types.ModuleType, type)):
+                        try:
+                            namespace = vars(current)
+                        except TypeError:
+                            namespace = None
+                    if namespace is None:
+                        continue
+                    try:
+                        members = list(namespace.values())
+                    except Exception:
+                        continue
+                    for member in members:
+                        if isinstance(member, types.ModuleType):
+                            # Descend only into project modules; an
+                            # imported stdlib module's namespace is
+                            # walked nowhere.
+                            try:
+                                if self._module_is_project(member):
+                                    stack.append(member)
+                            except Exception:
+                                pass
+                        elif isinstance(member, (types.FunctionType, type,
+                                                 staticmethod, classmethod,
+                                                 property)):
+                            stack.append(member)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     # -- contexts (driven by the bridge) ----------------------------------
 
@@ -777,13 +865,10 @@ class Recorder:
                     candidate = None
                 if (isinstance(candidate, str)
                         and _data_path(candidate.replace(os.sep, "/"))):
-                    try:
-                        if os.stat(real).st_size <= _DATA_MAX_BYTES:
-                            rel = candidate.replace(os.sep, "/")
-                        else:
-                            rel = None
-                    except OSError:
-                        rel = candidate.replace(os.sep, "/")
+                    # Recorded whatever its size: dropping a large file
+                    # would silently lose D(T) and violate spec N1. The
+                    # engine bounds its own digest reads.
+                    rel = candidate.replace(os.sep, "/")
             try:
                 if len(self._path_memo) >= _MAX_PATH_MEMO:
                     self._path_memo.clear()
@@ -893,12 +978,17 @@ class Recorder:
                                           entry[2]))
         function_index = {entry: index
                           for index, entry in enumerate(ordered_functions)}
+        ordered_fixtures = sorted(self._fixtures)
         fixture_entries = []
-        for key in sorted(self._fixtures):
+        for key in ordered_fixtures:
             entry = {"key": [key[0], key[1], key[2]]}
             entry.update(self._ctx_payload(self._fixtures[key], path_index,
                                            function_index))
             fixture_entries.append(entry)
+        # Frozen §2.6: node fixture refs are indexes into the fixtures
+        # array, not key triples.
+        fixture_index = {key: index
+                         for index, key in enumerate(ordered_fixtures)}
         node_entries = []
         for nodeid in sorted(self._nodes):
             node = self._nodes[nodeid]
@@ -906,7 +996,8 @@ class Recorder:
                 "nodeid": nodeid,
                 "outcome": node.outcome if node.outcome in _OUTCOME_RANK else "unknown",
                 "fixtures": sorted(
-                    key for key in node.fixtures if key in self._fixtures),
+                    fixture_index[key] for key in node.fixtures
+                    if key in fixture_index),
             }
             entry.update(self._ctx_payload(node.ctx, path_index,
                                            function_index))
