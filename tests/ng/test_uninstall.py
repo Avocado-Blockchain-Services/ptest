@@ -1863,3 +1863,103 @@ def test_help_and_readme_name_state_dir_for_uninstall(
     text = readme.read_text(encoding="utf-8")
     assert "ptest uninstall" in text
     assert "PTEST_STATE_DIR" in text
+
+
+# --- selection stores (T3) --------------------------------------------------
+
+def _v2(root: Path, project_id: str, children: list[str]) -> None:
+    kids = ", ".join(f'"{child}"' for child in children)
+    (root / ".ptest.toml").write_text(
+        "version = 2\nproject_id = \"" + project_id + "\"\n"
+        "[monorepo]\nchildren = [" + kids + "]\n"
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+
+
+def _selection_db(domain: C.DomainPaths, project_id: str) -> Path:
+    from ptest import selection_store as store_api
+    store = store_api.open_store(domain, project_id, create=True)
+    store.close()
+    return domain.root / "projects" / project_id / "selection.db"
+
+
+def test_uninstall_plans_and_removes_selection_stores(case, tmp_path):
+    """Root plus each declared child config with a valid project id."""
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v2(root, PROJ, ["child"])
+    child = root / "child"
+    child.mkdir()
+    _v1(child, OTHER_PROJ)
+    root_db = _selection_db(domain, PROJ)
+    child_db = _selection_db(domain, OTHER_PROJ)
+    assert root_db.is_file() and child_db.is_file()
+
+    plan = uninstall_api.plan_repo(root, domain)
+    kinds = {(entry.action, entry.kind, entry.target) for entry in plan.entries}
+    assert ("remove", "selection-store", str(root_db)) in kinds
+    assert ("remove", "selection-store", str(child_db)) in kinds
+
+    applied = uninstall_api.apply_repo(plan, domain)
+    assert str(root_db) in applied.removed
+    assert str(child_db) in applied.removed
+    assert not root_db.exists() and not child_db.exists()
+
+
+def test_uninstall_selection_dry_run_changes_nothing(case, tmp_path):
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root, PROJ)
+    db = _selection_db(domain, PROJ)
+    before = db.read_bytes()
+    plan = uninstall_api.plan_repo(root, domain)
+    assert any(entry.action == "remove" and entry.kind == "selection-store"
+               for entry in plan.entries)
+    assert db.read_bytes() == before
+
+
+def test_uninstall_selection_skips_symlinked_or_foreign_store(
+        case, tmp_path, monkeypatch):
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root, PROJ)
+    db = _selection_db(domain, PROJ)
+    real = tmp_path / "real.db"
+    os.rename(db, real)
+    os.symlink(real, db)
+    try:
+        plan = uninstall_api.plan_repo(root, domain)
+        matches = [entry for entry in plan.entries
+                   if entry.target == str(db)]
+        assert len(matches) == 1
+        assert matches[0].action == "skipped"
+        applied = uninstall_api.apply_repo(plan, domain)
+        assert str(db) in applied.skipped
+        assert real.read_bytes() is not None
+    finally:
+        os.unlink(db)
+        os.rename(real, db)
+
+
+def test_uninstall_selection_ignores_invalid_project_ids(case, tmp_path):
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"not-hex\"\n"
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+    plan = uninstall_api.plan_repo(root, domain)
+    assert not [entry for entry in plan.entries
+                if entry.kind == "selection-store"]

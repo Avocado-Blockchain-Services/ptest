@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import sqlite3
 import stat
@@ -500,6 +501,94 @@ def _state_entries(domain: C.DomainPaths,
     return entries
 
 
+# -- selection stores (T3) -----------------------------------------------------------
+
+_SELECTION_STORE_NAME = "selection.db"
+_SELECTION_JOURNAL_NAME = "selection.db-journal"
+_SELECTION_PROJECTS_DIR = "projects"
+_SELECTION_HEX32 = re.compile(r"[0-9a-f]{32}")
+
+
+def _selection_project_ids(root: Path, children: list[str]) -> list[str]:
+    """Root plus declared-child project ids that are valid 32-hex."""
+    found: list[str] = []
+    candidates = [_CONFIG_NAME]
+    for child in children:
+        candidates.append(child + "/" + _CONFIG_NAME)
+    for rel in candidates:
+        try:
+            raw = files.read_regular(root, rel, _CONFIG_MAX_BYTES + 1)
+        except C.Problem:
+            continue
+        if len(raw) > _CONFIG_MAX_BYTES:
+            continue
+        data = _parse_toml(raw)
+        if not data:
+            continue
+        project_id = data.get("project_id")
+        if (isinstance(project_id, str)
+                and _SELECTION_HEX32.fullmatch(project_id)
+                and project_id not in found):
+            found.append(project_id)
+    return found
+
+
+def _selection_store_entries(domain: C.DomainPaths,
+                             project_ids: list[str]) -> list[PlanEntry]:
+    """Plan REMOVE entries for existing selection stores (and journals)."""
+    entries: list[PlanEntry] = []
+    try:
+        state = Path(domain.root)
+    except (TypeError, ValueError):
+        return entries
+    for project_id in project_ids:
+        project = state / _SELECTION_PROJECTS_DIR / project_id
+        stamp = _lstat(project)
+        if stamp is None:
+            continue
+        if (stat.S_ISLNK(stamp.st_mode)
+                or not stat.S_ISDIR(stamp.st_mode)
+                or stamp.st_uid != os.getuid()):
+            entries.append(PlanEntry(
+                SKIPPED, str(project / _SELECTION_STORE_NAME),
+                "unsafe project state", "skip"))
+            continue
+        for leaf in (_SELECTION_STORE_NAME, _SELECTION_JOURNAL_NAME):
+            target = project / leaf
+            leaf_stamp = _lstat(target)
+            if leaf_stamp is None:
+                continue
+            if (stat.S_ISLNK(leaf_stamp.st_mode)
+                    or not stat.S_ISREG(leaf_stamp.st_mode)
+                    or leaf_stamp.st_uid != os.getuid()):
+                entries.append(PlanEntry(
+                    SKIPPED, str(target), "unsafe selection store", "skip"))
+                continue
+            entries.append(PlanEntry(
+                REMOVE, str(target), "selection store", "selection-store",
+                identity=(leaf_stamp.st_dev, leaf_stamp.st_ino),
+                scope=project_id))
+    return entries
+
+
+def _apply_selection_store(entry: PlanEntry) -> None:
+    target = Path(entry.target)
+    stamp = _lstat(target)
+    if stamp is None:
+        return
+    if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISREG(stamp.st_mode):
+        raise _problem("unsafe-path", f"path {target.name} is unsafe")
+    if stamp.st_uid != os.getuid():
+        raise _problem("unsafe-path", f"path {target.name} is unsafe")
+    if (entry.identity is not None
+            and (stamp.st_dev, stamp.st_ino) != entry.identity):
+        raise _problem("unsafe-path", f"path {target.name} changed during apply")
+    if not files.unlink_if_same(target.parent, target.name,
+                                stamp.st_dev, stamp.st_ino):
+        raise _problem("state-unavailable",
+                       f"path {target.name} changed during apply")
+
+
 # -- plan / apply --------------------------------------------------------------------------
 
 def _checkout_ids_for(root: Path, children: list[str]) -> list[str]:
@@ -527,6 +616,8 @@ def plan_repo(root: Path, domain: C.DomainPaths) -> RepoPlan:
     entries.extend(_report_entries(root, children))
     ids = _checkout_ids_for(root, children)
     entries.extend(_state_entries(domain, ids))
+    entries.extend(_selection_store_entries(
+        domain, _selection_project_ids(root, children)))
     return RepoPlan(root=root, checkout_id=checkout_id,
                     entries=tuple(entries), checkout_ids=tuple(ids))
 
@@ -581,6 +672,9 @@ def apply_repo(plan: RepoPlan, domain: C.DomainPaths) -> Applied:
                 removed.append(entry.target)
             elif entry.kind == "state-dir":
                 _apply_state_dir(entry)
+                removed.append(entry.target)
+            elif entry.kind == "selection-store":
+                _apply_selection_store(entry)
                 removed.append(entry.target)
             elif entry.kind == "ledger":
                 removed.append(entry.target)
