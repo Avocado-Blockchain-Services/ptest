@@ -1305,7 +1305,7 @@ def stack_dump_pid(report_name: str, name: str) -> int | None:
 # a separate SQLite file that older ptest never opens.
 
 SELECTION_PROTOCOL = "ptest-selection-v1"
-SOURCE_INDEX_VERSION = 3
+SOURCE_INDEX_VERSION = 4
 SELECTION_STORE_DIR = "projects"
 SELECTION_STORE_NAME = "selection.db"
 SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024
@@ -1527,6 +1527,7 @@ class ScopeIndex:
     body: str                  # sha256 hex of the AST-normalised body
     skeleton: str              # sha256 hex: decorators, signature, defaults, returns, type params, async
     refs: tuple[tuple[str, ...], ...]   # raw dotted Load chains in the body and skeleton, sorted, unique
+    decorated: bool = False    # any definition of it carries a decorator (an import-time effect)
 
 
 @dataclass(frozen=True, slots=True)

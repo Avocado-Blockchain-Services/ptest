@@ -141,6 +141,8 @@ class MutantRecord:
     # Set when the mutant could not be evaluated (its other fields are
     # empty); reported, never counted as a pass.
     error: str = ""
+    # Candidate misses that passed when rerun under the mutant.
+    flaky: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,6 +646,7 @@ def render_json(report: EvalReport) -> str:
                 "v2_reason": record.v2_reason,
                 "v2_details": list(record.v2_details),
                 "error": record.error,
+                "flaky": list(record.flaky),
             }
             for record in report.mutants
         ],
@@ -1387,13 +1390,21 @@ def _run_mutant(args, campaign: Campaign, mutant: Mutant) -> MutantRecord:
         # order-dependent test is not reported as a miss.
         baseline_failed = tuple(campaign.seed_failed)
         misses = find_misses(mutant_failed, baseline_failed, covered)
+        flaky: tuple = ()
         if misses:
+            # Confirm both ways on the missed files: it must fail again
+            # under the mutant and pass on the pristine tree. A test that
+            # passes on the mutant rerun failed by chance (load, order).
             confirm = tuple(sorted({file_part(node) for node in misses}))
             rerun = _ptest_in(args, campaign, campaign.base, confirm,
                               False, "baseline")
+            again = set(_ptest_in(args, campaign, scratch, confirm,
+                                  False, "confirm"))
             baseline_failed = tuple(sorted(set(baseline_failed)
                                            | set(rerun)))
-            misses = find_misses(mutant_failed, baseline_failed, covered)
+            candidates = find_misses(mutant_failed, baseline_failed, covered)
+            misses = tuple(node for node in candidates if node in again)
+            flaky = tuple(node for node in candidates if node not in again)
         whole = indicators_for(mutated)
         suggestions = tuple(sorted(key for key, hit in whole.items() if hit))
         miss_classes = tuple(
@@ -1412,6 +1423,7 @@ def _run_mutant(args, campaign: Campaign, mutant: Mutant) -> MutantRecord:
             misses=misses, miss_classes=miss_classes,
             suggestions=suggestions,
             planning_ms={"v1": v1_ms, "v2": v2_ms},
+            flaky=flaky,
             v1_tests=selection_tests(v1, counts, dynamic=False),
             v2_tests=selection_tests(v2, counts, dynamic=True),
             total_tests=sum(counts.values()),

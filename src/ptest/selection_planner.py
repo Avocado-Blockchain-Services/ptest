@@ -124,6 +124,14 @@ def _seed_class(analysis, per_path, index, old_scopes, new_scopes,
                 analysis.cf.add((path, qual))
 
 
+def _import_time_scope(scope) -> bool:
+    """Adding or removing this scope changes what importing does: it is
+    decorated (registration), or a method (the class's behaviour changes
+    even for tests that never call a project method, e.g. ``__eq__``).
+    A plain new or removed module function only binds a name."""
+    return bool(getattr(scope, "decorated", False)) or "." in scope.qualname
+
+
 def _diff_path(analysis, index, path, basemap, versions):
     """4.3: diff one stale path; fills the analysis sets."""
     old_digest = basemap.get(path)
@@ -149,9 +157,16 @@ def _diff_path(analysis, index, path, basemap, versions):
     per_path = set()
     old_scopes = {s.qualname: s for s in old.scopes}
     new_scopes = {s.qualname: s for s in new.scopes}
+    # Import-time changes (N1): a decorator, default, annotation or
+    # signature, a scope added or removed, and any class change run when
+    # the module is imported. Their effect (a registered route, plugin,
+    # model, schema) reaches tests that never execute the function, so
+    # the path is an ambient change: it reaches tests by the static rule.
     for qual, scope in new_scopes.items():
         prev = old_scopes.get(qual)
         if prev is None:
+            if _import_time_scope(scope):
+                analysis.am.add(path)
             if is_test:
                 analysis.wf.add(path)
         else:
@@ -159,10 +174,13 @@ def _diff_path(analysis, index, path, basemap, versions):
                 analysis.cf.add((path, qual))
             if scope.skeleton != prev.skeleton:
                 analysis.cf.add((path, qual))
+                analysis.am.add(path)
                 _seed_name(analysis, per_path, path, qual)
-    for qual in old_scopes:
+    for qual, scope in old_scopes.items():
         if qual not in new_scopes:
             analysis.cf.add((path, qual))
+            if _import_time_scope(scope):
+                analysis.am.add(path)
     old_classes = {c.qualname: c for c in old.classes}
     new_classes = {c.qualname: c for c in new.classes}
     for qual, cls in new_classes.items():
@@ -171,10 +189,12 @@ def _diff_path(analysis, index, path, basemap, versions):
             if is_test:
                 analysis.wf.add(path)
         elif cls.skeleton != prev.skeleton or cls.body != prev.body:
+            analysis.am.add(path)
             _seed_class(analysis, per_path, index, old_scopes, new_scopes,
                         path, qual)
     for qual in old_classes:
         if qual not in new_classes:
+            analysis.am.add(path)
             _seed_class(analysis, per_path, index, old_scopes, new_scopes,
                         path, qual)
     old_defs = _def_map(old)
@@ -227,11 +247,16 @@ def _propagate(index, analysis, olds):
                         if key not in names:
                             names.add(key)
                             growing = True
+                    if kind in ("def", "class") and path not in am:
+                        # A def or class whose skeleton references a
+                        # changed name is re-created differently at import
+                        # (an annotation-driven dependency, a decorator
+                        # argument): an import-time change (N1).
+                        am.add(path)
+                        growing = True
                     if kind == "def":
-                        # A def whose skeleton references a changed name
-                        # (decorators, defaults, module constants) affects
-                        # the function itself (N1); bound names alone never
-                        # match a recorded (path, qual) function id.
+                        # It also affects the function itself; bound names
+                        # alone never match a recorded (path, qual) id.
                         prefix = path + ":"
                         for key in bound:
                             qual = (key[len(prefix):]
@@ -247,6 +272,9 @@ def _propagate(index, analysis, olds):
                 key = C.selection_name_key(path, cls.qualname.split(".")[0])
                 if key not in names:
                     names.add(key)
+                    growing = True
+                if path not in am:
+                    am.add(path)  # a class body runs at import time
                     growing = True
                 if (path, cls.qualname) not in cf:
                     cf.add((path, cls.qualname))

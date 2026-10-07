@@ -459,7 +459,9 @@ def index_source(raw: bytes) -> C.FileIndex:
     scopes = tuple(C.ScopeIndex(qualname=qualname,
                                 body=_fingerprint(entry["body"]),
                                 skeleton=_fingerprint(entry["skeleton"]),
-                                refs=tuple(sorted(entry["refs"])))
+                                refs=tuple(sorted(entry["refs"])),
+                                decorated=any(node.decorator_list
+                                              for node in entry["nodes"]))
                    for qualname, entry in sorted(scope_acc.items()))
     classes = tuple(C.ClassIndex(qualname=qualname,
                                  skeleton=_fingerprint(entry["skeleton"]),
@@ -483,7 +485,7 @@ def encode_index(index: C.FileIndex) -> bytes:
                     for imp in index.imports],
         "parsed": index.parsed,
         "scopes": [[entry.qualname, entry.body, entry.skeleton,
-                    [list(chain) for chain in entry.refs]]
+                    [list(chain) for chain in entry.refs], entry.decorated]
                    for entry in index.scopes],
         "statements": [[stmt.kind, list(stmt.bound),
                         [list(chain) for chain in stmt.refs],
@@ -560,16 +562,17 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
                                          statement=statement))
         scopes = []
         for raw in payload["scopes"]:
-            if not isinstance(raw, list) or len(raw) != 4:
+            if not isinstance(raw, list) or len(raw) != 5:
                 return None
-            qualname, body, skeleton, refs = raw
+            qualname, body, skeleton, refs, decorated = raw
             if not isinstance(qualname, str) \
                     or not isinstance(body, str) \
-                    or not isinstance(skeleton, str):
+                    or not isinstance(skeleton, str) \
+                    or type(decorated) is not bool:
                 return None
             scopes.append(C.ScopeIndex(
                 qualname=qualname, body=body, skeleton=skeleton,
-                refs=_chains(refs)))
+                refs=_chains(refs), decorated=decorated))
         classes = []
         for raw in payload["classes"]:
             if not isinstance(raw, list) or len(raw) != 4:

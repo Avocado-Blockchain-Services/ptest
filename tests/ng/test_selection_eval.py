@@ -837,7 +837,8 @@ def test_deselected_failing_test_in_a_selected_file_is_a_miss(
                  deselect=("tests/test_a.py::test_1",), engine="dynamic",
                  tests=1),
         failing=lambda label, cwd: (
-            ("tests/test_a.py::test_1",) if label == "ground" else ()))
+            ("tests/test_a.py::test_1",) if label in ("ground", "confirm")
+            else ()))
     assert se.run_campaign(seen["args"]) == 0
     record = _report(seen)["mutants"][0]
     assert record["misses"] == ["tests/test_a.py::test_1"]
@@ -847,7 +848,8 @@ def test_deselected_failing_test_in_a_selected_file_is_a_miss(
     labels = [(label, cwd) for label, _, cwd in seen["runs"]]
     assert labels == [("seed", seen["created"]["base"]),
                       ("ground", seen["created"]["truth"]),
-                      ("baseline", seen["created"]["base"])]
+                      ("baseline", seen["created"]["base"]),
+                      ("confirm", seen["created"]["truth"])]
     seed_cmd = seen["runs"][0][1]
     assert seed_cmd[3:6] == ["--full", "--again", "--result-json"]
     assert seen["runs"][1][1][3:6] == ["--full", "--again", "--result-json"]
@@ -896,13 +898,15 @@ def test_nested_child_runs_at_repo_root_with_child_scope(tmp_path,
         v1=_Plan(files=("tests/test_a.py",)),
         v2=_Plan(files=("tests/test_b.py",), engine="dynamic", tests=2),
         failing=lambda label, cwd: (
-            ("tests/test_a.py::test_1",) if label == "ground" else ()))
+            ("tests/test_a.py::test_1",) if label in ("ground", "confirm")
+            else ()))
     assert se.run_campaign(seen["args"]) == 0
     for label, cmd, cwd in seen["runs"]:
         assert cwd in (seen["created"]["truth"], seen["created"]["base"])
         if label in ("seed", "ground"):
             assert cmd[3:5] == ["--full", "--result-json"]
             assert cmd[6:] == ["services/cp"]
+    assert seen["runs"][-2][1][-1] == "services/cp/tests/test_a.py"
     assert seen["runs"][-1][1][-1] == "services/cp/tests/test_a.py"
     record = _report(seen)["mutants"][0]
     assert record["misses"] == ["services/cp/tests/test_a.py::test_1"]
@@ -974,3 +978,15 @@ def test_each_run_exports_to_a_fresh_name_and_cleans_up(tmp_path,
     assert len(set(exports)) == len(exports) == 2
     for scratch in seen["created"].values():
         assert not list(scratch.rglob(se.RESULT_EXPORT_PREFIX + "*"))
+
+
+def test_a_miss_that_passes_again_under_the_mutant_is_flaky(tmp_path,
+                                                            monkeypatch):
+    seen = _campaign(
+        tmp_path, monkeypatch, v1=_Plan(), v2=_Plan(kind="none"),
+        failing=lambda label, cwd: (
+            ("tests/test_a.py::test_1",) if label == "ground" else ()))
+    assert se.run_campaign(seen["args"]) == 0
+    record = _report(seen)["mutants"][0]
+    assert record["misses"] == []
+    assert record["flaky"] == ["tests/test_a.py::test_1"]

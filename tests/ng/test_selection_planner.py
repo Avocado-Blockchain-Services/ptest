@@ -31,9 +31,10 @@ TEST = "tests/test_lib.py"
 # VB must be shared between RUN digests and NODE deps so path ids align.
 # ---------------------------------------------------------------------------
 
-def SC(q, body="b:" + "x", skel="s:" + "x", refs=()):
+def SC(q, body="b:" + "x", skel="s:" + "x", refs=(), decorated=False):
     return C.ScopeIndex(qualname=q, body=body, skeleton=skel,
-                        refs=tuple(tuple(r) for r in refs))
+                        refs=tuple(tuple(r) for r in refs),
+                        decorated=decorated)
 
 
 def CL(q, skel="s:" + "x", body="c:" + "x", refs=()):
@@ -1726,3 +1727,76 @@ def test_changed_default_selects_method_caller():
         lib_stmt_bound=[{timeout}])
     d = PL.plan(inputs)
     assert PL.is_selected(d, nid)
+
+
+
+# --- import-time changes reach importers (N1, persea m0003) -------------
+# The recorded test never executed the changed code: it only imported the
+# module (here: called ``other``). Each import-time change must still
+# select it through the static rule; each body-only twin must not.
+
+def _imported_only(old, new, **kw):
+    return pair(old, new, node_kw={"funcs": [(LIB, "other")]}, **kw)
+
+
+def test_skeleton_change_reaches_importers():
+    old = FI(scopes=[SC("f", skel="s1"), SC("other")])
+    new = FI(scopes=[SC("f", skel="s2"), SC("other")])
+    inputs, nid = _imported_only(old, new)
+    assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_body_only_change_does_not_reach_importers():
+    old = FI(scopes=[SC("f", body="b1"), SC("other")])
+    new = FI(scopes=[SC("f", body="b2"), SC("other")])
+    inputs, nid = _imported_only(old, new)
+    assert not PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_name_used_in_an_annotation_reaches_importers():
+    """``Manage = Annotated[..., Depends(...)]`` read by FastAPI at import:
+    tests rejected inside the dependency never run the route body."""
+    old_stmts = [ST("assign", bound=("Manage",), fp="m1"),
+                 ST("def", bound=("route",), fp="r1", refs=(("Manage",),))]
+    new_stmts = [ST("assign", bound=("Manage",), fp="m2"),
+                 ST("def", bound=("route",), fp="r1", refs=(("Manage",),))]
+    old = FI(scopes=[SC("route"), SC("other")], stmts=old_stmts)
+    new = FI(scopes=[SC("route"), SC("other")], stmts=new_stmts)
+    inputs, nid = _imported_only(
+        old, new, lib_stmt_refs=[(), (LIB + ":Manage",)],
+        lib_stmt_bound=[(LIB + ":Manage",), (LIB + ":route",)])
+    assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_name_used_only_in_a_body_stays_precise():
+    old_stmts = [ST("assign", bound=("LIMIT",), fp="m1")]
+    new_stmts = [ST("assign", bound=("LIMIT",), fp="m2")]
+    old = FI(scopes=[SC("f", refs=(("LIMIT",),)), SC("other")],
+             stmts=old_stmts)
+    new = FI(scopes=[SC("f", refs=(("LIMIT",),)), SC("other")],
+             stmts=new_stmts)
+    inputs, nid = _imported_only(
+        old, new, lib_refs={"f": (LIB + ":LIMIT",)},
+        lib_stmt_refs=[()], lib_stmt_bound=[(LIB + ":LIMIT",)])
+    assert not PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_new_decorated_function_reaches_importers():
+    old = FI(scopes=[SC("other")])
+    new = FI(scopes=[SC("other"), SC("route", decorated=True)])
+    inputs, nid = _imported_only(old, new)
+    assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_new_method_reaches_importers():
+    old = FI(classes=[CL("C")], scopes=[SC("other")])
+    new = FI(classes=[CL("C")], scopes=[SC("other"), SC("C.__eq__")])
+    inputs, nid = _imported_only(old, new)
+    assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_class_body_change_reaches_importers():
+    old = FI(classes=[CL("Model", body="c1")], scopes=[SC("other")])
+    new = FI(classes=[CL("Model", body="c2")], scopes=[SC("other")])
+    inputs, nid = _imported_only(old, new)
+    assert PL.is_selected(PL.plan(inputs), nid)
