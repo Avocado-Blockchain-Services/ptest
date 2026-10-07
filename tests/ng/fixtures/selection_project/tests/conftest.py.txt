@@ -1,0 +1,10 @@
+"""Session fixture calling project code (X(T) for selection tests)."""
+import pytest
+
+from pkg.core import boot
+
+
+@pytest.fixture(scope="session")
+def booted():
+    """Set up once per session; its deps belong to the fixture key."""
+    return boot()

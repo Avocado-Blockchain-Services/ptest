@@ -1,0 +1,17 @@
+"""Fixture project code under test (selection-recorder tests)."""
+STARTUP = "ready"
+
+
+def boot():
+    """Called by the session fixture in tests/conftest.py (X(T))."""
+    return {"status": STARTUP}
+
+
+def add(left, right):
+    """Called directly by a test (F(T))."""
+    return left + right
+
+
+def greet(name):
+    """Called directly by a test (F(T))."""
+    return "hello " + name

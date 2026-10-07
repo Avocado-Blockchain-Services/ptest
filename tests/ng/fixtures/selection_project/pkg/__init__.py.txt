@@ -1,0 +1,5 @@
+"""Fixture project package marker for selection-recorder tests.
+
+Kept with a ``.txt`` suffix so ptest's own suite never collects it; the
+tests copy the tree to tmp_path and strip the suffix before running.
+"""
