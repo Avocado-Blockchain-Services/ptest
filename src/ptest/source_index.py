@@ -5,12 +5,15 @@ skeletons), classes, top-level statements and imports, plus the
 content-addressed project index builder with an injectable parse cache.
 
 N11: this module never imports or executes project code — only ``ast``
-parses of byte buffers. Fingerprints are
-``sha256(ast.dump(node, include_attributes=False))`` hex digests, so
-comments, whitespace and line shifts are no change.
+parses and ``compile`` of byte buffers. Function and method bodies are
+fingerprinted from their compiled code objects with positions stripped
+(``marshal`` bytes); skeletons, class members and top-level statements
+from a position-free structural dump. Either way comments, whitespace
+and line shifts are no change.
 
 On-disk cache format: a fixed magic header, a big-endian uint32
-``SOURCE_INDEX_VERSION``, then a canonical JSON object. ``decode_index``
+``SOURCE_INDEX_VERSION``, the interpreter's cache tag (bytecode differs
+between Python versions), then a canonical JSON object. ``decode_index``
 returns None for anything else.
 """
 from __future__ import annotations
@@ -18,21 +21,69 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import marshal
 import os
 import stat
 import struct
+import sys
+import types
 from pathlib import Path
 
 from . import contracts as C
 from . import impact as _impact
 
 _MAGIC = b"ptest-srcidx\n"
-_HEADER = _MAGIC + struct.pack(">I", C.SOURCE_INDEX_VERSION)
+_HEADER = (_MAGIC + struct.pack(">I", C.SOURCE_INDEX_VERSION)
+           + (getattr(sys.implementation, "cache_tag", None)
+              or "none").encode("ascii", "replace") + b"\n")
+_CO_NEWLOCALS = 0x0002  # function code objects; class bodies lack it
 _PAYLOAD_KEYS = ("parsed", "imports", "scopes", "classes", "statements")
 
 
+_AST = ast.AST
+_LOAD = ast.Load
+_NAME = ast.Name
+_ATTRIBUTE = ast.Attribute
+
+
 def _dump(node: ast.AST) -> str:
-    return ast.dump(node, include_attributes=False)
+    """Position-free structural text of one node (a fingerprint input).
+
+    Equivalent in what it distinguishes to ``ast.dump(node,
+    include_attributes=False)`` (type, every field, ``repr`` of leaves)
+    but iterative and several times faster: indexing dumps every scope
+    body of every file on a cold plan.
+    """
+    out: list[str] = []
+    append = out.append
+    stack: list[object] = [node]
+    pop = stack.pop
+    push = stack.append
+    while stack:
+        item = pop()
+        cls = item.__class__
+        if cls is tuple:
+            append(item[0])  # type: ignore[index]
+        elif cls is list:
+            push(("]",))
+            for element in reversed(item):  # type: ignore[call-overload]
+                push((";",))
+                push(element)
+            append("[")
+        elif isinstance(item, _AST):
+            append(cls.__name__)
+            append("(")
+            push((")",))
+            for name in reversed(cls._fields):
+                value = getattr(item, name, None)
+                push((",",))
+                if value.__class__ is list or isinstance(value, _AST):
+                    push(value)
+                else:
+                    push((repr(value),))
+        else:
+            append(repr(item))
+    return "".join(out)
 
 
 def _fingerprint(dumps: list[str]) -> str:
@@ -46,43 +97,51 @@ def _unparsed() -> C.FileIndex:
 
 # -- load chains ---------------------------------------------------------
 
-class _ChainCollector(ast.NodeVisitor):
-    """Collect each dotted ``Name./Attribute`` load chain exactly once."""
-
-    def __init__(self) -> None:
-        self.chains: set[tuple[str, ...]] = set()
-
-    @staticmethod
-    def _spine(node: ast.AST) -> tuple[str, ...] | None:
-        parts: list[str] = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if isinstance(node, ast.Name) \
-                and isinstance(node.ctx, ast.Load):
-            parts.append(node.id)
-            return tuple(reversed(parts))
-        return None
-
-    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
-        if isinstance(node.ctx, ast.Load):
-            chain = self._spine(node)
-            if chain is not None:
-                self.chains.add(chain)
-            # Skip the spine: its Name would re-emit a sub-chain.
-            return
-        self.generic_visit(node)
-
-    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
-        if isinstance(node.ctx, ast.Load):
-            self.chains.add((node.id,))
+def _spine(node: ast.AST) -> tuple[str, ...] | None:
+    parts: list[str] = []
+    while node.__class__ is _ATTRIBUTE:
+        parts.append(node.attr)  # type: ignore[attr-defined]
+        node = node.value  # type: ignore[attr-defined]
+    if node.__class__ is _NAME and node.ctx.__class__ is _LOAD:  # type: ignore[attr-defined]
+        parts.append(node.id)  # type: ignore[attr-defined]
+        return tuple(reversed(parts))
+    return None
 
 
 def _chains_of(nodes: list[ast.AST]) -> tuple[tuple[str, ...], ...]:
-    collector = _ChainCollector()
-    for node in nodes:
-        collector.visit(node)
-    return tuple(sorted(collector.chains))
+    """Each dotted ``Name``/``Attribute`` load chain, exactly once.
+
+    A whole spine (``a.b.c``) is one chain; a load whose base is not a
+    name (``make().attr``, ``CONFIG.get().x``) still yields the chains
+    inside its base, so a changed ``CONFIG`` reaches this scope (N1).
+    """
+    chains: set[tuple[str, ...]] = set()
+    stack: list[object] = list(nodes)
+    while stack:
+        node = stack.pop()
+        cls = node.__class__
+        if cls is list:
+            stack.extend(node)  # type: ignore[arg-type]
+            continue
+        if cls is _NAME:
+            if node.ctx.__class__ is _LOAD:  # type: ignore[attr-defined]
+                chains.add((node.id,))  # type: ignore[attr-defined]
+            continue
+        if cls is _ATTRIBUTE and node.ctx.__class__ is _LOAD:  # type: ignore[attr-defined]
+            chain = _spine(node)  # type: ignore[arg-type]
+            if chain is not None:
+                chains.add(chain)
+                continue
+        if not isinstance(node, _AST):
+            continue
+        for name in cls._fields:
+            value = getattr(node, name, None)
+            if value.__class__ is list:
+                stack.extend(item for item in value
+                             if isinstance(item, _AST))
+            elif isinstance(value, _AST):
+                stack.append(value)
+    return tuple(sorted(chains))
 
 
 # -- statements ----------------------------------------------------------
@@ -219,6 +278,37 @@ def _child_statement_lists(stmt: ast.stmt) -> list[list[ast.stmt]]:
     return out
 
 
+def _strip_positions(code: types.CodeType) -> types.CodeType:
+    consts = tuple(_strip_positions(item)
+                   if isinstance(item, types.CodeType) else item
+                   for item in code.co_consts)
+    return code.replace(co_consts=consts, co_firstlineno=1,
+                        co_linetable=b"", co_filename="")
+
+
+def _function_codes(tree: ast.Module) -> dict[str, list[bytes]] | None:
+    """Position-free marshal bytes of each function code object by
+    qualname, in source order; None when the module does not compile."""
+    try:
+        module = compile(tree, "<ptest-index>", "exec", dont_inherit=True,
+                         optimize=0)
+    except (SyntaxError, ValueError, TypeError, RecursionError,
+            MemoryError):
+        return None
+    found: dict[str, list[bytes]] = {}
+    stack = [module]
+    while stack:
+        code = stack.pop()
+        nested = [item for item in code.co_consts
+                  if isinstance(item, types.CodeType)]
+        if code is not module and code.co_flags & _CO_NEWLOCALS \
+                and "<locals>" not in code.co_qualname:
+            found.setdefault(code.co_qualname, []).append(
+                marshal.dumps(_strip_positions(code)))
+        stack.extend(reversed(nested))
+    return found
+
+
 def index_source(raw: bytes) -> C.FileIndex:
     """Index one file content. Never imports or executes it (N11)."""
     try:
@@ -241,8 +331,9 @@ def index_source(raw: bytes) -> C.FileIndex:
     def add_scope(qualname: str,
                   node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         entry = scope_acc.setdefault(
-            qualname, {"body": [], "skeleton": [], "refs": set()})
-        entry["body"].extend(_body_dumps(node.body))
+            qualname, {"body": [], "skeleton": [], "refs": set(),
+                       "nodes": []})
+        entry["nodes"].append(node)
         entry["skeleton"].extend(_skeleton_dumps(node))
         # Body chains plus skeleton chains: a default, decorator or
         # annotation referencing a changed name affects the scope (N1).
@@ -273,9 +364,13 @@ def index_source(raw: bytes) -> C.FileIndex:
                         *getattr(node, "type_params", []), *members,
                         *method_skeleton]))
 
+    nested_imports: list[ast.Import | ast.ImportFrom] = []
+
     def walk(stmts: list[ast.stmt], parts: tuple[str, ...],
-             in_function: bool) -> None:
+             in_function: bool, top: bool = False) -> None:
         for stmt in stmts:
+            if not top and isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                nested_imports.append(stmt)
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qualname = ".".join((*parts, stmt.name))
                 if not in_function:
@@ -292,7 +387,15 @@ def index_source(raw: bytes) -> C.FileIndex:
                 for extra in _child_statement_lists(stmt):
                     walk(extra, parts, in_function)
 
-    walk(tree.body, (), False)
+    walk(tree.body, (), False, top=True)
+    codes = _function_codes(tree)
+    for qualname, entry in scope_acc.items():
+        compiled = codes.get(qualname) if codes is not None else None
+        if compiled and len(compiled) == len(entry["nodes"]):
+            entry["body"] = [part.hex() for part in compiled]
+        else:
+            entry["body"] = [dump for node in entry["nodes"]
+                             for dump in _body_dumps(node.body)]
 
     for position, stmt in enumerate(tree.body):
         kind = _classify(stmt)
@@ -337,9 +440,10 @@ def index_source(raw: bytes) -> C.FileIndex:
                         aliased=alias.asname is not None,
                         statement=position))
 
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)) \
-                and id(node) not in top_import_ids:
+    # Statement lists are the only place an import can appear, so the
+    # walk above already saw every nested one (no second full AST walk).
+    for node in nested_imports:
+        if id(node) not in top_import_ids:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imports.append(C.ImportIndex(
@@ -395,11 +499,21 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _is_chain_list(value: object) -> bool:
-    return isinstance(value, list) and all(
-        isinstance(chain, list) and all(isinstance(part, str)
-                                        for part in chain)
-        for chain in value)
+def _chains(value: object) -> tuple[tuple[str, ...], ...]:
+    """A decoded chain list as tuples; ValueError/TypeError if malformed.
+
+    ``str.join`` rejects a non-str part in C, which keeps validating
+    every cached chain cheap on a warm plan.
+    """
+    if value.__class__ is not list:
+        raise ValueError("chains must be a list")
+    out = []
+    for chain in value:  # type: ignore[attr-defined]
+        if chain.__class__ is not list:
+            raise ValueError("chain must be a list")
+        "".join(chain)
+        out.append(tuple(chain))
+    return tuple(out)
 
 
 def decode_index(blob: bytes) -> C.FileIndex | None:
@@ -408,9 +522,12 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
         return None
     if bytes(blob[:len(_MAGIC)]) != _MAGIC:
         return None
-    (version,) = struct.unpack(">I", bytes(blob[len(_MAGIC):len(_HEADER)]))
+    (version,) = struct.unpack(
+        ">I", bytes(blob[len(_MAGIC):len(_MAGIC) + 4]))
     if version != C.SOURCE_INDEX_VERSION:
         return None
+    if bytes(blob[:len(_HEADER)]) != _HEADER:
+        return None  # indexed by another interpreter
     try:
         payload = json.loads(bytes(blob[len(_HEADER):]).decode("ascii"))
     except (UnicodeDecodeError, ValueError):
@@ -448,12 +565,11 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
             qualname, body, skeleton, refs = raw
             if not isinstance(qualname, str) \
                     or not isinstance(body, str) \
-                    or not isinstance(skeleton, str) \
-                    or not _is_chain_list(refs):
+                    or not isinstance(skeleton, str):
                 return None
             scopes.append(C.ScopeIndex(
                 qualname=qualname, body=body, skeleton=skeleton,
-                refs=tuple(tuple(chain) for chain in refs)))
+                refs=_chains(refs)))
         classes = []
         for raw in payload["classes"]:
             if not isinstance(raw, list) or len(raw) != 4:
@@ -461,12 +577,11 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
             qualname, skeleton, body, refs = raw
             if not isinstance(qualname, str) \
                     or not isinstance(skeleton, str) \
-                    or not isinstance(body, str) \
-                    or not _is_chain_list(refs):
+                    or not isinstance(body, str):
                 return None
             classes.append(C.ClassIndex(
                 qualname=qualname, skeleton=skeleton, body=body,
-                refs=tuple(tuple(chain) for chain in refs)))
+                refs=_chains(refs)))
         statements = []
         for raw in payload["statements"]:
             if not isinstance(raw, list) or len(raw) != 4:
@@ -475,14 +590,12 @@ def decode_index(blob: bytes) -> C.FileIndex | None:
             if kind not in C.SELECTION_STATEMENT_KINDS \
                     or not isinstance(bound, list) \
                     or not all(isinstance(name, str) for name in bound) \
-                    or not _is_chain_list(refs) \
                     or not isinstance(fingerprint, str):
                 return None
             statements.append(C.StatementIndex(
-                kind=kind, bound=tuple(bound),
-                refs=tuple(tuple(chain) for chain in refs),
+                kind=kind, bound=tuple(bound), refs=_chains(refs),
                 fingerprint=fingerprint))
-    except (TypeError, struct.error):
+    except (TypeError, ValueError, struct.error):
         return None
     return C.FileIndex(parsed=parsed, imports=tuple(imports),
                        scopes=tuple(scopes), classes=tuple(classes),
@@ -733,6 +846,52 @@ class _Resolver:
         return frozenset(out)
 
 
+#: Below this many files to index, a process pool costs more than it saves.
+_PARALLEL_MIN_FILES = 64
+_PARALLEL_MAX_WORKERS = 8
+_PARALLEL_CHUNK = 32
+
+
+def _index_or_unparsed(raw: bytes | None) -> C.FileIndex:
+    return index_source(raw) if raw is not None else _unparsed()
+
+
+def _index_chunk(raws: list) -> list:
+    """Pool worker: index a chunk of file contents (pure, no I/O)."""
+    return [encode_index(_index_or_unparsed(raw)) for raw in raws]
+
+
+def _index_many(raws: list) -> list[C.FileIndex]:
+    """Index file contents, in a short-lived process pool when there are
+    many (a cold plan of a large project); serial on any pool failure.
+
+    Workers only parse and compile byte buffers they are handed (N11) and
+    return encoded indexes; the pool is gone before this returns.
+    """
+    workers = min(_PARALLEL_MAX_WORKERS, max(1, (os.cpu_count() or 1) // 2))
+    if len(raws) >= _PARALLEL_MIN_FILES and workers > 1:
+        chunks = [raws[start:start + _PARALLEL_CHUNK]
+                  for start in range(0, len(raws), _PARALLEL_CHUNK)]
+        try:
+            import concurrent.futures
+            import multiprocessing
+            import threading
+            method = "fork" if threading.active_count() == 1 \
+                else "forkserver"
+            context = multiprocessing.get_context(method)
+            with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=workers, mp_context=context) as pool:
+                blobs = [blob for part in pool.map(_index_chunk, chunks)
+                         for blob in part]
+            out = [decode_index(blob) for blob in blobs]
+            if len(out) == len(raws) and all(item is not None
+                                             for item in out):
+                return out  # type: ignore[return-value]
+        except Exception:
+            pass
+    return [_index_or_unparsed(raw) for raw in raws]
+
+
 def build_project_index(project_root: Path, config: C.Config, *,
                         key: bytes | None, cache: C.ParseCache | None,
                         conftest_edges: bool = True) -> C.ProjectIndex:
@@ -768,13 +927,13 @@ def build_project_index(project_root: Path, config: C.Config, *,
         one_rel = {}
         for rel in rels:
             one_rel.setdefault(digests[rel], rel)
+        missing = [digest for digest in wanted if decoded[digest] is None]
+        built = _index_many([raws[one_rel[digest]] for digest in missing])
+        for digest, index in zip(missing, built):
+            fresh[digest] = encode_index(index)
+            decoded[digest] = index
         for digest in wanted:
-            index = decoded[digest]
-            if index is None:
-                raw = raws[one_rel[digest]]
-                index = index_source(raw) if raw is not None else _unparsed()
-                fresh[digest] = encode_index(index)
-            per_digest[digest] = index
+            per_digest[digest] = decoded[digest]
         if fresh:
             cache.put_many(fresh)
         for rel in rels:
@@ -786,10 +945,8 @@ def build_project_index(project_root: Path, config: C.Config, *,
                 indexes[rel] = index_source(raw) \
                     if raw is not None else _unparsed()
     else:
-        for rel in rels:
-            raw = raws[rel]
-            indexes[rel] = index_source(raw) \
-                if raw is not None else _unparsed()
+        for rel, index in zip(rels, _index_many([raws[rel] for rel in rels])):
+            indexes[rel] = index
 
     modules_of = {rel: _impact._module_names(root, rel) for rel in rels}
     resolver = _Resolver(rels, indexes, modules_of)

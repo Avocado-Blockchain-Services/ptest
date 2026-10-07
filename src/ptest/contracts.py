@@ -1305,7 +1305,7 @@ def stack_dump_pid(report_name: str, name: str) -> int | None:
 # a separate SQLite file that older ptest never opens.
 
 SELECTION_PROTOCOL = "ptest-selection-v1"
-SOURCE_INDEX_VERSION = 2
+SOURCE_INDEX_VERSION = 3
 SELECTION_STORE_DIR = "projects"
 SELECTION_STORE_NAME = "selection.db"
 SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024

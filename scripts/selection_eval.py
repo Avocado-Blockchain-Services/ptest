@@ -138,6 +138,9 @@ class MutantRecord:
     v2_engine: str = ""
     v2_reason: str = ""
     v2_details: tuple = ()
+    # Set when the mutant could not be evaluated (its other fields are
+    # empty); reported, never counted as a pass.
+    error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,6 +643,7 @@ def render_json(report: EvalReport) -> str:
                 "v2_engine": record.v2_engine,
                 "v2_reason": record.v2_reason,
                 "v2_details": list(record.v2_details),
+                "error": record.error,
             }
             for record in report.mutants
         ],
@@ -652,13 +656,16 @@ def render_json(report: EvalReport) -> str:
 def render_markdown(report: EvalReport) -> str:
     lines = [f"# selection evaluation (seed {report.seed})", ""]
     total_misses = sum(len(record.misses) for record in report.mutants)
-    lines.append(f"{len(report.mutants)} mutants, {total_misses} misses.")
+    errors = sum(1 for record in report.mutants if record.error)
+    lines.append(f"{len(report.mutants)} mutants, {total_misses} misses, "
+                 f"{errors} not evaluated.")
     lines.append("Miss classes follow spec section 9 residual risks R1-R9; "
                  "anything else is unclassified and blocks release.")
     lines.append("")
-    lines.append("| mutant | class | path | v1 | v2 | full | failed | miss | "
-                 "miss class | planning ms (v1/v2) |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| mutant | class | path | v1 files | v2 files | full | "
+                 "v1 tests | v2 tests | failed | miss | miss class | "
+                 "planning ms (v1/v2) |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for record in report.mutants:
         miss = ",".join(record.misses) if record.misses else "none"
         classes = ",".join(record.miss_classes) if record.miss_classes else "-"
@@ -667,9 +674,12 @@ def render_markdown(report: EvalReport) -> str:
             classes += f" (suggests: {','.join(record.suggestions)})"
         planning = record.planning_ms or {}
         plan_ms = f"{planning.get('v1', '-')}/{planning.get('v2', '-')}"
+        if record.error:
+            miss = f"not evaluated: {record.error.splitlines()[0][:80]}"
         lines.append(f"| {record.mutant_id} | {record.site_class} | "
                      f"{record.path}:{record.lineno} | {len(record.v1_files)} | "
                      f"{len(record.v2_files)} | {record.full_files} | "
+                     f"{record.v1_tests} | {record.v2_tests} | "
                      f"{len(record.failed)} | {miss} | {classes} | {plan_ms} |")
     lines.append("")
     if report.overhead_ms:
@@ -692,6 +702,9 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--benchmark-overhead", action="store_true")
     parser.add_argument("--ptest", default="uv run ptest")
+    parser.add_argument("--truth", choices=("full", "union"), default="full",
+                        help="ground truth: the whole suite (default), or "
+                             "the union of the v1 and v2 selections")
     return parser.parse_args(argv)
 
 
@@ -841,6 +854,46 @@ def selected_covering(mutant_failed: tuple, selected_files) -> tuple:
     chosen = set(selected_files)
     return tuple(node for node in mutant_failed
                  if file_part(node) in chosen)
+
+
+def v2_covering(mutant_failed: tuple, plan, prefix: str) -> tuple:
+    """The failing nodes the v2 plan would have run, node by node.
+
+    v2 deselects recorded tests inside the files it selects, so a file
+    match is not enough: a deselected failing test is a miss.
+    """
+    kind = getattr(plan, "kind", "selected")
+    if kind == "full":
+        return tuple(mutant_failed)
+    if kind == "none":
+        return ()
+    files = {_scope_path(prefix, path)
+             for path in (getattr(plan, "files", ()) or ())}
+    skipped = {_scope_node(prefix, nodeid)
+               for nodeid in (getattr(plan, "deselect", ()) or ())}
+    return tuple(node for node in mutant_failed
+                 if file_part(node) in files and node not in skipped)
+
+
+def clear_lastfailed(scratch: Path) -> None:
+    """Forget earlier runs' failures; a persistent scratch is reused."""
+    for cache in scratch.rglob(".pytest_cache/v/cache/lastfailed"):
+        if cache.is_file() and not cache.is_symlink():
+            cache.unlink()
+
+
+def run_setup(workdir: Path) -> None:
+    """Run the project's own ``[setup] argv`` once in a fresh scratch, so
+    its first ptest run already has the project's workers (xdist)."""
+    config = _planning_config(workdir)
+    setup = getattr(config, "setup", None)
+    argv = list(getattr(setup, "argv", ()) or ())
+    if not argv:
+        return
+    done = _run(argv, cwd=workdir, timeout=_RUN_TIMEOUT_S)
+    if done.returncode != 0:
+        tail = "\n".join(str(done.stderr or "").strip().splitlines()[-8:])
+        raise RuntimeError(f"setup {argv} failed in {workdir}:\n{tail}")
 
 
 def create_scratch(repo: Path, out: Path, name: str) -> Path:
@@ -1035,22 +1088,6 @@ def isolate_scratch(scratch: Path, prefix: str, project_id: str,
                     and not target.is_symlink()):
                 target.symlink_to(origin)
     return workdir
-
-
-def seed_records(args, project: Path, out: Path, project_id: str) -> tuple:
-    """Record the pristine tree once (the store every mutant plans against).
-
-    Returns the seed run's failing node ids; failures do not stop the
-    campaign (passing tests still record), they are reported.
-    """
-    prefix = _project_prefix(Path(project))
-    scratch = create_scratch(project, out, "seed")
-    try:
-        isolate_scratch(scratch, prefix, project_id, project)
-        return _ptest_failures(args.ptest, scratch, (), True, "seed",
-                               scope=(prefix,) if prefix else ())
-    finally:
-        remove_scratch(project, scratch)
 
 
 def overlay_dynamic(config_path: Path, value: bool) -> bytes:
@@ -1248,25 +1285,56 @@ def _scope_node(prefix: str, nodeid: str) -> str:
     return f"{prefix}/{head}{sep}{tail}" if sep else f"{prefix}/{head}"
 
 
-def _run_mutant(args, project: Path, out: Path, store_db, backup,
-                mutant: Mutant, project_id: str,
-                seed_failed: tuple = (),
-                counts: Mapping | None = None) -> MutantRecord:
-    """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
-    if store_db is not None:
-        restore_store(store_db, backup)  # pristine store for planning
-    # A scratch worktree always checks out the whole repo at its root,
-    # so for a monorepo child the mutation, planning and test scopes
-    # live under `scratch/prefix` while ptest itself runs from the
-    # scratch repo root with child-prefixed scopes (monorepo rule).
-    prefix = _project_prefix(Path(project))
-    scratch = create_scratch(project, out, mutant.mutant_id)
-    workdir = isolate_scratch(scratch, prefix, project_id, project)
-    scope = (prefix,) if prefix else ()
-    baseline_scratch = None
+@dataclass
+class Campaign:
+    """Shared state of one campaign: two persistent scratch worktrees
+    (mutants are applied to ``truth`` and reverted; ``base`` stays
+    pristine), the private store and its seed backup."""
+    project: Path
+    out: Path
+    prefix: str
+    project_id: str
+    truth: Path
+    base: Path
+    store_db: Path | None = None
+    backup: Path | None = None
+    seed_failed: tuple = ()
+    counts: Mapping = field(default_factory=dict)
+
+    def workdir(self, scratch: Path) -> Path:
+        return scratch if not self.prefix else scratch / self.prefix
+
+    @property
+    def scope(self) -> tuple:
+        return (self.prefix,) if self.prefix else ()
+
+
+def _log(message: str) -> None:
+    print(f"{time.strftime('%H:%M:%S')} {message}", file=sys.stderr,
+          flush=True)
+
+
+def _ptest_in(args, campaign: Campaign, scratch: Path, files: tuple,
+              full: bool, label: str) -> tuple:
+    """One ptest run in a persistent scratch; failing ids as repo scopes."""
+    clear_lastfailed(scratch)
+    failed = _ptest_failures(args.ptest, scratch, files, full, label,
+                             scope=campaign.scope)
+    return tuple(_scope_node(campaign.prefix, node) for node in failed)
+
+
+def _run_mutant(args, campaign: Campaign, mutant: Mutant) -> MutantRecord:
+    """Plan v1/v2, run the ground truth, detect and classify misses."""
+    started = time.perf_counter()
+    if campaign.store_db is not None:
+        restore_store(campaign.store_db, campaign.backup)  # seed state
+    prefix = campaign.prefix
+    scratch = campaign.truth
+    workdir = campaign.workdir(scratch)
+    target = workdir / mutant.site.path
+    original_bytes = target.read_bytes()
     try:
-        target = workdir / mutant.site.path
-        original = target.read_text(encoding="utf-8")
+        original = original_bytes.decode("utf-8")
         mutated = apply_mutation(original, mutant.site)
         if mutant.site.site_class == "data-change":
             if diff_edits(original, mutated) != 1:
@@ -1274,8 +1342,7 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         else:
             mutated = check_mutant(original, mutated)
         target.write_text(mutated, encoding="utf-8")
-        changed_top = (f"{prefix}/{mutant.site.path}"
-                       if prefix else mutant.site.path)
+        changed_top = _scope_path(prefix, mutant.site.path)
         before = time.perf_counter()
         v1 = plan_v1(scratch, workdir, (changed_top,))
         v1_ms = (time.perf_counter() - before) * 1000.0
@@ -1285,42 +1352,27 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         v1_files = tuple(getattr(v1, "files", ()) or ())
         v2_files = tuple(getattr(v2, "files", ()) or ())
         v1_is_full = getattr(v1, "kind", "selected") == "full"
-        v2_is_full = getattr(v2, "kind", "selected") == "full"
         full_files = int(getattr(v1, "total", 0) or 0)
-        union = sorted(set(v1_files) | set(v2_files))
-        union_scopes = tuple(_scope_path(prefix, path) for path in union)
-        kind, files = ground_truth_target(
-            union_scopes, v1_is_full=v1_is_full,
-            affordable=len(union) <= 200)
-        # Ground truth with the mutant through the branch's ptest from the
-        # scratch repo root. Pytest ids are child-relative under a nested
-        # child; compare, record and resolve them as repo-root scopes
-        # (spec 6.7 misses are defined over the file set the plans select).
-        mutant_failed = tuple(
-            _scope_node(prefix, node) for node in _ptest_failures(
-                args.ptest, scratch, files, kind == "full", "ground-truth",
-                scope=scope))
-        if v2_is_full:
-            covered = mutant_failed
+        if args.truth == "full":
+            kind, files = "full", ()
         else:
-            covered = selected_covering(
-                mutant_failed,
-                tuple(_scope_path(prefix, path) for path in v2_files))
+            union = sorted(set(v1_files) | set(v2_files))
+            kind, files = ground_truth_target(
+                tuple(_scope_path(prefix, path) for path in union),
+                v1_is_full=v1_is_full, affordable=len(union) <= 200)
+        mutant_failed = _ptest_in(args, campaign, scratch, files,
+                                  kind == "full", "ground-truth")
+        truth_s = time.perf_counter() - before
+        covered = v2_covering(mutant_failed, v2, prefix)
         # The seed run is the pristine baseline. A candidate miss is
-        # confirmed by rerunning its files on a pristine scratch, so a
-        # flaky or order-dependent test is not reported as a miss.
-        baseline_failed = tuple(
-            _scope_node(prefix, node) for node in seed_failed)
+        # confirmed on the pristine scratch, so a flaky or
+        # order-dependent test is not reported as a miss.
+        baseline_failed = tuple(campaign.seed_failed)
         misses = find_misses(mutant_failed, baseline_failed, covered)
         if misses:
-            baseline_scratch = create_scratch(
-                project, out, mutant.mutant_id + "-baseline")
-            isolate_scratch(baseline_scratch, prefix, project_id, project)
             confirm = tuple(sorted({file_part(node) for node in misses}))
-            rerun = tuple(
-                _scope_node(prefix, node) for node in _ptest_failures(
-                    args.ptest, baseline_scratch, confirm, False,
-                    "baseline", scope=scope))
+            rerun = _ptest_in(args, campaign, campaign.base, confirm,
+                              False, "baseline")
             baseline_failed = tuple(sorted(set(baseline_failed)
                                            | set(rerun)))
             misses = find_misses(mutant_failed, baseline_failed, covered)
@@ -1331,7 +1383,8 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
                 signals_for_miss(scratch, miss, original, mutated),
                 site_class=mutant.site.site_class)
             for miss in misses)
-        return MutantRecord(
+        counts = campaign.counts
+        record = MutantRecord(
             mutant_id=mutant.mutant_id,
             site_class=mutant.site.site_class,
             path=mutant.site.path, lineno=mutant.site.lineno,
@@ -1341,81 +1394,98 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
             misses=misses, miss_classes=miss_classes,
             suggestions=suggestions,
             planning_ms={"v1": v1_ms, "v2": v2_ms},
-            v1_tests=selection_tests(v1, counts or {}, dynamic=False),
-            v2_tests=selection_tests(v2, counts or {}, dynamic=True),
-            total_tests=sum((counts or {}).values()),
+            v1_tests=selection_tests(v1, counts, dynamic=False),
+            v2_tests=selection_tests(v2, counts, dynamic=True),
+            total_tests=sum(counts.values()),
             v2_engine=str(getattr(v2, "engine", "") or ""),
             v2_reason=str(getattr(v2, "static_reason", "")
                           or getattr(v2, "reason", "") or ""),
             v2_details=tuple(str(line) for line in
                              (getattr(v2, "details", ()) or ())[:12]))
+        _log(f"{mutant.mutant_id} {mutant.site.site_class} "
+             f"{mutant.site.path}: v1 {record.v1_tests} v2 {record.v2_tests}"
+             f" of {record.total_tests} tests, {len(mutant_failed)} failed,"
+             f" {len(misses)} misses · truth {truth_s:.0f}s ·"
+             f" total {time.perf_counter() - started:.0f}s")
+        return record
     finally:
-        if baseline_scratch is not None:
-            remove_scratch(project, baseline_scratch)
-        remove_scratch(project, scratch)
-        if store_db is not None:
-            restore_store(store_db, backup)
+        target.write_bytes(original_bytes)
+        if campaign.store_db is not None:
+            restore_store(campaign.store_db, campaign.backup)
+
+
+def _prepare(args, project: Path, out: Path) -> Campaign:
+    prefix = _project_prefix(Path(project))
+    project_id = campaign_project_id(project, args.seed,
+                                     os.urandom(8).hex())
+    truth = create_scratch(project, out, "truth")
+    base = create_scratch(project, out, "base")
+    campaign = Campaign(project=project, out=out, prefix=prefix,
+                        project_id=project_id, truth=truth, base=base)
+    for scratch in (truth, base):
+        isolate_scratch(scratch, prefix, project_id, project)
+        run_setup(campaign.workdir(scratch))
+    try:
+        campaign.store_db = store_db_path(project_id)
+    except Exception:
+        campaign.store_db = None
+    return campaign
 
 
 def run_campaign(args) -> int:
-    """Seeded A1-A5 campaign: mutants in scratch worktrees, v1 vs v2, truth."""
+    """Seeded A1-A5 campaign: mutants in a scratch worktree, v1 vs v2, truth."""
     project = Path(args.project)
     out = Path(args.out)
     tree = read_tree_files(project)
     sites = [site for site in collect_sites(tree) if site.site_class in args.classes]
     mutants = sample_mutants(sites, args.mutants, args.seed)
-    project_id = campaign_project_id(project, args.seed,
-                                     os.urandom(8).hex())
+    campaign = _prepare(args, project, out)
+    records: list[MutantRecord] = []
     try:
-        store_db = store_db_path(project_id)
-    except Exception:
-        store_db = None
-    backup = None
-    try:
-        seed_failed = seed_records(args, project, out, project_id)
-        backup = (backup_store(store_db, out / "scratch" / "store-backup")
-                  if store_db is not None else None)
+        _log("seed: recording the pristine tree")
+        campaign.seed_failed = _ptest_in(args, campaign, campaign.base, (),
+                                         True, "seed")
+        if campaign.seed_failed:
+            _log(f"seed: {len(campaign.seed_failed)} failing tests on the"
+                 f" pristine tree (baseline)")
+        if campaign.store_db is not None:
+            campaign.backup = backup_store(
+                campaign.store_db, out / "store-backup")
         try:
-            counts = tests_per_file(project_id)
+            campaign.counts = tests_per_file(campaign.project_id)
         except Exception:
-            counts = {}
-        records = []
+            campaign.counts = {}
         for mutant in mutants:
-            records.append(_run_mutant(args, project, out, store_db, backup,
-                                       mutant, project_id, seed_failed,
-                                       counts))
+            try:
+                records.append(_run_mutant(args, campaign, mutant))
+            except (RuntimeError, OSError, ValueError,
+                    subprocess.SubprocessError) as exc:
+                _log(f"{mutant.mutant_id} error: {exc}")
+                records.append(MutantRecord(
+                    mutant_id=mutant.mutant_id,
+                    site_class=mutant.site.site_class,
+                    path=mutant.site.path, lineno=mutant.site.lineno,
+                    error=str(exc)[:2000]))
             # Partial reports survive an interrupted multi-hour campaign.
             _write_reports(out, EvalReport(seed=args.seed,
                                            mutants=tuple(records)))
-            print(f"{mutant.mutant_id} done ({len(records)}/{len(mutants)})",
-                  file=sys.stderr, flush=True)
-    finally:
-        if store_db is not None:
-            restore_store(store_db, None)
-        if backup is not None and backup.is_file():
-            backup.unlink()
-    if seed_failed:
-        print(f"seed run: {len(seed_failed)} failing tests on the pristine "
-              f"tree (not recorded as passing)", file=sys.stderr)
-    # The benchmark stays after the mutant loop (mutants are measured
-    # against the pristine store), but a benchmark failure must not
-    # discard the records already computed: write the reports with
-    # empty overhead first, then re-raise.
-    try:
-        try:
-            overhead = (benchmark_overhead(project, out, args.ptest,
-                                           project_id)
-                        if args.benchmark_overhead else {})
-        finally:
-            if store_db is not None:
-                restore_store(store_db, None)
-    except Exception:
+        overhead = {}
+        if args.benchmark_overhead:
+            overhead = benchmark_overhead(project, out, args.ptest,
+                                          campaign.project_id)
+    except BaseException:
         _write_reports(out, EvalReport(seed=args.seed,
-                                       mutants=tuple(records),
-                                       overhead_ms={}))
+                                       mutants=tuple(records)))
         raise
-    _write_reports(out, EvalReport(seed=args.seed,
-                                   mutants=tuple(records), overhead_ms=overhead))
+    finally:
+        for scratch in (campaign.truth, campaign.base):
+            remove_scratch(project, scratch)
+        if campaign.store_db is not None:
+            restore_store(campaign.store_db, None)
+        if campaign.backup is not None and campaign.backup.is_file():
+            campaign.backup.unlink()
+    _write_reports(out, EvalReport(seed=args.seed, mutants=tuple(records),
+                                   overhead_ms=overhead))
     return 0
 
 

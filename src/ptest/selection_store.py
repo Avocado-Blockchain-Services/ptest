@@ -32,6 +32,7 @@ The ``SELECTION_*`` constants, helpers and dataclasses come from
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sqlite3
@@ -52,6 +53,7 @@ _HEX32 = re.compile(r"[0-9a-f]{32}")
 
 _SCHEMA_VERSION = "1"
 _CACHE_PRUNE_AFTER_S = 14 * 24 * 3600
+_CACHE_TOUCH_AFTER_S = 3600
 _INVENTORY_CHUNK = 5000
 
 
@@ -459,6 +461,21 @@ def _begin_immediate(conn: sqlite3.Connection) -> None:
             time.sleep(_BEGIN_IMMEDIATE_POLL_S)
 
 
+@contextlib.contextmanager
+def _transaction(conn: sqlite3.Connection):
+    """``BEGIN IMMEDIATE`` … ``COMMIT``, rolled back on any error."""
+    _begin_immediate(conn)
+    try:
+        yield
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    conn.execute("COMMIT")
+
+
 def _chunks(items: list, size: int):
     for start in range(0, len(items), size):
         yield items[start:start + size]
@@ -577,12 +594,20 @@ class SelectionStore:
                 for digest, blob in rows:
                     found[digest] = bytes(blob)
             if found:
+                # One transaction, and only rows not touched within the
+                # hour: a warm plan must not rewrite (and lock) the whole
+                # cache on every invocation. Pruning works in days.
                 now = time.time()
-                for chunk in _chunks(list(found), 500):
-                    conn.execute(
-                        "UPDATE cache SET used_at = ? WHERE digest IN (%s)"
-                        % ",".join("?" * len(chunk)),
-                        (now, *chunk))
+                try:
+                    with _transaction(conn):
+                        for chunk in _chunks(list(found), 500):
+                            conn.execute(
+                                "UPDATE cache SET used_at = ? WHERE digest"
+                                " IN (%s) AND used_at < ?"
+                                % ",".join("?" * len(chunk)),
+                                (now, *chunk, now - _CACHE_TOUCH_AFTER_S))
+                except sqlite3.Error:
+                    pass  # a stale used_at only ages the row sooner
             return found
 
     def put_many(self, blobs: Mapping[str, bytes]) -> None:
@@ -596,11 +621,14 @@ class SelectionStore:
                 if not isinstance(blob, (bytes, bytearray, memoryview)):
                     raise ValueError("cache blobs must be bytes")
             now = time.time()
-            for digest, blob in items:
-                conn.execute(
+            # One transaction: per-row autocommit synced the journal once
+            # per file (about 35 ms each, a minute on a large project).
+            with _transaction(conn):
+                conn.executemany(
                     "INSERT OR REPLACE INTO cache(digest, version, blob,"
                     " used_at) VALUES(?, ?, ?, ?)",
-                    (digest, SOURCE_INDEX_VERSION, bytes(blob), now))
+                    [(digest, SOURCE_INDEX_VERSION, bytes(blob), now)
+                     for digest, blob in items])
 
     # -- snapshot / meta ---------------------------------------------------
 

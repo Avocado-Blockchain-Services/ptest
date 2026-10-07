@@ -234,14 +234,28 @@ def test_index_source_unparseable_is_not_parsed(raw):
     assert index.statements == ()
 
 
-def test_index_source_fingerprints_use_ast_dump_without_attributes():
+def test_index_source_fingerprints_are_position_free_structure():
     raw = b"VALUE = 1\n"
     index = S.index_source(raw)
     node = ast.parse(raw.decode("utf-8")).body[0]
-    expected = hashlib.sha256(
-        ast.dump(node, include_attributes=False).encode()).hexdigest()
+    expected = hashlib.sha256(S._dump(node).encode()).hexdigest()
 
     assert index.statements[0].fingerprint == expected
+    shifted = S.index_source(b"\n\n# moved\nVALUE  =  1\n")
+    assert shifted.statements[0].fingerprint == expected
+
+
+def test_function_body_fingerprint_follows_behavior_not_text():
+    """Bodies hash compiled code: formatting and comments are no change;
+    any semantic edit is."""
+    def body(text):
+        return _scopes(S.index_source(text.encode()))["f"].body
+    base = body("def f(x):\n    return x == 2\n")
+    assert body("def f(x):\n\n    # same\n    return (x == 2)\n") == base
+    assert body("def f(x):\n    return x >= 2\n") != base
+    assert body("def f(x):\n    return x == 3\n") != base
+    assert body("def f(y):\n    return y == 2\n") != base
+    assert body('def f(x):\n    """doc"""\n    return x == 2\n') != base
 
 
 # --- N11: indexing never imports or executes project code ---
@@ -845,3 +859,28 @@ def test_scope_refs_include_skeleton_chains():
     assert ("TIMEOUT",) in scopes["decorated"].refs
     classes = _classes(index)
     assert ("TIMEOUT",) in classes["Client"].refs
+
+
+def test_refs_inside_a_call_based_load_are_kept():
+    """N1: ``CONFIG.get().x`` and ``make().attr`` still reference ``CONFIG``
+    and ``make``. Before the fix a load whose base was not a name stopped
+    the walk, so a changed ``CONFIG`` never reached this scope."""
+    raw = (b"def f():\n"
+           b"    return CONFIG.get().x + make(arg).attr\n")
+    scopes = _scopes(S.index_source(raw))
+    assert scopes["f"].refs == (("CONFIG", "get"), ("arg",), ("make",))
+
+
+def test_dump_distinguishes_what_ast_dump_does():
+    """The fast dump ignores positions only; every field and leaf counts."""
+    def dumps(text):
+        return S._dump(ast.parse(text))
+    assert dumps("x = 1") == dumps("x  =  1  # c")
+    for left, right in (("x = 1", "x = 1.0"), ("x = 1", "x = True"),
+                        ("f(a, b)", "f(b, a)"), ("a.b", "a.c"),
+                        ("x = 'a'", "x = b'a'"), ("[1, 2]", "(1, 2)"),
+                        ("f(*a)", "f(a)"), ("def f(a=1): pass",
+                                            "def f(a=2): pass")):
+        assert dumps(left) != dumps(right), (left, right)
+    deep = "x = " + " + ".join(["1"] * 5000)
+    assert S._dump(ast.parse(deep))  # iterative: no recursion limit

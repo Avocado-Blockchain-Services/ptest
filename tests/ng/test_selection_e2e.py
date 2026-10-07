@@ -228,7 +228,7 @@ def test_empty_store_reports_static_note(case):
     # store the note names the empty-store reason.
     (root / "tests" / "test_core.py").write_text(
         (_MARK + _TEST_CORE).replace("assert core.alpha(1) == 2",
-                                     "assert core.alpha(1) == 1 + 1"))
+                                     "assert core.alpha(1) >= 2"))
 
     result, err = _changed(case, domain, root)
 
@@ -301,7 +301,7 @@ def test_edit_single_test_function_deselects_rest(recorded, case):
     domain, root = recorded
     (root / "tests" / "test_core.py").write_text(
         (_MARK + _TEST_CORE).replace("assert core.alpha(1) == 2",
-                                     "assert core.alpha(1) == 1 + 1"))
+                                     "assert core.alpha(1) >= 2"))
 
     result, err = _changed(case, domain, root)
 
