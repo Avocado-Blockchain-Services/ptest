@@ -12,246 +12,11 @@ and is gated on T1 being present.
 from __future__ import annotations
 
 import importlib.util
-from array import array
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from ptest import contracts as C
-
-# ---------------------------------------------------------------------------
-# BARRIER SHIM (T2-local, test-only seam).
-#
-# The frozen contracts block (design section 12) has not landed in this
-# worktree yet, so the SELECTION_* names below do not exist on
-# ptest.contracts here. When the barrier lands, every hasattr() passes
-# and nothing is injected. Until then the missing shapes are declared
-# locally, verbatim from the frozen spec, and attached to the contracts
-# module so the planner (which only does C.<name> attribute reads)
-# resolves them identically before and after the merge.
-# Integration note for the orchestrator: delete this block after the
-# merge and re-run this file; nothing else in this file changes meaning.
-# ---------------------------------------------------------------------------
-
-if not hasattr(C, "SELECTION_PROTOCOL"):
-    C.SELECTION_PROTOCOL = "ptest-selection-v1"  # type: ignore[attr-defined]
-if not hasattr(C, "SELECTION_ABSENT_DIGEST"):
-    C.SELECTION_ABSENT_DIGEST = ""  # type: ignore[attr-defined]
-if not hasattr(C, "SELECTION_PASSING_OUTCOMES"):
-    C.SELECTION_PASSING_OUTCOMES = frozenset({"passed", "skipped", "xfailed"})  # type: ignore[attr-defined]
-if not hasattr(C, "SELECTION_MAX_SIGNATURES"):
-    C.SELECTION_MAX_SIGNATURES = 128  # type: ignore[attr-defined]
-
-
-def _shim_ids(values):
-    return array("I", sorted(set(values)))
-
-
-def _shim_static_reach(reverse, seeds):
-    queue = [s for s in seeds if isinstance(s, str)]
-    seen = set(queue)
-    while queue:
-        for importer in reverse.get(queue.pop(), ()):
-            if importer not in seen:
-                seen.add(importer)
-                queue.append(importer)
-    return frozenset(seen)
-
-
-def _shim_key_path(key):
-    return key.rsplit(":", 1)[0]
-
-
-def _shim_test_file(nodeid):
-    return nodeid.split("::", 1)[0]
-
-
-def _shim_name_key(path, name):
-    return f"{path}:{name}"
-
-
-def _shim_empty_context(*, opaque=False):
-    return C.ContextDeps(functions=array("I"), modules=array("I"),
-                         data=array("I"), opaque=opaque)
-
-
-for _name, _obj in {
-    "selection_ids": _shim_ids,
-    "selection_static_reach": _shim_static_reach,
-    "selection_key_path": _shim_key_path,
-    "selection_test_file": _shim_test_file,
-    "selection_name_key": _shim_name_key,
-    "selection_empty_context": _shim_empty_context,
-}.items():
-    if not hasattr(C, _name):
-        setattr(C, _name, _obj)
-
-
-if not hasattr(C, "ScopeIndex"):
-    @dataclass(frozen=True, slots=True)
-    class ScopeIndex:
-        qualname: str
-        body: str
-        skeleton: str
-        refs: tuple = ()
-
-
-if not hasattr(C, "ClassIndex"):
-    @dataclass(frozen=True, slots=True)
-    class ClassIndex:
-        qualname: str
-        skeleton: str
-        body: str
-        refs: tuple = ()
-
-
-if not hasattr(C, "StatementIndex"):
-    @dataclass(frozen=True, slots=True)
-    class StatementIndex:
-        kind: str
-        bound: tuple = ()
-        refs: tuple = ()
-        fingerprint: str = ""
-
-
-if not hasattr(C, "FileIndex"):
-    @dataclass(frozen=True, slots=True)
-    class FileIndex:
-        parsed: bool
-        imports: tuple = ()
-        scopes: tuple = ()
-        classes: tuple = ()
-        statements: tuple = ()
-
-
-if not hasattr(C, "ProjectFile"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class ProjectFile:
-        path: str
-        digest: str
-        index: object
-        modules: tuple = ()
-        test: bool = False
-        support: bool = False
-        imports: frozenset = frozenset()
-        scope_refs: object = field(default_factory=dict)
-        class_refs: object = field(default_factory=dict)
-        statement_refs: tuple = ()
-        statement_bound: tuple = ()
-
-
-if not hasattr(C, "ProjectIndex"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class ProjectIndex:
-        root: object
-        files: object
-        test_files: frozenset = frozenset()
-        reverse: object = field(default_factory=dict)
-        unparsed: frozenset = frozenset()
-        complete: bool = True
-
-
-if not hasattr(C, "DepVocabulary"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class DepVocabulary:
-        paths: tuple = ()
-        functions: tuple = ()
-        fixtures: tuple = ()
-
-
-if not hasattr(C, "ContextDeps"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class ContextDeps:
-        functions: object
-        modules: object
-        data: object
-        opaque: bool = False
-
-
-if not hasattr(C, "RunBaseline"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class RunBaseline:
-        run_id: str
-        recorded_at: float
-        compatibility: str
-        digests: object
-        ambient: object
-
-
-if not hasattr(C, "NodeRecord"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class NodeRecord:
-        nodeid: str
-        test_file: str
-        outcome: str
-        run_id: str
-        deps: object
-        fixtures: object = field(default_factory=lambda: array("I"))
-
-
-if not hasattr(C, "FixtureRecord"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class FixtureRecord:
-        fixture: int
-        run_id: str
-        deps: object
-
-
-if not hasattr(C, "DependencySnapshot"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class DependencySnapshot:
-        vocabulary: object
-        runs: object
-        nodes: object
-        fixtures: object = field(default_factory=dict)
-        demotions: object = field(default_factory=dict)
-
-
-if not hasattr(C, "SelectionInputs"):
-    @dataclass(frozen=True, slots=True, eq=False)
-    class SelectionInputs:
-        index: object
-        deps: object
-        versions: object
-        data_digests: object
-        compatibility: str
-        changed: frozenset = frozenset()
-        test_roots: tuple = ()
-
-
-if not hasattr(C, "ChangedUnit"):
-    @dataclass(frozen=True, slots=True)
-    class ChangedUnit:
-        kind: str
-        label: str
-        tests: int
-
-
-if not hasattr(C, "SelectionDecision"):
-    @dataclass(frozen=True, slots=True)
-    class SelectionDecision:
-        full_reason: object
-        files: tuple
-        deselect: tuple
-        whole_files: tuple
-        selected: int
-        reached: int
-        recorded: int
-        total_files: int
-        units: tuple
-        fallbacks: tuple
-        coverage: float
-
-
-for _name in (
-    "ScopeIndex", "ClassIndex", "StatementIndex", "FileIndex",
-    "ProjectFile", "ProjectIndex", "DepVocabulary", "ContextDeps",
-    "RunBaseline", "NodeRecord", "FixtureRecord", "DependencySnapshot",
-    "SelectionInputs", "ChangedUnit", "SelectionDecision",
-):
-    if _name in globals() and not hasattr(C, _name):
-        setattr(C, _name, globals()[_name])
 
 from ptest import selection_planner as PL
 
@@ -1238,6 +1003,30 @@ def test_ambient_data_unchanged_sets_no_full_reason():
     d = PL.plan(inputs)
     assert d.full_reason is None
     assert not PL.is_selected(d, node.nodeid)
+
+
+def test_unreadable_data_digest_is_stale_on_both_sides():
+    """N1: '?' (oversize or unreadable) proves nothing, even against '?'.
+
+    Before the fix a '?' baseline equalled a '?' current digest, so a
+    change past the read cap selected nothing.
+    """
+    vb = VB()
+    data = "data/weights.bin"
+    lib = FI(scopes=[SC("f", body="b1")])
+    ambient = CT(vb, data=[data])
+    index = IDX({
+        LIB: PF(LIB, "d", lib),
+        TEST: PF(TEST, "dt", FI(scopes=[SC("test_f")]), test=True),
+    })
+    node = NODE(vb, TEST + "::test_f", TEST, "r1", funcs=[(LIB, "f")])
+    run = RUN(vb, "r1", {LIB: "d", TEST: "dt", data: "?"},
+              ambient=ambient)
+    deps = SNAP(vb, [run], [node])
+    inputs = INP(index, deps, versions={"d": lib, "dt": FI(scopes=[SC("test_f")])},
+                 data_digests={data: "?"}, changed=())
+    d = PL.plan(inputs)
+    assert d.full_reason == f"ambient data file {data} changed"
 
 
 def test_corrupt_ambient_ids_taint_nodes_opaque():

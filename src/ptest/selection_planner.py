@@ -72,7 +72,10 @@ def _stale_sets(index, basemap, data_digests):
     for path, digest in basemap.items():
         if path.endswith(".py"):
             continue
-        if digest != data_digests.get(path, ""):
+        current = data_digests.get(path, "")
+        # "?" is an unreadable or oversize file: it proves nothing, so it
+        # is stale on either side (N1).
+        if digest == "?" or current == "?" or digest != current:
             stale_data.add(path)
     return stale_py, stale_data
 

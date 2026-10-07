@@ -222,18 +222,27 @@ def _force_opaque_event(event: object) -> bool:
 def _forkserver_socket_path() -> str | None:
     """Live forkserver socket path, or None (never imports; N10/N11).
 
-    ``multiprocessing`` sets ``forkserver._forkserver_address`` when the
+    ``multiprocessing`` stores the address on the module's ``ForkServer``
+    singleton (``forkserver._forkserver._forkserver_address``) when the
     server starts. Reading it from ``sys.modules`` avoids importing
     anything inside the audit hook; a missing module or attribute simply
-    means no forkserver is running in this process.
+    means no forkserver is running in this process. Abstract-namespace
+    addresses (leading NUL) compare like any other string.
     """
     try:
         module = sys.modules.get("multiprocessing.forkserver")
-        address = getattr(module, "_forkserver_address", None) \
+        server = getattr(module, "_forkserver", None) \
             if module is not None else None
+        address = getattr(server, "_forkserver_address", None) \
+            if server is not None else None
     except Exception:
         return None
-    if isinstance(address, str) and address and "\x00" not in address:
+    if isinstance(address, bytes):
+        try:
+            address = address.decode("utf-8", "surrogateescape")
+        except Exception:
+            return None
+    if isinstance(address, str) and address:
         return address
     return None
 
@@ -251,6 +260,8 @@ def _is_forkserver_connect(args: object) -> bool:
         if not isinstance(args, (tuple, list)) or len(args) < 2:
             return False
         address = args[1]
+        if isinstance(address, bytes):
+            address = address.decode("utf-8", "surrogateescape")
         if not isinstance(address, str) or not address:
             return False
         server = _forkserver_socket_path()

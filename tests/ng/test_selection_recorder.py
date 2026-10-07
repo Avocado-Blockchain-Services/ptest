@@ -12,7 +12,6 @@ Real serial/xdist bridge twins live in
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -28,10 +27,6 @@ import pytest
 from ptest.runtime import selection_recorder as recorder
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-_HAS_BARRIER = hasattr(__import__("ptest.contracts", fromlist=["x"]), "SELECTION_PROTOCOL")
-_NEEDS_BARRIER = pytest.mark.skipif(
-    not _HAS_BARRIER, reason="awaiting contracts barrier (T5)")
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +49,6 @@ def test_duplicated_literals_have_frozen_values():
     assert recorder._DATA_MAX_BYTES == 16 * 1024 * 1024
 
 
-@_NEEDS_BARRIER
 def test_duplicated_literals_match_contracts():
     """Pin every duplicated literal equal to contracts.py."""
     from ptest import contracts as C
@@ -151,7 +145,6 @@ def test_normalize_qualname_cases():
         assert recorder._normalize_qualname(raw) == expected, raw
 
 
-@_NEEDS_BARRIER
 def test_predicates_match_contracts_on_shared_table():
     """The stdlib copies must agree with contracts on every shared case."""
     from ptest import contracts as C
@@ -774,12 +767,7 @@ def test_overflow_file_drops_records(tmp_path, monkeypatch):
     assert payload["nodes"] == []
 
 
-_INGEST_SPEC = importlib.util.find_spec("ptest.selection_ingest")
-_NEEDS_INGEST = pytest.mark.skipif(
-    _INGEST_SPEC is None, reason="awaiting selection_ingest (T3)")
 
-
-@_NEEDS_INGEST
 def test_ingest_accepts_real_serial_output(tmp_path):
     """Cross-check: T3 ingest reads this task's real deps file as complete."""
     from ptest import selection_ingest
@@ -840,7 +828,8 @@ def test_forkserver_connect_marks_opaque(tmp_path, monkeypatch):
     use must stay clean.
     """
     server = "/tmp/pymp-test/sock-abc123"
-    fake = SimpleNamespace(_forkserver_address=server)
+    fake = SimpleNamespace(
+        _forkserver=SimpleNamespace(_forkserver_address=server))
     monkeypatch.setitem(sys.modules, "multiprocessing.forkserver", fake)
     rec = _recorder(tmp_path)
     rec.recording = True
@@ -851,7 +840,8 @@ def test_forkserver_connect_marks_opaque(tmp_path, monkeypatch):
 
 
 def test_other_socket_connect_stays_clean(tmp_path, monkeypatch):
-    fake = SimpleNamespace(_forkserver_address="/tmp/pymp-test/sock-abc123")
+    fake = SimpleNamespace(_forkserver=SimpleNamespace(
+        _forkserver_address="/tmp/pymp-test/sock-abc123"))
     monkeypatch.setitem(sys.modules, "multiprocessing.forkserver", fake)
     rec = _recorder(tmp_path)
     rec.recording = True
@@ -862,6 +852,44 @@ def test_other_socket_connect_stays_clean(tmp_path, monkeypatch):
     assert rec._current.opaque is False
     rec._handle_audit("socket.connect", ())
     assert rec._current.opaque is False
+
+
+_REAL_FORKSERVER_SCRIPT = r"""
+import concurrent.futures, json, multiprocessing, sys
+from ptest.runtime import selection_recorder as recorder
+
+rec = recorder.Recorder(checkout_root=sys.argv[1], run_id="c" * 32,
+                        report_path=sys.argv[1] + "/report.json",
+                        role="controller")
+rec.recording = True
+sys.addaudithook(rec._handle_audit)
+ctx = multiprocessing.get_context("forkserver")
+seen = {}
+for name in ("t.py::first", "t.py::second"):
+    rec.enter_test(name)
+    with concurrent.futures.ProcessPoolExecutor(1, mp_context=ctx) as pool:
+        assert pool.submit(abs, -1).result(timeout=30) == 1
+    seen[name] = rec._current.opaque
+    rec.exit_test()
+print(json.dumps(seen))
+"""
+
+
+def test_real_forkserver_second_pool_marks_opaque(tmp_path):
+    """N3 against CPython's real forkserver module shape.
+
+    The first pool starts the server (fork_exec); the second only dials
+    its socket. Both contexts must be opaque. Failed before the fix: the
+    address was read from the module, where CPython never stores it, so
+    the second context stayed clean.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _REAL_FORKSERVER_SCRIPT, str(tmp_path)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")})
+    assert proc.returncode == 0, proc.stderr
+    seen = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert seen == {"t.py::first": True, "t.py::second": True}
 
 
 def test_no_forkserver_socket_connect_stays_clean(tmp_path, monkeypatch):

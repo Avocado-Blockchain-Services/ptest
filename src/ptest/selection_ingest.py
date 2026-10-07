@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import contracts as C
 from . import files
-from .selection_store import (
+from .contracts import (
     ContextDeps,
     DepVocabulary,
     RecordedNode,
@@ -37,38 +37,16 @@ from .selection_store import (
     selection_nodeid_safe,
     selection_normalize_qualname,
 )
-from .selection_store import SELECTION_DEPS_FORMAT as DEPS_FORMAT
-from .selection_store import SELECTION_DEPS_INFIX as DEPS_INFIX
-from .selection_store import SELECTION_DESELECT_FORMAT as DESELECT_FORMAT
-from .selection_store import SELECTION_DESELECT_SUFFIX as DESELECT_SUFFIX
 
-if hasattr(C, "SELECTION_DEPS_MAX_BYTES"):
-    DEPS_MAX_BYTES = C.SELECTION_DEPS_MAX_BYTES
-else:  # Frozen barrier value (see selection_store's seam note).
-    DEPS_MAX_BYTES = 64 * 1024 * 1024
-
-if hasattr(C, "SELECTION_DESELECT_MAX_BYTES"):
-    DESELECT_MAX_BYTES = C.SELECTION_DESELECT_MAX_BYTES
-else:
-    DESELECT_MAX_BYTES = 16 * 1024 * 1024
-
-if hasattr(C, "SELECTION_DESELECT_MAX_IDS"):
-    DESELECT_MAX_IDS = C.SELECTION_DESELECT_MAX_IDS
-else:
-    DESELECT_MAX_IDS = 200000
-
-if hasattr(C, "SELECTION_OUTCOMES"):
-    OUTCOMES = C.SELECTION_OUTCOMES
-else:
-    OUTCOMES = frozenset({
-        "passed", "failed", "error", "skipped", "xfailed", "xpassed",
-        "unknown",
-    })
-
-if hasattr(C, "SELECTION_FIXTURE_SCOPES"):
-    FIXTURE_SCOPES = C.SELECTION_FIXTURE_SCOPES
-else:
-    FIXTURE_SCOPES = frozenset({"class", "module", "package", "session"})
+DEPS_FORMAT = C.SELECTION_DEPS_FORMAT
+DEPS_INFIX = C.SELECTION_DEPS_INFIX
+DESELECT_FORMAT = C.SELECTION_DESELECT_FORMAT
+DESELECT_SUFFIX = C.SELECTION_DESELECT_SUFFIX
+DEPS_MAX_BYTES = C.SELECTION_DEPS_MAX_BYTES
+DESELECT_MAX_BYTES = C.SELECTION_DESELECT_MAX_BYTES
+DESELECT_MAX_IDS = C.SELECTION_DESELECT_MAX_IDS
+OUTCOMES = C.SELECTION_OUTCOMES
+FIXTURE_SCOPES = C.SELECTION_FIXTURE_SCOPES
 
 MAX_DIR_ENTRIES = 4096
 _MAX_NOTES = 64

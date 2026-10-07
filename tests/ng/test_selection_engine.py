@@ -143,6 +143,8 @@ class FakeStore:
                            else tuple(test_files)))
 
     def demote(self, nodeids):
+        if not all(isinstance(d, str) and d for d in dict(nodeids).values()):
+            raise ValueError("demotion digests must be nonempty str")
         self.calls.append(("demote", dict(nodeids)))
 
     def record_audit(self, checked, misses):
@@ -471,6 +473,39 @@ def test_dynamic_selected_maps_files_deselect_and_tests(fakes, tmp_path):
     assert out.static_reason == ""
 
 
+def _scoped_request(impact):
+    return C.RunRequest(mode=C.Mode.SCOPED, argv=tuple(impact.files),
+                        base=None, deselect=impact.deselect)
+
+
+def test_unsafe_deselect_id_keeps_its_whole_file(fakes, tmp_path):
+    """G2/D7: an id the binding cannot hold widens its file, never crashes.
+
+    A parametrized id over SELECTION_NODEID_MAX_BYTES next to a selected
+    test made RunRequest raise ValueError (traceback, exit 1) before the fix.
+    """
+    long_id = "tests/test_a.py::test_p[" + "x" * 5000 + "]"
+    out = _refine_selected(
+        fakes, tmp_path, files=("tests/test_a.py", "tests/test_b.py"),
+        deselect=(long_id, "tests/test_a.py::test_q",
+                  "tests/test_b.py::test_r"),
+        selected=2, recorded=6, total_files=4)
+    assert out.deselect == ("tests/test_b.py::test_r",)
+    assert out.tests == 4
+    assert _scoped_request(out).deselect == ("tests/test_b.py::test_r",)
+
+
+def test_deselect_over_id_cap_runs_whole_files(fakes, tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "SELECTION_DESELECT_MAX_IDS", 2)
+    out = _refine_selected(
+        fakes, tmp_path, files=("tests/test_a.py",),
+        deselect=tuple(f"tests/test_a.py::t{i}" for i in range(3)),
+        selected=1, recorded=4, total_files=4)
+    assert out.deselect == ()
+    assert out.tests == 4
+    assert _scoped_request(out).deselect == ()
+
+
 def test_dynamic_none_with_reach_reports_reached(fakes, tmp_path):
     fakes.planner_mod._decision = _decision(files=(), deselect=(),
                                             selected=0, reached=5,
@@ -694,6 +729,51 @@ def test_compatibility_changes_with_policy_and_runner(tmp_path):
     assert other != base
 
 
+def test_data_digest_never_covers_only_a_prefix(tmp_path, monkeypatch):
+    """N1: an edit past the read cap must not keep the digest equal.
+
+    Before the fix both versions hashed the same 8-byte prefix.
+    """
+    engine = pytest.importorskip(ENGINE)
+    monkeypatch.setattr(C, "SELECTION_DATA_MAX_BYTES", 8)
+    data = tmp_path / "blob.bin"
+    data.write_bytes(b"12345678-tail-one")
+    first = engine._data_digest(b"k" * 64, tmp_path, "blob.bin")
+    data.write_bytes(b"12345678-tail-two")
+    assert first == "?"
+    assert engine._data_digest(b"k" * 64, tmp_path, "blob.bin") == "?"
+    data.write_bytes(b"small")
+    assert engine._data_digest(b"k" * 64, tmp_path, "blob.bin") \
+        == C.selection_file_digest(b"k" * 64, b"small")
+
+
+def test_oversize_data_baseline_is_none_so_contexts_go_opaque(
+        tmp_path, monkeypatch):
+    engine = pytest.importorskip(ENGINE)
+    monkeypatch.setattr(C, "SELECTION_DATA_MAX_BYTES", 8)
+    (tmp_path / "big.bin").write_bytes(b"x" * 9)
+    (tmp_path / "ok.bin").write_bytes(b"x" * 8)
+    monkeypatch.setattr(engine, "_source_index", lambda: None)
+    monkeypatch.setattr(engine, "_run_data_paths",
+                        lambda run: ("big.bin", "ok.bin", "gone.bin"))
+    digests = engine._current_digests(b"k" * 64, tmp_path, object())
+    assert digests["big.bin"] is None
+    assert digests["ok.bin"] == C.selection_file_digest(b"k" * 64, b"x" * 8)
+    assert digests["gone.bin"] == ""
+
+
+def test_compatibility_changes_with_bytes_past_any_prefix(tmp_path,
+                                                         monkeypatch):
+    engine = pytest.importorskip(ENGINE)
+    monkeypatch.setattr(engine, "_FILE_READ_CAP", 8)
+    root = Path(tmp_path) / "proj"
+    root.mkdir()
+    (root / "uv.lock").write_bytes(b"12345678-a")
+    config = _config()
+    before = engine.compatibility_fingerprint(b"k" * 64, config, root)
+    assert engine.compatibility_fingerprint(b"k" * 64, config, root) != before
+
+
 # --- preview ---------------------------------------------------------
 
 def test_preview_writes_no_records_and_prints_nothing(fakes, tmp_path,
@@ -731,6 +811,9 @@ def test_planning_sets_key_and_store_cache(fakes, tmp_path):
         assert fakes.impact_mod.PLANNING.get() is ctx
     assert fakes.impact_mod.PLANNING.get() is None
     assert fakes.store.closed
+    # The parse cache must persist from the first plan, or every plan
+    # without records re-parses the whole project (A3).
+    assert fakes.store_mod.opened == [(_config().project_id, True)]
 
 
 def test_planning_without_key_uses_no_cache(fakes, tmp_path, monkeypatch):
@@ -893,13 +976,21 @@ def test_after_run_valid_scoped_verbose_reports_recorded(fakes, tmp_path,
     assert "ptest: -v selection: recorded 2 tests from 1 process" in err
 
 
-def test_after_run_cancelled_writes_nothing(fakes, tmp_path, capsys):
+def test_after_run_cancelled_keeps_failures_selected(fakes, tmp_path,
+                                                    capsys):
+    """D10/N4: a failure seen before the cancel keeps its test selected;
+    nothing is recorded and nothing is invalidated."""
     fakes.ingest_mod._run = _run_deps(
-        nodes=[("tests/test_a.py::test_x", "failed")])
-    _after(fakes, tmp_path, cancelled=True, verbose=True)
-    assert fakes.store.calls == []
+        nodes=[("tests/test_a.py::test_x", "failed"),
+               ("tests/test_a.py::test_y", "passed")])
+    _after(fakes, tmp_path, cancelled=True, verbose=True, argv_files=None)
+    kinds = _kinds(fakes.store.calls)
+    assert "update" not in kinds
+    assert "invalidate" not in kinds
+    assert ("mark_outcomes",
+            {"tests/test_a.py::test_x": "failed"}) in fakes.store.calls
     assert fakes.ingest_mod.cleaned == []
-    assert "not recorded" in capsys.readouterr().err
+    assert "not recorded: the run was cancelled" in capsys.readouterr().err
 
 
 def test_after_run_changed_inputs_marks_failed_only(fakes, tmp_path):
@@ -1051,6 +1142,42 @@ def test_self_audit_miss_plural(fakes, tmp_path, capsys):
     _after(fakes, tmp_path, execution="full", argv_files=None)
     assert "ptest: selection audit: 2 failing tests would not have been " \
         "selected" in capsys.readouterr().err
+
+
+def test_self_audit_unindexed_miss_is_not_claimed(fakes, tmp_path, capsys):
+    """A miss with no indexed test file (a src doctest) cannot be pinned.
+
+    Before the fix its '' digest made store.demote raise, which also lost
+    every other demotion and the audit counters, while the line still
+    claimed the tests were pinned.
+    """
+    fakes.ingest_mod._run = _run_deps(
+        nodes=[("tests/test_a.py::test_x", "failed"),
+               ("pkg/mod.py::pkg.mod.helper", "failed")])
+    fakes.planner_mod._decision = _decision()
+    fakes.planner_mod._misses = ("pkg/mod.py::pkg.mod.helper",
+                                 "tests/test_a.py::test_x")
+    fakes.source_mod._index = FakeIndex(
+        files={"tests/test_a.py": FakeFile("digest-a")})
+    _after(fakes, tmp_path, execution="full", argv_files=None)
+    assert ("demote",
+            {"tests/test_a.py::test_x": "digest-a"}) in fakes.store.calls
+    assert ("record_audit", 2, 2) in fakes.store.calls
+    assert "ptest: selection audit: 1 failing test would not have been " \
+        "selected" in capsys.readouterr().err
+
+
+def test_self_audit_only_unindexed_misses_prints_no_claim(fakes, tmp_path,
+                                                          capsys):
+    fakes.ingest_mod._run = _run_deps(
+        nodes=[("pkg/mod.py::pkg.mod.helper", "failed")])
+    fakes.planner_mod._decision = _decision()
+    fakes.planner_mod._misses = ("pkg/mod.py::pkg.mod.helper",)
+    fakes.source_mod._index = FakeIndex(files={})
+    _after(fakes, tmp_path, execution="full", argv_files=None)
+    assert "demote" not in _kinds(fakes.store.calls)
+    assert ("record_audit", 1, 1) in fakes.store.calls
+    assert "ptest: selection audit:" not in capsys.readouterr().err
 
 
 def test_self_audit_verbose_summary_without_misses(fakes, tmp_path, capsys):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -341,6 +342,10 @@ def test_ground_truth_argv_uses_ptest_with_result_json():
                                 full=True)
     assert full == ["uv", "run", "ptest", "--full", "--again",
                     "--result-json", "run-1.json"]
+    child = se.ground_truth_argv("uv run ptest", (), "run-1.json",
+                                 full=True, scope=("services/cp",))
+    assert child == ["uv", "run", "ptest", "--full", "--again",
+                     "--result-json", "run-1.json", "services/cp"]
 
 
 def test_ground_truth_argv_parses_through_ptest_cli():
@@ -424,6 +429,49 @@ def test_store_backup_restore_round_trip(tmp_path):
     se.restore_store(tmp_path / "other.db", None)
 
 
+def test_restore_drops_stale_journal_and_none_removes(tmp_path):
+    """A leftover journal would be replayed into the restored database."""
+    store = tmp_path / "selection.db"
+    store.write_bytes(b"store-bytes")
+    backup = se.backup_store(store, tmp_path / "bak")
+    journal = tmp_path / "selection.db-journal"
+    journal.write_bytes(b"hot")
+    se.restore_store(store, backup)
+    assert not journal.exists()
+    assert store.read_bytes() == b"store-bytes"
+    se.restore_store(store, None)
+    assert not store.exists()
+
+
+def test_backup_refuses_live_journal(tmp_path):
+    store = tmp_path / "selection.db"
+    store.write_bytes(b"store-bytes")
+    (tmp_path / "selection.db-journal").write_bytes(b"hot")
+    with pytest.raises(RuntimeError):
+        se.backup_store(store, tmp_path / "bak")
+
+
+def test_campaign_project_id_is_private_and_stable(tmp_path):
+    first = se.campaign_project_id(tmp_path, 7)
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    assert se.campaign_project_id(tmp_path, 7) == first
+    assert se.campaign_project_id(tmp_path, 8) != first
+
+
+def test_overlay_project_id_rewrites_only_the_id(tmp_path):
+    config = tmp_path / ".ptest.toml"
+    config.write_text('project_id = "' + "ab" * 16 + '"\n[runner]\nkind = "pytest"\n')
+    assert se.overlay_project_id(config, "cd" * 16) is True
+    assert config.read_text() == (
+        'project_id = "' + "cd" * 16 + '"\n[runner]\nkind = "pytest"\n')
+    assert se.overlay_project_id(tmp_path / "absent.toml", "cd" * 16) is False
+    config.write_text('[runner]\nkind = "pytest"\n')
+    with pytest.raises(RuntimeError):
+        se.overlay_project_id(config, "cd" * 16)
+    with pytest.raises(ValueError):
+        se.overlay_project_id(config, "not-hex")
+
+
 def test_run_mutant_wires_truth_baseline_misses_and_classes(
         tmp_path, monkeypatch):
     core = ("import random\n\nVALUE = 1\n\n\n"
@@ -504,6 +552,63 @@ def test_run_mutant_wires_truth_baseline_misses_and_classes(
     assert "unclassified (suggests: nondeterministic)" in text
 
 
+def test_campaign_never_touches_the_real_project_store(tmp_path, monkeypatch):
+    """Every scratch config and the store the campaign copies use the
+    campaign-private id; the real project's config and store stay as is."""
+    real_id = "ab" * 16
+    config_text = f'project_id = "{real_id}"\n'
+    core = "VALUE = 1\n\n\ndef add(first):\n    return first + VALUE\n"
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(core)
+    (project / ".ptest.toml").write_text(config_text)
+    out = tmp_path / "out"
+    campaign = se.campaign_project_id(project, 5)
+    store = tmp_path / "state" / "projects" / campaign / "selection.db"
+    real_store = tmp_path / "state" / "projects" / real_id / "selection.db"
+    real_store.parent.mkdir(parents=True)
+    real_store.write_bytes(b"shared-records")
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        (scratch / "pkg").mkdir(parents=True, exist_ok=True)
+        (scratch / "pkg" / "core.py").write_text(core)
+        (scratch / ".ptest.toml").write_text(config_text)
+        return scratch
+
+    class FakePlan:
+        kind, files, total = "selected", ("tests/test_a.py",), 10
+
+    seen_ids = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        seen_ids.append(Path(cwd, ".ptest.toml").read_text())
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"campaign-records")
+        export = cmd[cmd.index("--result-json") + 1]
+        Path(cwd, export).write_text("{}\n")
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "plan_v1", lambda top, root, changed: FakePlan())
+    monkeypatch.setattr(se, "plan_v2", lambda top, root, changed: FakePlan())
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda pid: tmp_path / "state" / "projects" / pid
+                        / "selection.db")
+    args = type("Args", (), {
+        "project": str(project), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": False})()
+    assert se.run_campaign(args) == 0
+    assert len(seen_ids) == 3
+    assert all(text == f'project_id = "{campaign}"\n' for text in seen_ids)
+    assert (project / ".ptest.toml").read_text() == config_text
+    assert real_store.read_bytes() == b"shared-records"
+    assert not store.exists()
+
+
 def test_median_of_three():
     assert se.median([3.0, 1.0, 2.0]) == 2.0
 
@@ -551,7 +656,7 @@ def test_campaign_writes_reports_when_benchmark_fails(
                         lambda root: (_ for _ in ()).throw(
                             RuntimeError("no store here")))
     monkeypatch.setattr(se, "benchmark_overhead",
-                        lambda project, out, ptest: (_ for _ in ()).throw(
+                        lambda project, out, ptest, pid: (_ for _ in ()).throw(
                             RuntimeError("benchmark run failed")))
     args = type("Args", (), {
         "project": str(project), "mutants": 1, "seed": 5,
@@ -775,6 +880,12 @@ def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
         assert top == created["m0001"]
         assert root == created["m0001"] / "services" / "cp"
         assert tuple(changed) == ("services/cp/pkg/core.py",)
+    # One seed --full run records the pristine tree, scoped to the child
+    # so siblings never run.
+    seed_cmd, seed_cwd = runs.pop(0)
+    assert seed_cwd == created["seed"]
+    assert seed_cmd[3:6] == ["--full", "--again", "--result-json"]
+    assert seed_cmd[7:] == ["services/cp"]
     # ptest runs from the scratch repo root with child-prefixed scopes,
     # options before paths so the export is produced.
     assert len(runs) == 2

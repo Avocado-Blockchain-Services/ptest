@@ -27,12 +27,8 @@ writer wins. Eviction is oldest-first with the newest run always kept;
 hitting the hard cap raises ``capacity-exceeded`` after one evict-and-
 retry.
 
-Contracts-barrier seam: the ``SELECTION_*`` constants, helpers and
-dataclasses below live in ``contracts.py`` once the section-12 barrier
-lands (T5 is the owner of record). Until then this module declares the
-identical frozen shapes locally — every name aliases ``contracts`` when
-the barrier is present. ``selection_ingest`` reuses these names from
-here, so the seam is a single conditional block.
+The ``SELECTION_*`` constants, helpers and dataclasses come from
+``contracts.py``, their single source of truth.
 """
 from __future__ import annotations
 
@@ -63,238 +59,26 @@ def _fail(code: str, message: str) -> None:
     raise C.Problem(code=code, message=message, phase=_PHASE, retryable=False)
 
 
-# -- contracts-barrier compatibility (single seam; see module docstring) -----
-
-_HAS_BARRIER = hasattr(C, "SELECTION_PROTOCOL")
-
-if _HAS_BARRIER:
-    DepVocabulary = C.DepVocabulary
-    ContextDeps = C.ContextDeps
-    RunBaseline = C.RunBaseline
-    NodeRecord = C.NodeRecord
-    FixtureRecord = C.FixtureRecord
-    DependencySnapshot = C.DependencySnapshot
-    SelectionStoreMeta = C.SelectionStoreMeta
-    RecordedNode = C.RecordedNode
-    RunDependencies = C.RunDependencies
-    selection_ids = C.selection_ids
-    selection_test_file = C.selection_test_file
-    selection_nodeid_safe = C.selection_nodeid_safe
-    selection_normalize_qualname = C.selection_normalize_qualname
-    selection_empty_context = C.selection_empty_context
-    selection_code_path = C.selection_code_path
-    selection_data_path = C.selection_data_path
-    selection_store_path = C.selection_store_path
-    selection_deps_path = C.selection_deps_path
-    selection_deps_pid = C.selection_deps_pid
-    selection_deselect_path = C.selection_deselect_path
-    SELECTION_STORE_MAX_BYTES = C.SELECTION_STORE_MAX_BYTES
-    SELECTION_STORE_TARGET_BYTES = C.SELECTION_STORE_TARGET_BYTES
-    SELECTION_MAX_RUNS = C.SELECTION_MAX_RUNS
-    SELECTION_OUTCOMES = C.SELECTION_OUTCOMES
-    SELECTION_FIXTURE_SCOPES = C.SELECTION_FIXTURE_SCOPES
-    SELECTION_DEPS_FORMAT = C.SELECTION_DEPS_FORMAT
-    SELECTION_DEPS_INFIX = C.SELECTION_DEPS_INFIX
-    SELECTION_DEPS_MAX_BYTES = C.SELECTION_DEPS_MAX_BYTES
-    SELECTION_DESELECT_FORMAT = C.SELECTION_DESELECT_FORMAT
-    SELECTION_DESELECT_SUFFIX = C.SELECTION_DESELECT_SUFFIX
-    SELECTION_DESELECT_MAX_BYTES = C.SELECTION_DESELECT_MAX_BYTES
-    SELECTION_DESELECT_MAX_IDS = C.SELECTION_DESELECT_MAX_IDS
-    SOURCE_INDEX_VERSION = C.SOURCE_INDEX_VERSION
-else:  # Local frozen shapes; replaced by the barrier, never diverged from it.
-    SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024
-    SELECTION_STORE_TARGET_BYTES = 48 * 1024 * 1024
-    SELECTION_MAX_RUNS = 256
-    SELECTION_OUTCOMES = frozenset({
-        "passed", "failed", "error", "skipped", "xfailed", "xpassed",
-        "unknown",
-    })
-    SELECTION_FIXTURE_SCOPES = frozenset({"class", "module", "package",
-                                          "session"})
-    SELECTION_DEPS_FORMAT = "ptest-selection-deps-v1"
-    SELECTION_DEPS_INFIX = ".deps-"
-    SELECTION_DEPS_MAX_BYTES = 64 * 1024 * 1024
-    SELECTION_DESELECT_FORMAT = "ptest-selection-deselect-v1"
-    SELECTION_DESELECT_SUFFIX = ".deselect"
-    SELECTION_DESELECT_MAX_BYTES = 16 * 1024 * 1024
-    SELECTION_DESELECT_MAX_IDS = 200000
-    SELECTION_PATH_MAX_BYTES = 4096
-    SELECTION_SKIP_DIRS = frozenset({
-        "node_modules", "__pycache__", "site-packages", "build", "dist",
-        "venv", ".tox", "htmlcov",
-    })
-    SELECTION_OUTPUT_DIRS = frozenset({
-        "build", "dist", "node_modules", ".venv", "venv", "__pycache__",
-        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "htmlcov",
-        ".hypothesis",
-    })
-    SOURCE_INDEX_VERSION = 2
-
-    def selection_ids(values: Iterable[int]) -> array:
-        return array("I", sorted(set(values)))
-
-    def selection_test_file(nodeid: str) -> str:
-        return nodeid.split("::", 1)[0]
-
-    def _selection_relpath_ok(path: object) -> bool:
-        if (not isinstance(path, str) or not path or "\x00" in path
-                or "\\" in path):
-            return False
-        if path.startswith("/") or re.match(r"^[A-Za-z]:", path):
-            return False
-        try:
-            if len(path.encode("utf-8")) > SELECTION_PATH_MAX_BYTES:
-                return False
-        except UnicodeEncodeError:
-            return False
-        return all(part not in ("", ".", "..") for part in path.split("/"))
-
-    def selection_code_path(path: object) -> bool:
-        if not _selection_relpath_ok(path) or not path.endswith(".py"):
-            return False
-        parts = path.split("/")
-        return not any(part.startswith(".")
-                       or part in SELECTION_SKIP_DIRS
-                       or part.endswith(".egg-info") for part in parts[:-1]) \
-            and not parts[-1].startswith(".")
-
-    def selection_data_path(path: object) -> bool:
-        if not _selection_relpath_ok(path):
-            return False
-        lowered = path.lower()
-        if lowered.endswith((".py", ".pyc", ".pyo")):
-            return False
-        return not any(part.startswith(".")
-                       or part in SELECTION_SKIP_DIRS
-                       or part in SELECTION_OUTPUT_DIRS
-                       or part.endswith(".egg-info")
-                       for part in path.split("/"))
-
-    def selection_nodeid_safe(nodeid: object) -> bool:
-        if (not isinstance(nodeid, str) or "::" not in nodeid
-                or "\x00" in nodeid):
-            return False
-        try:
-            if len(nodeid.encode("utf-8")) > 4096:
-                return False
-        except UnicodeEncodeError:
-            return False
-        return _selection_relpath_ok(nodeid.split("::", 1)[0])
-
-    def selection_normalize_qualname(qualname: object) -> str | None:
-        if (not isinstance(qualname, str) or not qualname
-                or "\x00" in qualname or len(qualname) > 1024):
-            return None
-        kept: list[str] = []
-        for part in qualname.split("."):
-            if not part or part.startswith("<"):
-                break
-            kept.append(part)
-        return ".".join(kept) or None
-
-    def selection_store_path(domain_root: Path, project_id: str) -> Path:
-        if (not isinstance(project_id, str)
-                or not re.fullmatch(r"[0-9a-f]{32}", project_id)):
-            raise ValueError("selection store needs a 32-hex project id")
-        return (Path(domain_root) / "projects" / project_id
-                / "selection.db")
-
-    def selection_deps_path(report_path: Path, pid: int) -> Path:
-        if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0):
-            raise ValueError("dependency file pid must be a positive int")
-        return Path(f"{report_path}{SELECTION_DEPS_INFIX}{pid}")
-
-    def selection_deps_pid(report_name: str, name: str) -> int | None:
-        prefix = report_name + SELECTION_DEPS_INFIX
-        if not name.startswith(prefix):
-            return None
-        digits = name[len(prefix):]
-        if (not 1 <= len(digits) <= 10 or not digits.isascii()
-                or not digits.isdigit() or digits[0] == "0"):
-            return None
-        return int(digits)
-
-    def selection_deselect_path(report_path: Path) -> Path:
-        return Path(f"{report_path}{SELECTION_DESELECT_SUFFIX}")
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class DepVocabulary:
-        paths: tuple[str, ...]
-        functions: tuple[tuple[int, str], ...]
-        fixtures: tuple[tuple[str, str, str], ...]
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class ContextDeps:
-        functions: array
-        modules: array
-        data: array
-        opaque: bool
-
-    def selection_empty_context(*, opaque: bool = False) -> ContextDeps:
-        return ContextDeps(functions=array("I"), modules=array("I"),
-                           data=array("I"), opaque=opaque)
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class RunBaseline:
-        run_id: str
-        recorded_at: float
-        compatibility: str
-        digests: Mapping[int, str]
-        ambient: ContextDeps
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class NodeRecord:
-        nodeid: str
-        test_file: str
-        outcome: str
-        run_id: str
-        deps: ContextDeps
-        fixtures: array
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class FixtureRecord:
-        fixture: int
-        run_id: str
-        deps: ContextDeps
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class DependencySnapshot:
-        vocabulary: DepVocabulary
-        runs: Mapping[str, RunBaseline]
-        nodes: Mapping[str, NodeRecord]
-        fixtures: Mapping[int, FixtureRecord]
-        demotions: Mapping[str, str]
-
-    @dataclass(frozen=True, slots=True)
-    class SelectionStoreMeta:
-        size_bytes: int
-        nodes: int
-        runs: int
-        newest_recorded_at: float | None
-        python: tuple[int, int] | None
-        inactive_reason: str | None
-        audit_checked: int
-        audit_misses: int
-        demoted: int
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class RecordedNode:
-        nodeid: str
-        outcome: str
-        deps: ContextDeps
-        fixtures: array
-
-    @dataclass(frozen=True, slots=True, eq=False)
-    class RunDependencies:
-        vocabulary: DepVocabulary
-        nodes: Mapping[str, RecordedNode]
-        fixtures: Mapping[int, ContextDeps]
-        ambient: ContextDeps
-        complete: bool
-        recording: bool
-        python: tuple[int, int] | None
-        inactive_reason: str | None
-        notes: tuple[str, ...]
+from .contracts import (  # noqa: E402  re-exported for callers
+    DepVocabulary,
+    ContextDeps,
+    RunBaseline,
+    NodeRecord,
+    FixtureRecord,
+    DependencySnapshot,
+    SelectionStoreMeta,
+    RecordedNode,
+    RunDependencies,
+    selection_ids,
+    selection_test_file,
+    selection_empty_context,
+    SELECTION_STORE_MAX_BYTES,
+    SELECTION_STORE_TARGET_BYTES,
+    SELECTION_MAX_RUNS,
+    SELECTION_OUTCOMES,
+    SELECTION_FIXTURE_SCOPES,
+    SOURCE_INDEX_VERSION,
+)
 
 
 __all__ = [

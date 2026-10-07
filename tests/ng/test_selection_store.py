@@ -537,6 +537,40 @@ def test_corrupt_store_rebuilds_after_remove(domain_factory):
         fresh.close()
 
 
+def test_engine_rebuilds_damaged_store_on_write_open(domain_factory):
+    """A damaged store would pin every later run to the static rule."""
+    from ptest import selection_engine as E
+    domain = domain_factory()
+    _open(domain).close()
+    db = _db_path(domain)
+    with open(db, "r+b") as handle:
+        handle.write(b"not a database at all" * 64)
+        handle.truncate()
+    assert E._open_store(domain, PROJ, create=False) is None
+    store = E._open_store(domain, PROJ, create=True)
+    assert store is not None
+    try:
+        assert store.snapshot().nodes == {}
+    finally:
+        store.close()
+
+
+def test_engine_keeps_store_with_unknown_schema(domain_factory):
+    """Another ptest version's store is not damaged; never remove it."""
+    import sqlite3
+    from ptest import selection_engine as E
+    domain = domain_factory()
+    _open(domain).close()
+    db = _db_path(domain)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE kv SET value = '999' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+    before = os.stat(db).st_ino
+    assert E._open_store(domain, PROJ, create=True) is None
+    assert os.stat(db).st_ino == before
+
+
 def test_remove_store_never_follows_links(domain_factory, tmp_path):
     domain = domain_factory()
     assert S.remove_store(domain, PROJ) is False

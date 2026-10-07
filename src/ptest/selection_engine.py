@@ -106,7 +106,26 @@ def _open_store_reason(domain, project_id, *, create):
         if getattr(exc, "code", None) == "state-unavailable" and str(
                 getattr(exc, "message", exc)).endswith("does not exist"):
             return None, True
+        if create and _store_damaged(exc):
+            # The store is a derived cache: a damaged file would otherwise
+            # pin every later run to the static rule. A store from another
+            # schema version is not damaged and is never removed.
+            try:
+                if store_mod.remove_store(domain, project_id):
+                    return store_mod.open_store(
+                        domain, project_id, create=True), False
+            except Exception:
+                pass
         return None, False
+
+
+def _store_damaged(exc: BaseException) -> bool:
+    """True for a store SQLite cannot read, not for an unknown schema."""
+    if getattr(exc, "code", None) != "coordinator-corrupt":
+        return False
+    message = str(getattr(exc, "message", exc))
+    return message.endswith(" is corrupt") or message.endswith(
+        " is unreadable") or message.endswith(" cannot be initialised")
 
 
 # --- static reasons (frozen, design 2.8) ------------------------------------
@@ -134,8 +153,9 @@ def planning(domain: C.DomainPaths, config: C.Config):
     """Set ``impact.PLANNING`` to the key and store-as-cache for one plan.
 
     A no-op when the planner has no ``PLANNING`` slot (a stubbed or older
-    impact): routing and notes stay byte-identical to 0.4. Never creates
-    a store and never raises.
+    impact): routing and notes stay byte-identical to 0.4. Creates the
+    store when absent so the parse cache persists from the first plan (an
+    empty store still plans as "no dependency records yet"); never raises.
     """
     try:
         impact = _impact()
@@ -152,7 +172,7 @@ def planning(domain: C.DomainPaths, config: C.Config):
         key = None
     cache = None
     if key is not None:
-        cache = _open_store(domain, config.project_id, create=False)
+        cache = _open_store(domain, config.project_id, create=True)
     try:
         context = C.PlanningContext(key=key, cache=cache)
     except Exception:
@@ -185,11 +205,16 @@ _LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "pyproject.toml",
               "setup.py", "setup.cfg", "pytest.ini", "tox.ini",
               ".ptest.toml", ".python-version")
 
-_FILE_READ_CAP = 4 * 1024 * 1024
+_FILE_READ_CAP = 64 * 1024 * 1024
 
 
-def _read_bounded(path: Path, cap: int) -> bytes | None:
-    """Read a regular non-link file up to ``cap`` bytes; None when absent."""
+def _digest_bounded(key: bytes, path: Path, cap: int) -> str | None:
+    """Keyed digest of a whole regular non-link file, streamed.
+
+    None when the file is absent or unreadable; ``"?"`` when it is larger
+    than ``cap`` bytes. A digest never covers only a prefix: a change past
+    the cap must not leave the digest equal (N1).
+    """
     try:
         stamp = os.lstat(path)
     except OSError:
@@ -197,19 +222,23 @@ def _read_bounded(path: Path, cap: int) -> bytes | None:
     if not stat.S_ISREG(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
         return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
-        chunks = []
-        remaining = cap
-        while remaining > 0:
-            piece = os.read(fd, min(65536, remaining))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        mac = hmac.new(key, digestmod=hashlib.sha256)
+        total = 0
+        while True:
+            piece = os.read(fd, 65536)
             if not piece:
                 break
-            chunks.append(piece)
-            remaining -= len(piece)
-        return b"".join(chunks)
+            total += len(piece)
+            if total > cap:
+                return "?"
+            mac.update(piece)
+        return mac.hexdigest()
     except OSError:
         return None
     finally:
@@ -217,6 +246,14 @@ def _read_bounded(path: Path, cap: int) -> bytes | None:
             os.close(fd)
         except OSError:
             pass
+
+
+def _compat_digest(digest: str) -> str:
+    """An oversize input never matches a stored fingerprint (records unusable,
+    static rule), because a prefix cannot prove the file unchanged."""
+    if digest == "?":
+        return "?" + os.urandom(16).hex()
+    return digest
 
 
 def compatibility_fingerprint(key: bytes, config: C.Config,
@@ -230,10 +267,10 @@ def compatibility_fingerprint(key: bytes, config: C.Config,
     root = Path(project_root)
     entries: list[list[str]] = []
     for name in _LOCKFILES:
-        raw = _read_bounded(root / name, _FILE_READ_CAP)
-        if raw is None:
+        digest = _digest_bounded(key, root / name, _FILE_READ_CAP)
+        if digest is None:
             continue
-        entries.append([name, C.selection_file_digest(key, raw)])
+        entries.append([name, _compat_digest(digest)])
     try:
         reqs = sorted(path.name for path in root.glob("requirements*.txt"))
     except OSError:
@@ -241,10 +278,10 @@ def compatibility_fingerprint(key: bytes, config: C.Config,
     for name in reqs:
         if name in _LOCKFILES:
             continue
-        raw = _read_bounded(root / name, _FILE_READ_CAP)
-        if raw is None:
+        digest = _digest_bounded(key, root / name, _FILE_READ_CAP)
+        if digest is None:
             continue
-        entries.append([name, C.selection_file_digest(key, raw)])
+        entries.append([name, _compat_digest(digest)])
     runner = config.runner
     payload = {
         "protocol": C.SELECTION_PROTOCOL,
@@ -325,15 +362,15 @@ def _data_digest(key: bytes, root: Path, rel: str) -> str:
         return "?"
     if any(part in ("", ".", "..") for part in rel.split("/")):
         return "?"
-    raw = _read_bounded(root / rel, C.SELECTION_DATA_MAX_BYTES)
-    if raw is None:
+    digest = _digest_bounded(key, root / rel, C.SELECTION_DATA_MAX_BYTES)
+    if digest is None:
         try:
             if not (root / rel).exists():
                 return ""
         except OSError:
             pass
         return "?"
-    return C.selection_file_digest(key, raw)
+    return digest
 
 
 def _plan_inputs(index, snapshot, compatibility, changed, test_roots,
@@ -510,6 +547,25 @@ def _full_text(config: C.Config, decision) -> str | None:
     return None
 
 
+def _bindable_deselect(deselect: tuple) -> tuple[tuple[str, ...], int]:
+    """Deselect ids the run request accepts, and how many were given up (D7).
+
+    A file holding any id that cannot be bound exactly keeps all of its
+    tests; over the id cap nothing is deselected. Both only widen the run,
+    so falling back is never an error (G2).
+    """
+    unsafe_files = {C.selection_test_file(nodeid) if isinstance(nodeid, str)
+                    else None
+                    for nodeid in deselect
+                    if not C.selection_nodeid_safe(nodeid)}
+    kept = tuple(nodeid for nodeid in deselect
+                 if C.selection_nodeid_safe(nodeid)
+                 and C.selection_test_file(nodeid) not in unsafe_files)
+    if len(kept) > C.SELECTION_DESELECT_MAX_IDS:
+        kept = ()
+    return kept, len(deselect) - len(kept)
+
+
 def _decision_impact(static, config: C.Config, decision, meta):
     files = tuple(getattr(decision, "files", ()) or ())
     details = _detail_lines(decision, meta)
@@ -530,9 +586,11 @@ def _decision_impact(static, config: C.Config, decision, meta):
                         reached=int(getattr(decision, "reached", 0) or 0),
                         units=tuple(getattr(decision, "units", ()) or ()),
                         details=details, static_reason="")
+    deselect, restored = _bindable_deselect(
+        tuple(getattr(decision, "deselect", ()) or ()))
     return _replace(static, kind="selected", engine="dynamic", files=files,
-                    deselect=tuple(getattr(decision, "deselect", ()) or ()),
-                    tests=int(getattr(decision, "selected", 0) or 0),
+                    deselect=deselect,
+                    tests=int(getattr(decision, "selected", 0) or 0) + restored,
                     reached=int(getattr(decision, "reached", 0) or 0),
                     units=tuple(getattr(decision, "units", ()) or ()),
                     details=details, static_reason="",
@@ -705,16 +763,20 @@ def _after_run(*, domain, config, project_id, run_id, report_path,
     # Private ingest files are owned by operations' outer finally
     # (engine.cleanup, next to stack_dumps.cleanup), so every outcome —
     # including ones that never reach here — removes them.
-    if cancelled:
-        if verbose:
-            progress.emit(progress.format_selection_not_recorded(
-                "the run was cancelled"), quiet=quiet)
-        return
     try:
         run = ingest.read_run(Path(report_path), run_id=run_id,
                               expected_workers=int(expected_workers))
     except Exception:
         run = None
+    if cancelled:
+        # D10: failures seen before the cancel stay selected (N4). Prior
+        # records stay valid against their own baselines, so nothing is
+        # invalidated: a cancelled full run must not force the next
+        # changed run to the full suite.
+        _fallbacks(run, domain, config, project_id, argv_files,
+                   verbose, quiet, reason="the run was cancelled",
+                   invalidate=False)
+        return
     if run is None:
         _fallbacks(None, domain, config, project_id, argv_files,
                    verbose, quiet,
@@ -791,7 +853,7 @@ def _not_recorded_reason(valid_handoff: bool, unchanged_inputs: bool,
 
 
 def _fallbacks(run, domain, config, project_id, argv_files, verbose, quiet,
-               *, reason: str) -> None:
+               *, reason: str, invalidate: bool = True) -> None:
     """Widen-only writes for a run that records nothing (design D10)."""
     store = _open_store(domain, project_id, create=False)
     if store is None:
@@ -808,7 +870,8 @@ def _fallbacks(run, domain, config, project_id, argv_files, verbose, quiet,
                 store.mark_outcomes(failed)
             except Exception:
                 pass
-        if run is None or not getattr(run, "complete", False):
+        if invalidate and (run is None
+                           or not getattr(run, "complete", False)):
             try:
                 store.invalidate(argv_files)
             except Exception:
@@ -871,7 +934,8 @@ def _current_digests(key: bytes, project_root, run) -> dict:
             digests[rel] = (C.selection_file_digest(key, raw)
                             if raw is not None else None)
     for rel in _run_data_paths(run):
-        digests[rel] = _data_digest(key, root, rel)
+        digest = _data_digest(key, root, rel)
+        digests[rel] = None if digest == "?" else digest
     return digests
 
 
@@ -953,15 +1017,24 @@ def _self_audit(run, store, key, project_root, config, compatibility,
     for nodeid in misses:
         entry = files.get(C.selection_test_file(nodeid)) \
             if hasattr(files, "get") else None
-        demotions[nodeid] = getattr(entry, "digest", "") or ""
-    try:
-        if demotions:
+        digest = getattr(entry, "digest", "") or ""
+        # A miss outside every indexed test file (a doctest in a source
+        # module) has nothing to pin; the planner never selects it anyway.
+        if isinstance(digest, str) and digest:
+            demotions[nodeid] = digest
+    demoted = 0
+    if demotions:
+        try:
             store.demote(demotions)
+            demoted = len(demotions)
+        except Exception:
+            demoted = 0
+    try:
         store.record_audit(len(failed), len(misses))
     except Exception:
         pass
-    if misses:
-        progress.emit(progress.format_selection_audit(len(misses)),
+    if demoted:
+        progress.emit(progress.format_selection_audit(demoted),
                       quiet=quiet)
     if verbose:
         progress.emit(progress.format_selection_vaudit(

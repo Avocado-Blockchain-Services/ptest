@@ -8,7 +8,14 @@ misses classified by the spec section 9 residual risks (R1-R9).
 Planning needs the merged tree (v1: impact.plan with conftest_edges
 from T1; v2: selection_engine.preview from T1-T5); config/domain
 loading, the subprocess ground-truth/baseline runs and the store
-backup/restore all use base-tree APIs. Every pure-logic unit in this
+backup/restore all use base-tree APIs.
+
+Isolation: every scratch worktree gets a campaign-private ``project_id``
+(``campaign_project_id``), so planning, recording and the store backup
+and restore touch only ``projects/<campaign id>/selection.db``. The
+project's real store, shared by every checkout and agent, is never read
+or written, while runs still wait in the machine-wide queue. A seed
+``--full`` run records the pristine tree before the first mutant. Every pure-logic unit in this
 module is stdlib-only and covered by tests/ng/test_selection_eval.py.
 The A1-A5 campaign itself is never executed in tests.
 """
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import random
 import re
@@ -708,10 +716,12 @@ def _run(cmd, cwd, timeout=600):
 
 
 RESULT_EXPORT_PREFIX = "selection-eval-run-"
+#: One ptest run may wait in the machine-wide queue behind other work.
+_RUN_TIMEOUT_S = 4 * 3600
 
 
 def ground_truth_argv(ptest_cmd: str, files: tuple, export_name: str,
-                      full: bool) -> list:
+                      full: bool, scope: tuple = ()) -> list:
     """Build ``ptest --result-json NAME <files>`` (or ``--full --again``) argv.
 
     Options must precede the test paths: ptest's ``_parse_execution``
@@ -725,7 +735,10 @@ def ground_truth_argv(ptest_cmd: str, files: tuple, export_name: str,
         # already-passed tree, which `ptest --full` would skip as
         # "already verified"; --again forces the fresh run the campaign
         # needs for flaky/pre-existing failure marking.
-        return base + ["--full", "--again", "--result-json", export_name]
+        # ``scope`` names a monorepo child so a full run never spreads
+        # to its siblings.
+        return base + ["--full", "--again", "--result-json", export_name,
+                       *list(scope)]
     return base + ["--result-json", export_name, *list(files)]
 
 
@@ -866,24 +879,50 @@ def plan_v2(top: Path, project_root: Path, changed: tuple):
                                     config, tuple(changed))
 
 
-def store_db_path(project_root: Path) -> Path:
-    """Locate ``<state>/projects/<id>/selection.db`` without creating it."""
-    domain, config = _planning_domain_config(project_root)
-    project_id = config.project_id
-    try:
-        from ptest import contracts as contracts_mod  # noqa: lazy import
-        locate = getattr(contracts_mod, "selection_store_path", None)
-        if callable(locate):
-            return Path(locate(domain.root, project_id))
-    except ImportError:
-        pass
-    return Path(domain.root) / "projects" / project_id / "selection.db"
+def campaign_project_id(project: Path, seed: int) -> str:
+    """The campaign-private 32-hex project id (stable per project and seed)."""
+    text = f"selection-eval:{Path(project).resolve()}:{int(seed)}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def overlay_project_id(config_path: Path, project_id: str) -> bool:
+    """Point a scratch config at the campaign store; False when absent.
+
+    Only a scratch worktree's ``.ptest.toml`` is ever rewritten. A config
+    without ``project_id`` cannot be isolated and fails loud.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", project_id):
+        raise ValueError("campaign project id must be 32 hex")
+    if not config_path.is_file() or config_path.is_symlink():
+        return False
+    text = config_path.read_text(encoding="utf-8")
+    updated, count = re.subn(r'(?m)^project_id\s*=.*$',
+                             f'project_id = "{project_id}"', text)
+    if count != 1:
+        raise RuntimeError(
+            f"{config_path} needs exactly one project_id to isolate")
+    config_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def store_db_path(project_id: str) -> Path:
+    """``<state>/projects/<id>/selection.db`` without creating it."""
+    from ptest import contracts as contracts_mod  # noqa: lazy import
+    from ptest import platform as platform_mod  # noqa: lazy import
+    domain = platform_mod.domain_paths(None)
+    return Path(contracts_mod.selection_store_path(domain.root, project_id))
+
+
+def _journal(store_db: Path) -> Path:
+    return store_db.with_name(store_db.name + "-journal")
 
 
 def backup_store(store_db: Path, backup_dir: Path) -> Path | None:
-    """Copy the store aside; None when there is nothing to isolate."""
+    """Copy the campaign store aside; None when there is nothing to keep."""
     if not store_db.is_file() or store_db.is_symlink():
         return None
+    if _journal(store_db).exists():
+        raise RuntimeError(f"{store_db} has a live journal; not copying it")
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = backup_dir / (store_db.name + ".bak")
     shutil.copy2(store_db, backup)
@@ -891,11 +930,44 @@ def backup_store(store_db: Path, backup_dir: Path) -> Path | None:
 
 
 def restore_store(store_db: Path, backup: Path | None) -> None:
-    """Restore a backup taken by backup_store; no-op when backup is None."""
+    """Restore the campaign store from backup_store; none removes it.
+
+    A stale journal beside a replaced database would be replayed into it
+    as a hot journal, so it goes first. Only ever called on the
+    campaign-private store (no other process knows its project id).
+    """
+    journal = _journal(store_db)
+    if journal.is_file() and not journal.is_symlink():
+        journal.unlink()
     if backup is None:
+        if store_db.is_file() and not store_db.is_symlink():
+            store_db.unlink()
         return
     store_db.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, store_db)
+
+
+def isolate_scratch(scratch: Path, prefix: str, project_id: str) -> Path:
+    """The scratch project dir, its config pointed at the campaign store."""
+    workdir = scratch if not prefix else scratch / prefix
+    overlay_project_id(workdir / ".ptest.toml", project_id)
+    return workdir
+
+
+def seed_records(args, project: Path, out: Path, project_id: str) -> tuple:
+    """Record the pristine tree once (the store every mutant plans against).
+
+    Returns the seed run's failing node ids; failures do not stop the
+    campaign (passing tests still record), they are reported.
+    """
+    prefix = _project_prefix(Path(project))
+    scratch = create_scratch(project, out, "seed")
+    try:
+        isolate_scratch(scratch, prefix, project_id)
+        return _ptest_failures(args.ptest, scratch, (), True, "seed",
+                               scope=(prefix,) if prefix else ())
+    finally:
+        remove_scratch(project, scratch)
 
 
 def overlay_dynamic(config_path: Path, value: bool) -> bytes:
@@ -914,7 +986,8 @@ def overlay_dynamic(config_path: Path, value: bool) -> bytes:
     return previous
 
 
-def benchmark_overhead(project: Path, out: Path, ptest_cmd: str) -> dict:
+def benchmark_overhead(project: Path, out: Path, ptest_cmd: str,
+                       project_id: str | None = None) -> dict:
     """Full run with dynamic=false vs true, back to back, 3x; medians."""
     repo = project
     # A scratch worktree checks out the whole repo at its root, so for a
@@ -926,6 +999,8 @@ def benchmark_overhead(project: Path, out: Path, ptest_cmd: str) -> dict:
     scratch = create_scratch(repo, out, "overhead")
     try:
         workdir = scratch if not prefix else scratch / prefix
+        if project_id is not None:
+            isolate_scratch(scratch, prefix, project_id)
         config_path = workdir / ".ptest.toml"
         if not config_path.is_file():
             raise RuntimeError(
@@ -1021,11 +1096,12 @@ def indicators_for(mutated_text: str) -> dict:
 
 
 def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
-                    full: bool, label: str) -> tuple:
+                    full: bool, label: str, scope: tuple = ()) -> tuple:
     """Run one file set through ptest and return the failing node ids."""
     export_name = f"{RESULT_EXPORT_PREFIX}{label}-{scratch.name}.json"
-    done = _run(ground_truth_argv(ptest_cmd, tuple(files), export_name, full),
-                cwd=scratch)
+    done = _run(ground_truth_argv(ptest_cmd, tuple(files), export_name, full,
+                                  scope=scope),
+                cwd=scratch, timeout=_RUN_TIMEOUT_S)
     return failing_nodeids(scratch / export_name, scratch,
                            done.returncode != 0)
 
@@ -1079,7 +1155,7 @@ def _scope_node(prefix: str, nodeid: str) -> str:
 
 
 def _run_mutant(args, project: Path, out: Path, store_db, backup,
-                mutant: Mutant) -> MutantRecord:
+                mutant: Mutant, project_id: str) -> MutantRecord:
     """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
     if store_db is not None:
         restore_store(store_db, backup)  # pristine store for planning
@@ -1089,7 +1165,8 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
     # scratch repo root with child-prefixed scopes (monorepo rule).
     prefix = _project_prefix(Path(project))
     scratch = create_scratch(project, out, mutant.mutant_id)
-    workdir = scratch if not prefix else scratch / prefix
+    workdir = isolate_scratch(scratch, prefix, project_id)
+    scope = (prefix,) if prefix else ()
     baseline_scratch = None
     try:
         target = workdir / mutant.site.path
@@ -1124,10 +1201,13 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         # from the scratch repo root.
         baseline_scratch = create_scratch(
             project, out, mutant.mutant_id + "-baseline")
+        isolate_scratch(baseline_scratch, prefix, project_id)
         baseline_failed = _ptest_failures(
-            args.ptest, baseline_scratch, files, kind == "full", "baseline")
+            args.ptest, baseline_scratch, files, kind == "full", "baseline",
+            scope=scope)
         mutant_failed = _ptest_failures(
-            args.ptest, scratch, files, kind == "full", "ground-truth")
+            args.ptest, scratch, files, kind == "full", "ground-truth",
+            scope=scope)
         # Pytest ids are child-relative under a nested child; compare,
         # record and resolve them as repo-root scopes (spec 6.7 misses
         # are defined over the same file set the plans select).
@@ -1174,26 +1254,34 @@ def run_campaign(args) -> int:
     tree = read_tree_files(project)
     sites = [site for site in collect_sites(tree) if site.site_class in args.classes]
     mutants = sample_mutants(sites, args.mutants, args.seed)
+    project_id = campaign_project_id(project, args.seed)
     try:
-        store_db = store_db_path(project)
-    except RuntimeError:
+        store_db = store_db_path(project_id)
+    except Exception:
         store_db = None
+    if store_db is not None:
+        restore_store(store_db, None)  # a fresh store for this campaign
+    seed_failed = seed_records(args, project, out, project_id)
     backup = (backup_store(store_db, out / "scratch" / "store-backup")
               if store_db is not None else None)
     try:
-        records = [_run_mutant(args, project, out, store_db, backup, mutant)
+        records = [_run_mutant(args, project, out, store_db, backup, mutant,
+                               project_id)
                    for mutant in mutants]
     finally:
         if store_db is not None:
-            restore_store(store_db, backup)
-            if backup is not None and backup.is_file():
-                backup.unlink()
+            restore_store(store_db, None)
+        if backup is not None and backup.is_file():
+            backup.unlink()
+    if seed_failed:
+        print(f"seed run: {len(seed_failed)} failing tests on the pristine "
+              f"tree (not recorded as passing)", file=sys.stderr)
     # The benchmark stays after the mutant loop (mutants are measured
     # against the pristine store), but a benchmark failure must not
     # discard the records already computed: write the reports with
     # empty overhead first, then re-raise.
     try:
-        overhead = (benchmark_overhead(project, out, args.ptest)
+        overhead = (benchmark_overhead(project, out, args.ptest, project_id)
                     if args.benchmark_overhead else {})
     except Exception:
         _write_reports(out, EvalReport(seed=args.seed,

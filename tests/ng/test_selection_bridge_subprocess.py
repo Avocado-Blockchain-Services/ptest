@@ -49,14 +49,6 @@ _SCRUB = (
     "PTEST_SELECTION_RECORD", "PTEST_SELECTION_DESELECT",
 )
 
-_HAS_BARRIER = hasattr(__import__("ptest.contracts", fromlist=["x"]), "SELECTION_PROTOCOL")
-_NEEDS_BARRIER = pytest.mark.skipif(
-    not _HAS_BARRIER, reason="awaiting contracts barrier (T5)")
-
-_INGEST_SPEC = importlib.util.find_spec("ptest.selection_ingest")
-_NEEDS_INGEST = pytest.mark.skipif(
-    _INGEST_SPEC is None, reason="awaiting selection_ingest (T3)")
-
 _XDIST_SPEC = importlib.util.find_spec("xdist")
 _NEEDS_XDIST = pytest.mark.skipif(
     _XDIST_SPEC is None, reason="pytest-xdist is not installed")
@@ -201,7 +193,6 @@ def test_bridge_selection_literals_match_recorder():
     assert bridge._SELECTION_TOOL_NAME == recorder._TOOL_NAME
 
 
-@_NEEDS_BARRIER
 def test_bridge_selection_literals_match_contracts():
     from ptest import contracts as C
 
@@ -562,7 +553,6 @@ def test_shadowed_bridge_runs_unrecorded(tmp_path):
     assert payload["nodes"] == []
 
 
-@_NEEDS_INGEST
 def test_ingest_accepts_real_serial_output(tmp_path):
     """Cross-check: T3 ingest reads the real serial file as complete."""
     from ptest import selection_ingest
@@ -575,7 +565,6 @@ def test_ingest_accepts_real_serial_output(tmp_path):
     assert run.recording is True
 
 
-@_NEEDS_INGEST
 @_NEEDS_XDIST
 def test_ingest_accepts_real_xdist_output(tmp_path):
     """Cross-check: T3 ingest reads the real xdist files as complete."""

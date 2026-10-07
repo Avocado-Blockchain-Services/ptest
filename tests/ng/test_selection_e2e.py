@@ -14,16 +14,9 @@ single test file every narrowing selection would trip the D8
 narrowing case could be demonstrated. Grouped files still exercise
 node-level deselect inside partially selected files.
 
-Every case needs the merged T1-T4 modules
-(``ptest.source_index``, ``ptest.selection_planner``,
-``ptest.selection_store``, ``ptest.selection_ingest``,
-``ptest.runtime.selection_recorder``) plus ``impact.PLANNING``; until
-then the module skips. The orchestrator confirms 0 skipped after the
-merge.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import tomllib
@@ -33,22 +26,6 @@ import pytest
 
 import support
 
-
-def _ready() -> bool:
-    for name in ("ptest.source_index", "ptest.selection_planner",
-                 "ptest.selection_store", "ptest.selection_ingest",
-                 "ptest.runtime.selection_recorder"):
-        if importlib.util.find_spec(name) is None:
-            return False
-    try:
-        from ptest import impact
-    except ImportError:
-        return False
-    return hasattr(impact, "PLANNING")
-
-
-pytestmark = pytest.mark.skipif(
-    not _ready(), reason="selection e2e: awaiting T1-T4 integration")
 
 _FULL_TIMEOUT = 120
 _CHANGED_TIMEOUT = 90

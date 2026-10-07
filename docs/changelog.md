@@ -15,7 +15,8 @@
   prints `… → N of M test files (static: <reason> · D direct · V via
   importers)` (G6). A changed green, dynamic or static, is iteration only;
   only `ptest --full` completes the change. Disable with `[selection]
-  dynamic = false` (default true).
+  dynamic = false` (default true). ptest 0.4.10 and older reject that key,
+  so a team on mixed versions upgrades before committing it.
 - Self-audit on every full run (G4): ptest checks whether the selector
   would have missed any test that failed and prints `ptest: selection
   audit: N failing tests would not have been selected — they now run
