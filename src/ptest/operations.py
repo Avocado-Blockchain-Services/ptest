@@ -361,6 +361,89 @@ def _policy_digest(config: C.Config) -> str:
     return hashlib.sha256(repr(config.selection).encode()).hexdigest()
 
 
+def _selection_engine():
+    """Dynamic-selection engine, imported lazily at the execution boundary."""
+    from . import selection_engine
+    return selection_engine
+
+
+def _selection_prepare_run(domain: C.DomainPaths, config: C.Config,
+                           request: C.RunRequest, prepared: C.PreparedRun,
+                           report_binding, run_id: str) -> C.PreparedRun:
+    """Add the dependency-recording env and deselect binding (design D9).
+
+    A binding write failure still runs with every test in the argv
+    files; recording problems never fail the run.
+    """
+    try:
+        engine = _selection_engine()
+    except ImportError:
+        return prepared
+    try:
+        env_updates, _binding = engine.prepare_run(
+            domain, config, request, report_binding.path, run_id)
+    except Exception:
+        return prepared
+    if not env_updates:
+        return prepared
+    return replace(prepared,
+                   env_updates=prepared.env_updates + tuple(env_updates))
+
+
+def _selection_argv_files(request: C.RunRequest) -> tuple[str, ...]:
+    """Test-file tokens of a scoped argv for record invalidation."""
+    files = []
+    for token in tuple(getattr(request, "argv", ()) or ()):
+        if not isinstance(token, str):
+            continue
+        path = token.split("::", 1)[0]
+        base = path.rsplit("/", 1)[-1]
+        if ((base.startswith("test_") and base.endswith(".py"))
+                or base.endswith("_test.py")):
+            files.append(path)
+    return tuple(files)
+
+
+def _selection_after_run(domain: C.DomainPaths, config: C.Config,
+                         checkout: C.CheckoutIdentity,
+                         request: C.RunRequest, plan: C.Plan,
+                         run_id: str, report_binding,
+                         grant, input_before: C.InputSnapshot,
+                         input_after: C.InputSnapshot,
+                         consumed_report: bool, report_reason,
+                         cancelled: bool, guard_problem,
+                         setup_failed: bool) -> None:
+    """Ingest one native pytest attempt into the selection store.
+
+    Never raises and never changes the run outcome; the audit and
+    ``-v`` lines print before the end line.
+    """
+    try:
+        engine = _selection_engine()
+    except ImportError:
+        return
+    try:
+        valid_handoff = bool(consumed_report) and report_reason is None
+        unchanged = (input_after is not None
+                     and input_after.digest is not None
+                     and _source_invalidation(input_before,
+                                              input_after) is None)
+        argv_files = (None if plan.execution == "full"
+                      else _selection_argv_files(request))
+        engine.after_run(
+            domain=domain, config=config, project_id=checkout.project_id,
+            run_id=run_id, report_path=report_binding.path,
+            project_root=checkout.root, expected_workers=grant.slots,
+            execution=plan.execution, valid_handoff=valid_handoff,
+            unchanged_inputs=unchanged,
+            cancelled=bool(cancelled),
+            guard_failed=guard_problem is not None,
+            setup_failed=bool(setup_failed), argv_files=argv_files,
+            verbose=bool(request.verbose), quiet=bool(request.quiet))
+    except Exception:
+        pass
+
+
 def _advanced_plan(config: C.Config, request: C.RunRequest,
                    snapshot: C.InputSnapshot,
                    history_view: C.HistoryView,
@@ -3413,6 +3496,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
             )
             prepared = replace(prepared, report_path=report_binding.path,
                                env_updates=prepared.env_updates + report_env)
+            if config.runner.kind is C.RunnerKind.PYTEST:
+                # Dependency recording (D9) and the deselect binding (D7):
+                # env only, never a failure.
+                prepared = _selection_prepare_run(
+                    domain, config, request, prepared, report_binding,
+                    grant.run_id)
         if signals.number is not None:
             if scheduler.cancel_pending(domain, ticket, owner):
                 return _finish(_export(domain, checkout, request, _cancel_result(
@@ -3942,6 +4031,22 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         "report-invalid",
                         "bridge allowed project narrowing but reported "
                         "no project filter label"))
+            if config.runner.kind is C.RunnerKind.PYTEST \
+                    and report_binding is not None:
+                # Dependency ingest and self-audit (D10/D11): store-only,
+                # never history, never the outcome. Prints the audit and
+                # -v lines before the end line.
+                _selection_after_run(
+                    domain, config, checkout, request, plan,
+                    run_id=run_id, report_binding=report_binding,
+                    grant=grant, input_before=input_before,
+                    input_after=input_after,
+                    consumed_report=consumed_report,
+                    report_reason=report_reason,
+                    cancelled=signals.number is not None
+                    or cancelled_handoff,
+                    guard_problem=guard_problem,
+                    setup_failed=setup_failed)
 
         # Every real advanced attempt is a private history event, including a
         # native failure or a refused/malformed report. Promotion is possible
@@ -4009,6 +4114,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # symlinks or touches other attempts' files.
             try:
                 stack_dumps.cleanup(report_binding.path)
+            except Exception:
+                pass
+            # Selection ingest files (deselect binding, dep files) get the
+            # same every-outcome guarantee: setup failure, pre-launch
+            # cancellation and early returns never reach _selection_after_run.
+            try:
+                _selection_engine().cleanup(report_binding.path)
             except Exception:
                 pass
         if full_lease_claimed:

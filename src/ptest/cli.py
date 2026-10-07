@@ -885,6 +885,35 @@ def _domain_text(domain: C.DomainPaths | None) -> str:
     return text
 
 
+def _selection_store_lines(domain: C.DomainPaths,
+                           resolution: C.ConfigResolution) -> list[str]:
+    """Human-only selection-store lines for status (JSON unchanged).
+
+    One line per store that exists; never creates a store and never
+    raises, so status stays read-only.
+    """
+    try:
+        engine = _selection_api()
+    except ImportError:
+        return []
+    try:
+        if resolution.config is not None:
+            items = [(None, resolution.config)]
+        elif resolution.monorepo is not None:
+            from . import monorepo
+            children = monorepo.preflight_children(
+                resolution.root, resolution.monorepo)
+            items = [(child.declaration, child.config) for child in children]
+        else:
+            return []
+    except Exception:
+        return []
+    try:
+        return list(engine.status_lines(domain, items))
+    except Exception:
+        return []
+
+
 def _checkout(config: C.Config) -> C.CheckoutIdentity:
     root = config.checkout.root if config.checkout else config.config_path.parent
     checkout_id = hashlib.sha256(os.fsencode(os.path.realpath(root))).hexdigest()[:32]
@@ -2849,6 +2878,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 sys.stdout.buffer.write(_document("status", payload, domain=domain))
             else:
                 print(f"queued: {len(payload['queued'])}\nactive: {len(payload['active'])}")
+                for line in _selection_store_lines(domain, resolution):
+                    print(line)
                 print(_domain_text(domain))
             return 0
         if command == "history":
@@ -3000,6 +3031,23 @@ def _impact_api():
     return impact
 
 
+def _selection_api():
+    """Dynamic-selection engine, imported lazily at the routing boundary."""
+    from . import selection_engine
+    return selection_engine
+
+
+def _impact_head(impact, *, reference: str) -> str:
+    """The ``{reference}: {first} (+N files)`` head shared by start lines."""
+    changed = tuple(getattr(impact, "changed", ()) or ())
+    if changed:
+        first = render.terminal_text(changed[0])
+        extra = len(changed) - 1
+        count = "" if extra == 0 else f" (+{extra} file{'s' if extra > 1 else ''})"
+        return f"{reference}: {first}{count}"
+    return reference
+
+
 def _impact_note(impact, label: str, *, reference: str) -> str:
     """Start-line note for one impact verdict (paths/label escaped).
 
@@ -3009,6 +3057,29 @@ def _impact_note(impact, label: str, *, reference: str) -> str:
     if impact.kind == "full":
         return (f"{reference} → full suite: "
                 f"{render.terminal_text(impact.reason)}")
+    head = _impact_head(impact, reference=reference)
+    engine = getattr(impact, "engine", "")
+    if engine == "dynamic":
+        if impact.kind == "selected":
+            summary = progress.summarize_units(getattr(impact, "units", ()))
+            files = tuple(getattr(impact, "files", ()) or ())
+            return (f"{head} → {C.plural(getattr(impact, 'tests', 0), 'test')} "
+                    f"in {len(files)} of "
+                    f"{C.plural(getattr(impact, 'total', 0), 'file')} "
+                    f"(dynamic · {summary})")
+        if impact.kind == "none":
+            reached = int(getattr(impact, "reached", 0) or 0)
+            if reached > 0:
+                tests = ("1 test reaches"
+                         if reached == 1 else f"{reached} tests reach")
+                return (f"{head} → no tests affected: {tests} these changes "
+                        f"and already passed on this code")
+        return f"{head} → no tests affected · ptest --full runs everything"
+    if (engine == "static" and impact.kind == "selected"
+            and getattr(impact, "static_reason", "")):
+        return (f"{head} → {len(impact.files)} of {impact.total} test files "
+                f"(static: {render.terminal_text(impact.static_reason)} · "
+                f"{impact.direct} direct · {impact.via} via importers)")
     changed = tuple(impact.changed)
     if changed:
         first = render.terminal_text(changed[0])
@@ -3037,6 +3108,12 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         mode, argv = C.Mode.SCOPED, ("--changed", base.sha or "HEAD")
     else:
         mode, argv = C.Mode.FULL, ()
+    try:
+        deselect = tuple(getattr(impact, "deselect", ()) or ())
+    except (TypeError, ValueError):
+        deselect = ()
+    if mode is not C.Mode.SCOPED:
+        deselect = ()
     return C.RunRequest(
         mode=mode, argv=argv, base=None,
         workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
@@ -3045,7 +3122,7 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
         changed_note=_impact_note(impact, base.label, reference=reference),
-        next_hint=next_hint)
+        next_hint=next_hint, deselect=deselect)
 
 
 def _consult_reference(parsed: ParsedArgs, domain: C.DomainPaths, top,
@@ -3230,7 +3307,8 @@ def _folder_note(typeds: tuple[str, ...], selected: int, total: int) -> str:
 def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
                         note: str | None = None,
                         display: tuple[str, ...] | None = None,
-                        next_hint: bool = False) -> C.RunRequest:
+                        next_hint: bool = False,
+                        deselect: tuple[str, ...] = ()) -> C.RunRequest:
     """Build one literal scoped request (an explicitly narrowed run)."""
     return C.RunRequest(
         mode=C.Mode.SCOPED, argv=argv,
@@ -3240,7 +3318,8 @@ def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
         result_path=parsed.result_path,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
-        changed_note=note, display_argv=display, next_hint=next_hint)
+        changed_note=note, display_argv=display, next_hint=next_hint,
+        deselect=tuple(deselect))
 
 
 def _note_run(domain: C.DomainPaths, root: Path, project: str,
@@ -3282,6 +3361,56 @@ def _impact_base_and_changed(parsed: ParsedArgs, root: Path):
     return impact_api, top, base, impact_api.changed_files(top, base)
 
 
+def _plan_and_refine(domain: C.DomainPaths, impact_api, top,
+                     project_root: Path, config: C.Config,
+                     changed: tuple[str, ...] | None):
+    """Static plan plus the dynamic refinement for one project.
+
+    The planning context lets the static walk reuse the selection
+    store as its parse cache; the refinement narrows to recorded
+    dependencies or falls back to the static verdict. Never raises:
+    selection-engine failure keeps the static verdict.
+    """
+    try:
+        selection_api = _selection_api()
+    except ImportError:
+        return impact_api.plan(top, project_root, config, changed)
+    try:
+        with selection_api.planning(domain, config):
+            static = impact_api.plan(top, project_root, config, changed)
+    except Exception:
+        static = impact_api.plan(top, project_root, config, changed)
+    try:
+        return selection_api.refine(domain, top, project_root, config,
+                                    changed, static)
+    except Exception:
+        return static
+
+
+def _emit_selection_details(parsed: ParsedArgs, impact) -> None:
+    """Verbose-only ``-v selection:`` bodies from a refined verdict."""
+    if not parsed.verbose or parsed.quiet:
+        return
+    for detail in tuple(getattr(impact, "details", ()) or ()):
+        progress.emit("ptest: -v selection: "
+                      + render.terminal_text(detail), quiet=False)
+
+
+def _filter_folder_deselect(deselect: tuple[str, ...],
+                            selected: tuple[str, ...],
+                            explicit: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep deselected ids under the folder files, never inside files the
+    user named explicitly (compared by test file)."""
+    wanted = {C.selection_test_file(item) for item in selected}
+    named = {C.selection_test_file(item) for item in explicit}
+    kept = []
+    for nodeid in deselect:
+        path = C.selection_test_file(nodeid)
+        if path in wanted and path not in named:
+            kept.append(nodeid)
+    return tuple(kept)
+
+
 def _emit_ignored_count(parsed: ParsedArgs, impact) -> None:
     """Verbose-only note for changed files excluded as build output or as
     non-code outside the project's source and test areas. Never printed
@@ -3301,9 +3430,10 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
         parsed, resolution.root)
     base, repo_changed, reference, green = _consult_reference(
         parsed, domain, top, "", base, repo_changed)
-    impact = impact_api.plan(top, resolution.root, resolution.config,
-                             repo_changed)
+    impact = _plan_and_refine(domain, impact_api, top, resolution.root,
+                              resolution.config, repo_changed)
     _emit_ignored_count(parsed, impact)
+    _emit_selection_details(parsed, impact)
     request = _impact_run_request(parsed, impact, base, next_hint=True,
                                   reference=reference)
     if request is None:
@@ -3355,9 +3485,10 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         parsed, resolution.root)
     child_base, child_changed, reference, _green = _consult_reference(
         parsed, domain, top, target.declaration, base, repo_changed)
-    impact = impact_api.plan(top, target.directory, target.config,
-                             child_changed)
+    impact = _plan_and_refine(domain, impact_api, top, target.directory,
+                              target.config, child_changed)
     _emit_ignored_count(parsed, impact)
+    _emit_selection_details(parsed, impact)
     always = [item.local for item in split.files]
     folders = tuple(item.local for item in split.folders)
     typeds = tuple(item.typed for item in split.folders)
@@ -3411,7 +3542,10 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     request = _run_scoped_request(
         parsed, tuple(selected),
         note=_folder_note(typeds, len(selected), impact.total),
-        next_hint=True)
+        next_hint=True,
+        deselect=_filter_folder_deselect(
+            tuple(getattr(impact, "deselect", ()) or ()),
+            tuple(selected), tuple(always)))
     result = operations.execute(domain, target.config, request)
     _note_run(domain, resolution.root, target.declaration, request, result)
     _emit_reasons(result)
@@ -3450,9 +3584,10 @@ def _run_folder_standalone(parsed: ParsedArgs,
         parsed, resolution.root)
     base, repo_changed, reference, _green = _consult_reference(
         parsed, domain, top, "", base, repo_changed)
-    impact = impact_api.plan(top, resolution.root, resolution.config,
-                             repo_changed)
+    impact = _plan_and_refine(domain, impact_api, top, resolution.root,
+                              resolution.config, repo_changed)
     _emit_ignored_count(parsed, impact)
+    _emit_selection_details(parsed, impact)
     always = [local for _, local in files]
     under_roots = tuple(local for _, local in folders)
     typeds = tuple(typed for typed, _ in folders)
@@ -3497,7 +3632,10 @@ def _run_folder_standalone(parsed: ParsedArgs,
     request = _run_scoped_request(
         parsed, tuple(selected),
         note=_folder_note(typeds, len(selected), impact.total),
-        next_hint=True)
+        next_hint=True,
+        deselect=_filter_folder_deselect(
+            tuple(getattr(impact, "deselect", ()) or ()),
+            tuple(selected), tuple(always)))
     result = operations.execute(domain, resolution.config, request)
     _note_run(domain, resolution.root, "", request, result)
     _emit_reasons(result)
@@ -3625,9 +3763,9 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         child_base, child_changed, reference, green = _consult_reference(
             parsed, domain, top, child.declaration, base, repo_changed)
         consulted.append((child, child_base, child_changed, reference, green))
-    planned = [(child, child_base, impact_api.plan(top, child.directory,
-                                                   child.config,
-                                                   child_changed), reference)
+    planned = [(child, child_base,
+                _plan_and_refine(domain, impact_api, top, child.directory,
+                                 child.config, child_changed), reference)
                for child, child_base, child_changed, reference, green
                in consulted]
     if all(impact.kind == "none" and not impact.changed
@@ -3656,6 +3794,7 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     cancelled = False
     for child, child_base, impact, reference in planned:
         _emit_ignored_count(parsed, impact)
+        _emit_selection_details(parsed, impact)
         request = _impact_run_request(parsed, impact, child_base,
                                       next_hint=False, reference=reference)
         if request is None:

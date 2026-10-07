@@ -481,10 +481,13 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
     table = _table(data)
     _keys(table, {"enabled", "closed_inputs", "input_roots", "ignored_inputs",
                   "environment", "full_triggers", "always", "no_tests",
-                  "non_input_outputs", "full_ratio", "groups"})
+                  "non_input_outputs", "full_ratio", "groups", "dynamic"})
     enabled = table.get("enabled", False)
     closed_inputs = table.get("closed_inputs", False)
     if not isinstance(enabled, bool) or not isinstance(closed_inputs, bool):
+        _fail()
+    dynamic = table.get("dynamic", True)
+    if not isinstance(dynamic, bool):
         _fail()
     path_fields = (
         "input_roots", "ignored_inputs", "full_triggers", "always",
@@ -524,6 +527,7 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
             always=paths["always"], no_tests=paths["no_tests"],
             non_input_outputs=paths["non_input_outputs"],
             full_ratio=ratio, groups=groups,
+            dynamic=dynamic,
         )
     except (TypeError, ValueError):
         _fail()
@@ -1213,6 +1217,8 @@ def _serialize_fresh(config: C.Config) -> bytes:
         f"non_input_outputs = {_toml_array(config.selection.non_input_outputs)}",
         f"full_ratio = {config.selection.full_ratio:g}",
     ])
+    if not config.selection.dynamic:
+        lines.append("dynamic = false")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 

@@ -439,6 +439,28 @@ def test_monorepo_failure_total_carries_fix_hint(
     assert "fix the code under test, then rerun ptest" in err
 
 
+def test_monorepo_refinement_uses_child_project_id(
+        tmp_path, monkeypatch, monorepo):
+    _monorepo_root(
+        tmp_path, monkeypatch, monorepo,
+        lambda mod: {"api": _selected(mod), "web": mod.Impact(kind="none")})
+    _, seen = _install_selection(monkeypatch)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    child_ids = set()
+    for name in ("api", "web"):
+        text = (tmp_path / name / ".ptest.toml").read_text(encoding="utf-8")
+        child_ids.add(text.split('project_id = "', 1)[1].split('"', 1)[0])
+    assert len(child_ids) == 2
+    planned_ids = {config.project_id for _, config in seen["plannings"]}
+    assert planned_ids == child_ids
+    refined_ids = {config.project_id for config, _ in seen["refines"]}
+    assert refined_ids == child_ids
+
+
 # --- progress + operations hint wiring ---------------------------------------
 
 def test_next_step_matrix():
@@ -581,3 +603,266 @@ def test_doctor_fix_prints_graph_next_step(tmp_path, monkeypatch, capsys):
     assert ("selection enabled: bare ptest now runs the tests your change reaches "
             "(no baseline needed); run ptest --full once before handoff") in out
     assert "record a baseline" not in out
+
+
+# --- dynamic selection routing (T5) -------------------------------------------
+#
+# The static graph is stubbed through ``cli._impact_api`` as above; the
+# dynamic refinement is stubbed through ``cli._selection_api`` so these
+# tests pin the ROUTING (request mapping, start lines, -v escaping)
+# rather than the planner.
+
+def _install_selection(monkeypatch, *, refine=None):
+    """Install a fake ``cli._selection_api``; return (module, seen)."""
+    import contextlib
+
+    mod = types.SimpleNamespace()
+    seen: dict = {}
+
+    @contextlib.contextmanager
+    def planning(domain, config):
+        seen["planning"] = (domain, config)
+        seen.setdefault("plannings", []).append((domain, config))
+        yield None
+
+    def refine_fn(domain, top, root, config, changed, impact):
+        seen.setdefault("refines", []).append((config, impact))
+        return refine(impact) if refine is not None else impact
+
+    mod.planning = planning
+    mod.refine = refine_fn
+    monkeypatch.setattr("ptest.cli._selection_api", lambda: mod)
+    return mod, seen
+
+
+def _dynamic(changed=("pkg/core.py",), files=("tests/test_a.py",),
+             deselect=("tests/test_a.py::test_other",), tests=3, total=8,
+             reached=0,
+             units=(("function", "pkg/core.py:boot", 2),),
+             details=("engine dynamic · 3 tests recorded · coverage 38% of "
+                      "test files · store 4.0 KB · newest 5.0s ago",)):
+    return types.SimpleNamespace(
+        kind="selected", changed=tuple(changed), files=tuple(files),
+        direct=1, via=1, total=total, reason="", ignored=0,
+        engine="dynamic", dynamic_ok=True, relevant=tuple(changed),
+        static_reason="", deselect=tuple(deselect), tests=tests,
+        reached=reached,
+        units=tuple(types.SimpleNamespace(kind=kind, label=label,
+                                          tests=count)
+                    for kind, label, count in units),
+        details=tuple(details),
+        project_index=None)
+
+
+def _pytest_project(tmp_path, monkeypatch):
+    write_ptest_toml(tmp_path, kind="pytest", launcher=("pytest",),
+                     args=(), full_args=(), project_id="ab" * 16)
+    monkeypatch.chdir(tmp_path)
+
+
+def _route_dynamic(monkeypatch, project_name, dynamic, *,
+                   repo_changed=("pkg/core.py",)):
+    _install_impact(monkeypatch, plans={})
+    mod, _ = _install_impact(monkeypatch, repo_changed=repo_changed,
+                             plans={project_name: types.SimpleNamespace(
+                                 kind="selected", changed=tuple(repo_changed),
+                                 files=("tests/test_a.py",),
+                                 direct=1, via=1, total=10, reason="",
+                                 ignored=0)})
+    _install_selection(monkeypatch, refine=lambda static: dynamic)
+    return mod
+
+
+def test_dynamic_selected_routes_scoped_with_deselect(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    _route_dynamic(monkeypatch, tmp_path.name, _dynamic())
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests/test_a.py",)
+    assert request.deselect == ("tests/test_a.py::test_other",)
+    assert request.changed_note == (
+        "changed vs origin/dev (no green run yet): pkg/core.py → "
+        "3 tests in 1 of 8 files (dynamic · 1 function changed)")
+
+
+def test_dynamic_selected_singular_counts(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    single = _dynamic(files=("tests/test_a.py",),
+                      deselect=("tests/test_a.py::test_other",), tests=1,
+                      total=1,
+                      units=(("function", "pkg/core.py:boot", 1),))
+    _route_dynamic(monkeypatch, tmp_path.name, single)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    assert calls[0].changed_note == (
+        "changed vs origin/dev (no green run yet): pkg/core.py → "
+        "1 test in 1 of 1 file (dynamic · 1 function changed)")
+
+
+def test_dynamic_none_with_reach_prints_reached_line(tmp_path, monkeypatch,
+                                                      capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    none = _dynamic(files=(), deselect=(), tests=0, reached=5)
+    none.kind = "none"
+    _route_dynamic(monkeypatch, tmp_path.name, none)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("changed vs origin/dev (no green run yet): pkg/core.py → "
+            "no tests affected: 5 tests reach these changes and already "
+            "passed on this code") in err
+
+
+def test_dynamic_none_without_reach_keeps_static_text(tmp_path, monkeypatch,
+                                                      capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    none = _dynamic(files=(), deselect=(), tests=0, reached=0)
+    none.kind = "none"
+    _route_dynamic(monkeypatch, tmp_path.name, none)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("no tests affected · ptest --full runs everything") in err
+
+
+def test_dynamic_none_singular_reach(tmp_path, monkeypatch, capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    none = _dynamic(files=(), deselect=(), tests=0, reached=1)
+    none.kind = "none"
+    _route_dynamic(monkeypatch, tmp_path.name, none)
+    _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    err = capsys.readouterr().err
+    assert ("no tests affected: 1 test reaches these changes and already "
+            "passed on this code") in err
+
+
+def test_static_fallback_note_names_reason(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    static = _dynamic()
+    static.engine = "static"
+    static.static_reason = "no dependency records yet — any run records them"
+    static.deselect = ()
+    static.tests = 0
+    _route_dynamic(monkeypatch, tmp_path.name, static)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.SCOPED
+    assert request.deselect == ()
+    assert request.changed_note == (
+        "changed vs origin/dev (no green run yet): pkg/core.py → "
+        "1 of 8 test files (static: no dependency records yet — any run "
+        "records them · 1 direct · 1 via importers)")
+
+
+def test_dynamic_full_routes_full_with_dynamic_reason(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    full = _dynamic()
+    full.kind = "full"
+    full.files = ()
+    full.deselect = ()
+    full.reason = "3 of 4 test files reach full_ratio 0.7 (dynamic)"
+    _route_dynamic(monkeypatch, tmp_path.name, full)
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.FULL
+    assert request.argv == ()
+    assert request.changed_note == (
+        "changed vs origin/dev (no green run yet) → full suite: "
+        "3 of 4 test files reach full_ratio 0.7 (dynamic)")
+
+
+def test_dynamic_verbose_details_are_escaped(tmp_path, monkeypatch, capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    evil = _dynamic(details=("changed function evil\x1b[31m.py:boot → 1 test",))
+    _route_dynamic(monkeypatch, tmp_path.name, evil)
+    calls = _capture(monkeypatch)
+
+    assert main(("-v",)) == 0
+
+    assert len(calls) == 1
+    err = capsys.readouterr().err
+    assert "ptest: -v selection: changed function evil\\x1b[31m.py:boot → 1 test" in err
+    assert "\x1b[31m" not in err
+
+
+def test_dynamic_quiet_hides_verbose_details(tmp_path, monkeypatch, capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    _route_dynamic(monkeypatch, tmp_path.name, _dynamic())
+    calls = _capture(monkeypatch)
+
+    assert main(("-q",)) == 0
+
+    assert len(calls) == 1
+    assert "-v selection:" not in capsys.readouterr().err
+
+
+def test_planning_receives_project_config(tmp_path, monkeypatch):
+    _standalone(tmp_path, monkeypatch)
+    _, seen = _install_selection(monkeypatch)
+    _route_standalone(
+        monkeypatch, tmp_path.name,
+        lambda mod: _selected(mod, changed=("services/credits.py",),
+                              files=("tests/test_a.py", "tests/test_b.py"),
+                              direct=1, via=1, total=10),
+        repo_changed=("services/credits.py",))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    assert seen["planning"][1].project_id == "ab" * 16
+    assert seen["refines"][0][1].kind == "selected"
+    # A stubbed static verdict passes through with a byte-identical note.
+    assert calls[0].changed_note == (
+        "changed vs origin/dev (no green run yet): services/credits.py → "
+        "2 of 10 test files (1 direct · 1 via importers)")
+    assert calls[0].deselect == ()
+
+
+def test_folder_run_filters_deselect_to_folder(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_a.py").write_text("def test_a(): pass\n")
+    (tests_dir / "test_named.py").write_text("def test_1(): pass\n")
+    dynamic = _dynamic(files=("tests/test_a.py", "tests/test_named.py"),
+                       deselect=("tests/test_a.py::test_skip",
+                                 "tests/test_named.py::test_skip_too"),
+                       tests=4, total=8)
+    _route_dynamic(monkeypatch, tmp_path.name, dynamic)
+    calls = _capture(monkeypatch)
+
+    assert main(("tests", "tests/test_named.py::test_1")) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.SCOPED
+    assert "tests/test_a.py" in request.argv
+    # Deselected ids survive only under the folder files, never inside
+    # explicitly named files.
+    assert request.deselect == ("tests/test_a.py::test_skip",)
