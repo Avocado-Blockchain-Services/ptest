@@ -939,7 +939,10 @@ def test_ambient_function_change_selects_by_static_reach():
     assert units_by_kind(d)["function"] == {LIB + "::serve": 1}
 
 
-def test_ambient_function_change_static_miss_skips():
+def test_ambient_function_change_reaches_the_run_without_static_import():
+    """Code the ambient context ran shaped state every test of the run
+    shared; a static import is not required (importlib-loaded routers in
+    the persea evaluation)."""
     vb = VB()
     other = "pkg/other.py"
     old = FI(scopes=[SC("serve", body="b1")])
@@ -960,11 +963,9 @@ def test_ambient_function_change_static_miss_skips():
                            "dt": FI(scopes=[SC("test_f")])},
                  changed=(LIB,))
     d = PL.plan(inputs)
-    assert not PL.is_selected(d, node.nodeid)
-    assert d.selected == 0
-    # Clause g must not count units for a node it does not select: the
-    # changed ambient function selected nothing, so it carries 0 tests.
-    assert units_by_kind(d) == {"function": {LIB + "::serve": 0}}
+    assert PL.is_selected(d, node.nodeid)
+    assert d.selected == 1
+    assert units_by_kind(d) == {"function": {LIB + "::serve": 1}}
 
 
 def test_ambient_data_change_sets_full_reason():
@@ -1800,3 +1801,52 @@ def test_class_body_change_reaches_importers():
     new = FI(classes=[CL("Model", body="c2")], scopes=[SC("other")])
     inputs, nid = _imported_only(old, new)
     assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def _ambient_case(old_lib, new_lib, *, ambient_mods=(), ambient_funcs=()):
+    """The test never imports LIB statically and never ran it; the run's
+    ambient context (collection, an importlib-loaded router) did."""
+    vb = VB()
+    test_fi = FI(scopes=[SC("test_f")])
+    index = IDX({
+        LIB: PF(LIB, "dn", new_lib),
+        TEST: PF(TEST, "dt", test_fi, test=True, imports=()),
+    })
+    node = NODE(vb, TEST + "::test_f", TEST, "r1", funcs=[(TEST, "test_f")])
+    run = RUN(vb, "r1", {LIB: "do", TEST: "dt"},
+              ambient=CT(vb, funcs=ambient_funcs, mods=ambient_mods))
+    deps = SNAP(vb, [run], [node])
+    inputs = INP(index, deps, versions={"do": old_lib, "dt": test_fi},
+                 changed=(LIB,))
+    return inputs, node.nodeid
+
+
+def test_import_time_change_in_an_ambient_module_reaches_the_run():
+    old = FI(scopes=[SC("route", skel="s1", decorated=True)])
+    new = FI(scopes=[SC("route", skel="s2", decorated=True)])
+    inputs, nid = _ambient_case(old, new, ambient_mods=[LIB])
+    d = PL.plan(inputs)
+    assert PL.is_selected(d, nid)
+    assert units_by_kind(d)["module"] == {LIB: 1}
+
+
+def test_import_time_change_outside_the_ambient_does_not():
+    old = FI(scopes=[SC("route", skel="s1", decorated=True)])
+    new = FI(scopes=[SC("route", skel="s2", decorated=True)])
+    inputs, nid = _ambient_case(old, new, ambient_mods=())
+    assert not PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_changed_function_the_ambient_ran_reaches_the_run():
+    old = FI(scopes=[SC("create_app", body="b1")])
+    new = FI(scopes=[SC("create_app", body="b2")])
+    inputs, nid = _ambient_case(old, new, ambient_funcs=[(LIB, "create_app")])
+    assert PL.is_selected(PL.plan(inputs), nid)
+
+
+def test_body_change_of_an_ambient_module_function_not_run_stays_precise():
+    old = FI(scopes=[SC("handler", body="b1"), SC("create_app")])
+    new = FI(scopes=[SC("handler", body="b2"), SC("create_app")])
+    inputs, nid = _ambient_case(old, new, ambient_mods=[LIB],
+                                ambient_funcs=[(LIB, "create_app")])
+    assert not PL.is_selected(PL.plan(inputs), nid)

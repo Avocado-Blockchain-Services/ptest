@@ -474,6 +474,11 @@ def plan(inputs):
     for rid, analysis in per_run.items():
         ambient_paths = set(analysis.am)
         ambient_labels = []
+        # Changed code the run's ambient context executed (collection,
+        # imports, app factories) shaped state every test of that run
+        # shared, however the module was reached (importlib, plugins):
+        # the whole run is affected, not only static importers.
+        shared = []
         for fid in list(compat_runs[rid].ambient.functions):
             # Unresolvable ids already tainted this run opaque above.
             resolved = _resolve_function(vocabulary, fid)
@@ -483,10 +488,16 @@ def plan(inputs):
             if (path in analysis.pw or (path, qual) in analysis.cf
                     or (path, qual) in analysis.af):
                 ambient_paths.add(path)
+                shared.append(("function", f"{path}::{qual}"))
                 if (path, qual) in analysis.cf:
                     ambient_labels.append(f"{path}::{qual}")
+        for pid in list(compat_runs[rid].ambient.modules):
+            path = _resolve_path(vocabulary, pid)
+            if path is not None and (path in analysis.am
+                                     or path in analysis.pw):
+                shared.append(("module", path))
         ambient_pre[rid] = (_reach(index, test_roots, ambient_paths),
-                            tuple(ambient_labels))
+                            tuple(ambient_labels), tuple(shared))
 
     fallbacks = {}
     selected_files = set()
@@ -587,7 +598,12 @@ def plan(inputs):
         if hit:
             _select()
             continue
-        ambient_reach, ambient_labels = ambient_pre[node.run_id]
+        ambient_reach, ambient_labels, shared = ambient_pre[node.run_id]
+        if shared:
+            for kind, label in shared:
+                _count(kind, label, nodeid)
+            _select()  # clause g: the run's shared import-time state
+            continue
         if node.test_file in ambient_reach:
             # Clause g selects first; units count only nodes it selected
             # (4.8: each unit carries the count of nodes it selected).
