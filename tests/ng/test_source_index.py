@@ -660,3 +660,69 @@ def test_build_exceeding_scan_cap_is_incomplete(tmp_path, monkeypatch):
                                   cache=None)
 
     assert index.complete is False
+
+
+# --- regression: star re-export chain propagates names (finding 1) ---
+
+def test_build_star_reexport_chain_refs_propagate(tmp_path):
+    init_git_repo(tmp_path, files={
+        "pkg/__init__.py": "from .core import *\n",
+        "pkg/core.py": "TIMEOUT = 5\nREG = 1\n",
+        "tests/test_x.py": ("from pkg import TIMEOUT\n"
+                            "def test_x():\n    assert TIMEOUT\n"),
+    })
+    index = S.build_project_index(tmp_path, _config(), key=None,
+                                  cache=None)
+    key = C.selection_name_key
+    pf = index.files["pkg/__init__.py"]
+
+    star = [i for i, st in enumerate(pf.index.statements)
+            if st.kind == "import" and st.bound == ("*",)]
+    assert len(star) == 1
+    # Bound side still re-exports the names locally ...
+    assert key("pkg/__init__.py", "TIMEOUT") in pf.statement_bound[star[0]]
+    # ... and the ref side resolves to the defining module so the planner's
+    # fixpoint (which only reads statement_refs) can carry the name through.
+    assert key("pkg/core.py", "TIMEOUT") in pf.statement_refs[star[0]]
+    assert key("pkg/core.py", "REG") in pf.statement_refs[star[0]]
+    # The importing test resolves through the chain to the definition.
+    assert key("pkg/__init__.py", "TIMEOUT") in _all_refs(index,
+                                                          "tests/test_x.py")
+
+
+# --- regression: mutating assigns are effectful (finding 2) ---
+
+def test_index_source_mutating_assign_targets_are_effect():
+    index = S.index_source(
+        b"X = 1\n"
+        b'REG = {}\n'
+        b'REG["a"] = 1\n'
+        b"m.attr = 1\n"
+        b"m.attr += 1\n"
+        b"y += 1\n"
+        b"x, y2 = 1, 2\n")
+    kinds = [st.kind for st in index.statements]
+
+    assert kinds == ["assign", "assign", "effect", "effect", "effect",
+                     "assign", "assign"]
+    assert index.statements[2].bound == ()
+    assert index.statements[3].bound == ()
+
+
+# --- regression: docstrings are observable fingerprints (finding 3) ---
+
+def test_index_source_docstring_edit_changes_fingerprint():
+    one = _scopes(S.index_source(
+        b"def hello():\n    '''Say hello.'''\n    return 1\n"))["hello"]
+    two = _scopes(S.index_source(
+        b"def hello():\n    '''Say goodbye.'''\n    return 1\n"))["hello"]
+
+    assert one.body != two.body
+    assert one.skeleton == two.skeleton
+
+    gone = _classes(S.index_source(b"class K:\n    '''Old help'''\n    X = 1\n"))["K"]
+    changed = _classes(S.index_source(
+        b"class K:\n    '''New help'''\n    X = 1\n"))["K"]
+
+    assert gone.body != changed.body
+    assert gone.skeleton == changed.skeleton

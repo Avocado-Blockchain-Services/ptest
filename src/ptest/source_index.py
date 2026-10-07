@@ -128,6 +128,21 @@ def _is_docstring(stmt: ast.stmt) -> bool:
         and isinstance(stmt.value.value, str)
 
 
+def _is_simple_target(target: ast.AST) -> bool:
+    """Plain binding targets only: Name, Tuple/List/Starred thereof.
+
+    Anything else (Attribute, Subscript, ...) mutates another object and
+    binds no module-level name, so the statement is effectful (spec 5.3).
+    """
+    if isinstance(target, ast.Name):
+        return True
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return all(_is_simple_target(elt) for elt in target.elts)
+    if isinstance(target, ast.Starred):
+        return _is_simple_target(target.value)
+    return False
+
+
 def _classify(stmt: ast.stmt) -> str:
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return "def"
@@ -135,8 +150,14 @@ def _classify(stmt: ast.stmt) -> str:
         return "class"
     if isinstance(stmt, (ast.Import, ast.ImportFrom)):
         return "import"
-    if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-        return "assign"
+    if isinstance(stmt, ast.Assign):
+        if all(_is_simple_target(target) for target in stmt.targets):
+            return "assign"
+        return "effect"
+    if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        if _is_simple_target(stmt.target):
+            return "assign"
+        return "effect"
     if _is_docstring(stmt):
         return "doc"
     return "effect"
@@ -162,12 +183,13 @@ def _class_skeleton_dumps(node: ast.ClassDef) -> list[str]:
 
 
 def _body_dumps(body: list[ast.stmt]) -> list[str]:
-    """Body statement dumps, minus a leading docstring (doc-only edits are
-    invisible to the planner, matching its ignored ``doc`` statements)."""
-    statements = list(body)
-    if statements and _is_docstring(statements[0]):
-        statements = statements[1:]
-    return [_dump(stmt) for stmt in statements]
+    """Body statement dumps, leading docstring included.
+
+    Function/method docstrings are runtime-observable (``__doc__``,
+    ``--help``, doctest), so only top-level ``doc`` statements are ignored
+    by the planner — never the docstring inside a scope body.
+    """
+    return [_dump(stmt) for stmt in body]
 
 
 def _child_statement_lists(stmt: ast.stmt) -> list[list[ast.stmt]]:
@@ -224,10 +246,9 @@ def index_source(raw: bytes) -> C.FileIndex:
         members = [stmt for stmt in node.body
                    if not isinstance(stmt, (ast.FunctionDef,
                                              ast.AsyncFunctionDef))]
-        members_fp = list(members)
-        if members_fp and _is_docstring(members_fp[0]):
-            members_fp = members_fp[1:]
-        entry["body"].extend(_dump(stmt) for stmt in members_fp)
+        # Class docstrings are runtime-observable (__doc__); keep them in
+        # the body fingerprint. Only top-level "doc" statements are ignored.
+        entry["body"].extend(_dump(stmt) for stmt in members)
         entry["refs"].update(
             _chains_of([*node.decorator_list, *node.bases,
                         *[keyword.value for keyword in node.keywords],
@@ -791,6 +812,15 @@ def build_project_index(project_root: Path, config: C.Config, *,
                                     if not name.startswith("_"):
                                         bound.add(
                                             C.selection_name_key(rel, name))
+                                        # Design 2.3: statement_refs of an
+                                        # import are the resolved targets of
+                                        # its from imports; a star resolves
+                                        # to path(M):name for every name M
+                                        # binds, so propagation can flow
+                                        # through the re-export.
+                                        targets.add(
+                                            C.selection_name_key(
+                                                path, name))
                     elif imp.name is not None:
                         targets.update(resolver.from_target(rel, imp))
                         if imp.local is not None:
