@@ -680,3 +680,353 @@ def test_changed_files_staged_rename_keeps_old_path(tmp_path):
     impact = I.plan(tmp_path, tmp_path, _config(), changed)
     assert impact.kind == "selected"
     assert impact.files == ("tests/test_b.py",)
+
+
+# --- T1 (0.5): conftest edge, parse cache, D3 dynamic_ok ---
+
+def _conftest_tree():
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/shared.py": "X = 1\n",
+        "tests/unit/conftest.py": "from pkg.shared import X\n",
+        "tests/unit/test_1.py": "def test_1():\n    assert True\n",
+        "tests/unit/test_2.py": "def test_2():\n    assert True\n",
+        "tests/other/test_3.py": "def test_3():\n    assert True\n",
+        "tests/other/test_4.py": "def test_4():\n    assert True\n",
+    }
+    return files
+
+
+def test_plan_conftest_edge_selects_directory_tests(tmp_path):
+    _repo(tmp_path, _conftest_tree())
+
+    impact = _plan_at(tmp_path, ["pkg/shared.py"])
+
+    assert impact.kind == "selected"
+    assert impact.files == ("tests/unit/test_1.py", "tests/unit/test_2.py")
+
+
+def test_plan_conftest_edge_off_reproduces_0_4_10(tmp_path):
+    _repo(tmp_path, _conftest_tree())
+    config = _config()
+
+    impact = I.plan(tmp_path, tmp_path, config, ("pkg/shared.py",),
+                    conftest_edges=False)
+
+    assert impact.kind == "none"
+    assert impact.files == ()
+
+
+def _assert_dynamic_ok(tmp_path, impact, config=None):
+    """D3 index invariant: dynamic_ok <=> complete index built this call."""
+    from ptest import source_index as S
+
+    assert impact.dynamic_ok is True
+    assert impact.engine == "static"
+    assert isinstance(impact.project_index, C.ProjectIndex)
+    assert impact.project_index.complete is True
+    expected = S.build_project_index(tmp_path, config or _config(),
+                                     key=None, cache=None)
+    assert set(impact.project_index.files) == set(expected.files)
+
+
+def test_plan_dynamic_ok_selected_through_graph(tmp_path):
+    _repo(tmp_path, _graph_files())
+
+    impact = _plan_at(tmp_path, ["pkg/b.py"])
+
+    assert impact.kind == "selected"
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_selected_test_file_only(tmp_path):
+    _repo(tmp_path, _graph_files())
+
+    impact = _plan_at(tmp_path, ["tests/test_a.py"])
+
+    assert impact.kind == "selected"
+    assert impact.files == ("tests/test_a.py",)
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_none_with_relevant_source_seed(tmp_path):
+    _repo(tmp_path, dict(_graph_files(), **{"pkg/z.py": "Z = 1\n"}))
+
+    impact = _plan_at(tmp_path, ["pkg/z.py"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ("pkg/z.py",)
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_none_with_deleted_test_only(tmp_path):
+    _repo(tmp_path, _graph_files())
+    (tmp_path / "tests" / "test_a.py").unlink()
+
+    impact = _plan_at(tmp_path, ["tests/test_a.py"])
+
+    assert impact.kind == "none"
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_full_by_full_ratio(tmp_path):
+    files = {"pkg/shared.py": "X = 1\n"}
+    for i in range(8):
+        files[f"tests/test_{i}.py"] = (
+            "from pkg.shared import X\n\ndef test_it():\n    assert X\n")
+    _repo(tmp_path, files)
+
+    impact = _plan_at(tmp_path, ["pkg/shared.py"])
+
+    assert impact.kind == "full"
+    assert "full_ratio" in impact.reason
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_full_by_200_file_limit(tmp_path, monkeypatch):
+    _repo(tmp_path, {
+        "pkg/b.py": "VALUE = 1\n",
+        "pkg/c.py": "OTHER = 2\n",
+        "tests/test_a.py": "from pkg.b import VALUE\ndef test_a():\n assert VALUE\n",
+        "tests/test_b.py": "from pkg.c import OTHER\ndef test_b():\n assert OTHER\n",
+        "tests/test_c.py": "def test_c():\n assert True\n",
+        "tests/test_d.py": "def test_d():\n assert True\n",
+    })
+    monkeypatch.setattr(I, "MAX_SELECTED", 1)
+
+    impact = _plan_at(tmp_path, ["pkg/b.py", "pkg/c.py"])
+
+    assert impact.kind == "full"
+    assert "scoped limit" in impact.reason
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_full_test_support(tmp_path):
+    _repo(tmp_path, dict(_graph_files(), **{"tests/helpers.py": "X = 1\n"}))
+
+    impact = _plan_at(tmp_path, ["tests/helpers.py"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "tests/helpers.py is test support"
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def test_plan_dynamic_ok_full_outside_graph(tmp_path):
+    _repo(tmp_path, dict(_graph_files(), **{"pkg/data.json": "{}\n"}))
+
+    impact = _plan_at(tmp_path, ["pkg/data.json"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "pkg/data.json is outside the import graph"
+    _assert_dynamic_ok(tmp_path, impact)
+
+
+def _assert_static_only(impact):
+    assert impact.dynamic_ok is False
+    assert impact.engine == ""
+    assert impact.project_index is None
+
+
+def test_plan_not_dynamic_full_trigger(tmp_path):
+    _repo(tmp_path, _graph_files())
+    write_file(tmp_path / "uv.lock", "x\n")
+
+    impact = _plan_at(tmp_path, ["uv.lock"])
+
+    assert impact.kind == "full"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_command_runner(tmp_path):
+    init_git_repo(tmp_path, files={"run.sh": "true\n"})
+
+    impact = I.plan(tmp_path, tmp_path, _config(kind=C.RunnerKind.COMMAND),
+                    ("run.sh",))
+
+    assert impact.kind == "full"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_vitest(tmp_path):
+    init_git_repo(tmp_path, files={"src/a.ts": "1\n"})
+    config = _config(kind=C.RunnerKind.VITEST, test_roots=("src",))
+
+    impact = I.plan(tmp_path, tmp_path, config, ("src/a.ts",))
+
+    assert impact.kind == "vitest"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_selection_disabled(tmp_path):
+    _repo(tmp_path, _graph_files())
+
+    impact = _plan_at(tmp_path, ["pkg/b.py"], _config(enabled=False))
+
+    assert impact.kind == "full"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_unparsable_changed(tmp_path):
+    _repo(tmp_path, dict(_graph_files(), **{"pkg/b.py": "def broken(:\n"}))
+
+    impact = _plan_at(tmp_path, ["pkg/b.py"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "pkg/b.py could not be parsed"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_graph_too_large(tmp_path, monkeypatch):
+    _repo(tmp_path, _graph_files())
+    monkeypatch.setattr(I, "MAX_SCAN_FILES", 1)
+
+    impact = _plan_at(tmp_path, ["pkg/b.py"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "import graph too large"
+    _assert_static_only(impact)
+
+
+def test_plan_not_dynamic_no_relevant_changes(tmp_path):
+    _repo(tmp_path, _graph_files())
+
+    impact = _plan_at(tmp_path, ["README.md"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    _assert_static_only(impact)
+
+
+def test_plan_capped_test_only_keeps_0_4_verdict(tmp_path, monkeypatch):
+    _repo(tmp_path, _graph_files())
+    monkeypatch.setattr(I, "MAX_SCAN_FILES", 1)
+
+    impact = _plan_at(tmp_path, ["tests/test_a.py"])
+
+    assert impact.kind == "selected"
+    assert impact.files == ("tests/test_a.py",)
+    assert (impact.direct, impact.via, impact.total) == (1, 0, 4)
+    assert impact.reason == ""
+    _assert_static_only(impact)
+
+
+def test_plan_capped_support_keeps_0_4_verdict(tmp_path, monkeypatch):
+    _repo(tmp_path, dict(_graph_files(), **{"tests/helpers.py": "X = 1\n"}))
+    monkeypatch.setattr(I, "MAX_SCAN_FILES", 1)
+
+    impact = _plan_at(tmp_path, ["tests/helpers.py"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "tests/helpers.py is test support"
+    assert impact.files == ()
+    _assert_static_only(impact)
+
+
+def test_plan_capped_outside_graph_keeps_0_4_verdict(tmp_path, monkeypatch):
+    _repo(tmp_path, dict(_graph_files(), **{"pkg/data.json": "{}\n"}))
+    monkeypatch.setattr(I, "MAX_SCAN_FILES", 1)
+
+    impact = _plan_at(tmp_path, ["pkg/data.json"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "pkg/data.json is outside the import graph"
+    _assert_static_only(impact)
+
+
+def _counting_cache():
+    calls = {"get": [], "put": []}
+
+    class Cache:
+        def get_many(self, digests):
+            calls["get"].append(list(digests))
+            return {}
+
+        def put_many(self, blobs):
+            calls["put"].append(dict(blobs))
+
+    return Cache(), calls
+
+
+def test_plan_capped_paths_build_index_once(tmp_path, monkeypatch):
+    _repo(tmp_path, dict(_graph_files(), **{"tests/helpers.py": "X = 1\n",
+                                            "pkg/data.json": "{}\n"}))
+    monkeypatch.setattr(I, "MAX_SCAN_FILES", 1)
+
+    for changed in (["tests/test_a.py"], ["tests/helpers.py"],
+                    ["pkg/data.json"]):
+        cache, calls = _counting_cache()
+        I.plan(tmp_path, tmp_path, _config(), tuple(changed),
+               key=b"0" * 32, cache=cache)
+        assert len(calls["get"]) == 1, changed
+        assert len(calls["put"]) <= 1, changed
+
+
+def test_plan_reads_and_parses_each_file_once(tmp_path, monkeypatch):
+    from ptest import source_index as S
+
+    _repo(tmp_path, _graph_files())
+    reads: dict[str, int] = {}
+    parses: list[int] = []
+    real_read = S.read_source
+    real_index = S.index_source
+
+    def counting_read(root, rel):
+        reads[rel] = reads.get(rel, 0) + 1
+        return real_read(root, rel)
+
+    def counting_index(raw):
+        parses.append(len(raw) if raw is not None else -1)
+        return real_index(raw)
+
+    monkeypatch.setattr(S, "read_source", counting_read)
+    monkeypatch.setattr(S, "index_source", counting_index)
+
+    impact = _plan_at(tmp_path, ["pkg/b.py"])
+
+    assert impact.kind == "selected"
+    assert max(reads.values()) == 1
+    assert set(reads) == set(impact.project_index.files)
+    assert len(parses) == len(reads)
+
+
+def test_plan_uses_planning_context_when_no_kwargs(tmp_path):
+    _repo(tmp_path, _graph_files())
+    cache, calls = _counting_cache()
+    token = I.PLANNING.set(C.PlanningContext(key=b"0" * 32, cache=cache))
+    try:
+        impact = _plan_at(tmp_path, ["pkg/b.py"])
+    finally:
+        I.PLANNING.reset(token)
+
+    assert impact.kind == "selected"
+    assert len(calls["get"]) == 1
+
+
+def test_plan_explicit_kwargs_win_over_planning_context(tmp_path):
+    _repo(tmp_path, _graph_files())
+    ambient, ambient_calls = _counting_cache()
+    explicit, explicit_calls = _counting_cache()
+    token = I.PLANNING.set(C.PlanningContext(key=b"0" * 32,
+                                             cache=ambient))
+    try:
+        impact = I.plan(tmp_path, tmp_path, _config(), ("pkg/b.py",),
+                        key=b"1" * 32, cache=explicit)
+    finally:
+        I.PLANNING.reset(token)
+
+    assert impact.kind == "selected"
+    assert ambient_calls["get"] == []
+    assert len(explicit_calls["get"]) == 1
+
+
+def test_impact_accepts_only_0_4_arguments():
+    impact = I.Impact(kind="selected", changed=("a.py",),
+                      files=("tests/test_a.py",), direct=1, via=0,
+                      total=4, reason="", ignored=0)
+
+    assert impact.engine == ""
+    assert impact.dynamic_ok is False
+    assert impact.relevant == ()
+    assert impact.project_index is None
+    assert I.PLANNING.get() is None
+    assert I.PLANNING.name == "ptest_impact_planning"

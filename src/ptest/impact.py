@@ -10,7 +10,8 @@ from __future__ import annotations
 import ast
 import fnmatch
 import os
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import contracts as C
@@ -20,6 +21,9 @@ from .selection import _matches
 MAX_SCAN_FILES = 20000
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_SELECTED = 200
+
+PLANNING: ContextVar[C.PlanningContext | None] = ContextVar(
+    "ptest_impact_planning", default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,17 @@ class Impact:
     total: int = 0
     reason: str = ""
     ignored: int = 0
+    engine: str = ""
+    dynamic_ok: bool = False
+    relevant: tuple[str, ...] = ()
+    static_reason: str = ""
+    deselect: tuple[str, ...] = ()
+    tests: int = 0
+    reached: int = 0
+    units: tuple[str, ...] = ()
+    details: tuple[str, ...] = ()
+    project_index: C.ProjectIndex | None = field(
+        default=None, compare=False, repr=False)
 
 
 def _problem(message: str) -> C.Problem:
@@ -388,7 +403,14 @@ def _read_text(path: Path) -> str | None:
 
 
 def plan(top: Path | None, project_root: Path, config: C.Config,
-         repo_changed: tuple[str, ...] | None) -> Impact:
+         repo_changed: tuple[str, ...] | None, *,
+         key: bytes | None = None, cache: C.ParseCache | None = None,
+         conftest_edges: bool = True) -> Impact:
+    if key is None and cache is None:
+        context = PLANNING.get()
+        if context is not None:
+            key, cache = context.key, context.cache
+    from . import source_index as _source_index
     project_root = Path(project_root)
     if top is None or repo_changed is None:
         return Impact(kind="full", reason="git changes are unavailable")
@@ -464,6 +486,123 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
             reason="selection is off in .ptest.toml — "
                    "ptest doctor --fix turns it on")
 
+    direct, seeds = _classify_changed(project_root, relevant, test_roots)
+    index = _source_index.build_project_index(
+        project_root, config, key=key, cache=cache,
+        conftest_edges=conftest_edges)
+    relevant_now = tuple(sorted(relevant))
+    if index.complete:
+        return _plan_with_index(project_root, config, changed, dropped,
+                                relevant, direct, seeds, index)
+    verdict = _legacy_tail(project_root, selection, test_roots, changed,
+                           dropped, relevant)
+    return replace(verdict, relevant=relevant_now)
+
+
+def _classify_changed(project_root: Path, relevant: list[str],
+                      test_roots: tuple):
+    """Split relevant paths without reading any file.
+
+    Returns direct test files on disk and seed paths. Outside-graph and
+    test-support paths are left for the precedence loop, as in 0.4.
+    """
+    direct: set[str] = set()
+    seeds: list[str] = []
+    for path in sorted(relevant):
+        if not path.endswith(".py"):
+            continue
+        elif _is_test_file(path, test_roots):
+            if (project_root / path).is_file():
+                direct.add(path)
+        elif not _is_test_support(path, test_roots):
+            seeds.append(path)
+    return direct, seeds
+
+
+def _parse_untracked(project_root: Path, path: str) -> bool:
+    """Parse-check a seed missing from the index (0.4 read semantics)."""
+    candidate = project_root / path
+    if not candidate.is_file():
+        return True
+    text = _read_text(candidate)
+    if text is None:
+        return False
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _plan_with_index(project_root: Path, config: C.Config,
+                     changed: tuple[str, ...], dropped: int,
+                     relevant: list[str], direct: set[str],
+                     seeds: list[str], index: C.ProjectIndex) -> Impact:
+    """Static verdicts from one complete project index (D3)."""
+    from . import source_index as _source_index
+    selection = config.selection
+    test_roots = tuple(config.runner.test_roots)
+    relevant_now = tuple(sorted(relevant))
+
+    def _dynamic(impact: Impact) -> Impact:
+        return replace(impact, engine="static", dynamic_ok=True,
+                       relevant=relevant_now, project_index=index)
+
+    def _static(impact: Impact) -> Impact:
+        return replace(impact, relevant=relevant_now)
+
+    for path in sorted(relevant):
+        if not path.endswith(".py"):
+            return _dynamic(Impact(
+                kind="full", changed=changed, ignored=dropped,
+                reason=f"{path} is outside the import graph"))
+        if _is_test_file(path, test_roots):
+            continue
+        if _is_test_support(path, test_roots):
+            return _dynamic(Impact(
+                kind="full", changed=changed, ignored=dropped,
+                reason=f"{path} is test support"))
+        item = index.files.get(path)
+        parsed = item.index.parsed if item is not None \
+            else _parse_untracked(project_root, path)
+        if not parsed:
+            return _static(Impact(
+                kind="full", changed=changed, ignored=dropped,
+                reason=f"{path} could not be parsed"))
+
+    total = len(index.test_files)
+    reverse = dict(index.reverse)
+    for seed, importers in _source_index.missing_seed_importers(
+            index, project_root, seeds).items():
+        reverse[seed] = frozenset(set(reverse.get(seed, ())) | importers)
+    reached = C.selection_static_reach(reverse, seeds)
+    via = {path for path in reached
+           if path in index.test_files and path not in direct}
+    files = tuple(sorted(set(direct) | via))
+    if not files:
+        verdict = Impact(kind="none", changed=changed, ignored=dropped)
+        if not relevant_now:
+            return _static(verdict)
+        return _dynamic(verdict)
+    if total > 0 and len(files) >= selection.full_ratio * total:
+        return _dynamic(Impact(
+            kind="full", changed=changed, ignored=dropped,
+            reason=(f"{len(files)} of {total} test files reaches "
+                    f"full_ratio {selection.full_ratio:g}")))
+    if len(files) > MAX_SELECTED:
+        return _dynamic(Impact(
+            kind="full", changed=changed, ignored=dropped,
+            reason=f"{len(files)} test files exceed the 200-file "
+                   "scoped limit"))
+    return _dynamic(Impact(
+        kind="selected", changed=changed, files=files,
+        direct=len(direct), via=len(via), total=total, ignored=dropped))
+
+
+def _legacy_tail(project_root: Path, selection, test_roots: tuple,
+                 changed: tuple[str, ...], dropped: int,
+                 relevant: list[str]) -> Impact:
+    """Byte-exact 0.4 verdicts, used only when the index is incomplete."""
     direct: set[str] = set()
     seeds: list[str] = []
     for path in sorted(relevant):
