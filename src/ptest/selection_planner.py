@@ -121,16 +121,16 @@ def _seed_class(analysis, per_path, index, old_scopes, new_scopes,
                 analysis.cf.add((path, qual))
 
 
-def _diff_path(analysis, index, path, basemap, versions, historical):
+def _diff_path(analysis, index, path, basemap, versions):
     """4.3: diff one stale path; fills the analysis sets."""
     old_digest = basemap.get(path)
     old = versions.get(old_digest) if old_digest is not None else None
     current = index.files.get(path)
     new = current.index if current is not None else None
-    if current is not None:
-        is_test = path in index.test_files
-    else:
-        is_test = path in historical
+    # Only a path present in the current index can be a runnable test
+    # file: a removed test file must not enter WF (5.8 lists runnable
+    # test files), even though the store still holds nodes for it.
+    is_test = path in index.test_files
     added = path not in basemap
     if added or new is None or old is None or not old.parsed or not new.parsed:
         # Whole-path change. An added non-test file contributes no PW:
@@ -260,21 +260,27 @@ def _propagate(index, analysis, olds):
                 break
 
 
-def _analyze(index, stale_py, basemap, versions, historical):
+def _analyze(index, stale_py, basemap, versions):
     """4.3 per-path diffs plus the 4.4 fixpoint for one signature."""
     analysis = _Analysis()
     olds = {}
     for path in sorted(stale_py):
-        olds[path] = _diff_path(analysis, index, path, basemap, versions,
-                                historical)
+        olds[path] = _diff_path(analysis, index, path, basemap, versions)
     _propagate(index, analysis, olds)
     return analysis
 
 
+def _test_set(index):
+    """Current runnable test files as a set (no per-call copy)."""
+    raw = index.test_files
+    return (raw if isinstance(raw, (set, frozenset)) else frozenset(raw))
+
+
 def _reach(index, test_roots, seeds):
     """4.7: static reach plus the support-file root widening."""
+    test_set = _test_set(index)
     found = set(C.selection_static_reach(index.reverse, seeds))
-    found &= set(index.test_files)
+    found &= test_set
     for seed in seeds:
         current = index.files.get(seed)
         if current is None or not current.support:
@@ -284,7 +290,7 @@ def _reach(index, test_roots, seeds):
         for root in test_roots:
             prefix = None if root in ("", ".") else root.rstrip("/") + "/"
             if prefix is None or seed == root or seed.startswith(prefix):
-                for test in index.test_files:
+                for test in test_set:
                     if (prefix is None or test == root
                             or test.startswith(prefix)):
                         found.add(test)
@@ -359,7 +365,6 @@ def plan(inputs):
     changed_py = {c for c in changed if c.endswith(".py")}
     nonpy_changed = any(not c.endswith(".py") for c in changed)
     test_roots = tuple(inputs.test_roots)
-    historical = {node.test_file for node in deps.nodes.values()}
 
     compat_runs = {rid: run for rid, run in deps.runs.items()
                    if run.compatibility == compatibility}
@@ -384,8 +389,7 @@ def plan(inputs):
             per_run[rid] = memo[sig]
         elif len(memo) < C.SELECTION_MAX_SIGNATURES:
             basemap, stale_py, _ = stale_of[rid]
-            analysis = _analyze(index, stale_py, basemap, inputs.versions,
-                                historical)
+            analysis = _analyze(index, stale_py, basemap, inputs.versions)
             memo[sig] = analysis
             per_run[rid] = analysis
         else:
@@ -413,6 +417,36 @@ def plan(inputs):
     if full_candidates:
         full_reason = f"ambient data file {min(full_candidates)} changed"
 
+    # Per-run/per-signature precomputes (D5/A3): the clause-b reach set,
+    # the clause-g ambient reach set plus its changed-function labels,
+    # and the stale/changed path union are identical for every node of a
+    # run, so they are built once here; per node only membership tests
+    # remain.
+    reach_b = {}
+    touch = {}
+    ambient_pre = {}
+    for rid in compat_runs:
+        _, stale_py, stale_data = stale_of[rid]
+        reach_b[rid] = _reach(index, test_roots, set(stale_py) | changed_py)
+        touch[rid] = (frozenset(set(stale_py) | set(stale_data))
+                      | frozenset(changed))
+    for rid, analysis in per_run.items():
+        ambient_paths = set(analysis.am)
+        ambient_labels = []
+        for fid in list(compat_runs[rid].ambient.functions):
+            # Unresolvable ids already tainted this run opaque above.
+            resolved = _resolve_function(vocabulary, fid)
+            if resolved is None:
+                continue
+            path, qual = resolved
+            if (path in analysis.pw or (path, qual) in analysis.cf
+                    or (path, qual) in analysis.af):
+                ambient_paths.add(path)
+                if (path, qual) in analysis.cf:
+                    ambient_labels.append(f"{path}::{qual}")
+        ambient_pre[rid] = (_reach(index, test_roots, ambient_paths),
+                            tuple(ambient_labels))
+
     fallbacks = {}
     selected_files = set()
     selected_nodes = set()
@@ -436,7 +470,7 @@ def plan(inputs):
             continue
         recorded += 1
         usable_of[nodeid] = node.test_file
-        _, stale_py, stale_data = stale_of[node.run_id]
+        _, _, stale_data = stale_of[node.run_id]
         analysis = per_run[node.run_id]
         node_fids = list(node.fixtures)
         missing_fixture = any(fid not in deps.fixtures for fid in node_fids)
@@ -466,14 +500,13 @@ def plan(inputs):
             # Clause b is definitive for opaque/demoted nodes (N3): the
             # static rule alone decides, and no precise clause applies.
             fallbacks[nodeid] = _DEMOTED_REASON if demoted else opaque_why
-            if (node.test_file in _reach(index, test_roots,
-                                         set(stale_py) | changed_py)
+            if (node.test_file in reach_b[node.run_id]
                     or stale_data or nonpy_changed):
                 _select()
             elif own is not None:
                 funcs, mods, data = own
                 dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
-                if dep_paths & (set(stale_py) | set(stale_data) | changed):
+                if dep_paths & touch[node.run_id]:
                     reached += 1
             continue
         if node.test_file in analysis.wf:
@@ -513,24 +546,16 @@ def plan(inputs):
         if hit:
             _select()
             continue
-        ambient_paths = set()
-        for fid in list(run.ambient.functions):
-            # Unresolvable ids already tainted this run opaque above.
-            resolved = _resolve_function(vocabulary, fid)
-            if resolved is None:
-                continue
-            path, qual = resolved
-            if (path in analysis.pw or (path, qual) in analysis.cf
-                    or (path, qual) in analysis.af):
-                ambient_paths.add(path)
-                if (path, qual) in analysis.cf:
-                    _count("function", f"{path}::{qual}", nodeid)
-        ambient_paths |= set(analysis.am)
-        if node.test_file in _reach(index, test_roots, ambient_paths):
+        ambient_reach, ambient_labels = ambient_pre[node.run_id]
+        if node.test_file in ambient_reach:
+            # Clause g selects first; units count only nodes it selected
+            # (4.8: each unit carries the count of nodes it selected).
+            for label in ambient_labels:
+                _count("function", label, nodeid)
             _select()  # clause g
             continue
         dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
-        if dep_paths & (set(stale_py) | set(stale_data) | changed):
+        if dep_paths & touch[node.run_id]:
             reached += 1
 
     # 4.6: test files with no usable node follow the static rule (N2).
@@ -551,6 +576,10 @@ def plan(inputs):
         seeds_all |= analysis.seeds
         am_all |= analysis.am
         wf_all |= analysis.wf
+    # 5.8 lists runnable test files: a removed path must never leak into
+    # files/whole_files (or their units), however it entered WF.
+    test_set = _test_set(index)
+    wf_all &= test_set
     for _, _, stale_data in stale_of.values():
         data_all |= stale_data
     units = []
@@ -581,8 +610,8 @@ def plan(inputs):
             tests=len(counts.get(("unrecorded", path), ()))))
     units.sort(key=lambda unit: (-unit.tests, unit.label))
 
-    files = sorted(selected_files | wf_all | unrecorded)
-    whole = sorted(wf_all | unrecorded)
+    files = sorted((selected_files | wf_all | unrecorded) & test_set)
+    whole = sorted((wf_all | unrecorded) & test_set)
     whole_set = set(whole)
     files_set = set(files)
     deselect = sorted(nodeid for nodeid, path in usable_of.items()

@@ -1170,6 +1170,7 @@ def test_ambient_function_change_selects_by_static_reach():
                  changed=(LIB,))
     d = PL.plan(inputs)
     assert PL.is_selected(d, node.nodeid)
+    assert units_by_kind(d)["function"] == {LIB + "::serve": 1}
 
 
 def test_ambient_function_change_static_miss_skips():
@@ -1194,6 +1195,10 @@ def test_ambient_function_change_static_miss_skips():
                  changed=(LIB,))
     d = PL.plan(inputs)
     assert not PL.is_selected(d, node.nodeid)
+    assert d.selected == 0
+    # Clause g must not count units for a node it does not select: the
+    # changed ambient function selected nothing, so it carries 0 tests.
+    assert units_by_kind(d) == {"function": {LIB + "::serve": 0}}
 
 
 def test_ambient_data_change_sets_full_reason():
@@ -1407,6 +1412,33 @@ def test_added_test_file_is_selected_whole():
     d = PL.plan(inputs)
     assert fresh in d.whole_files
     assert "unrecorded" not in units_by_kind(d)
+
+
+def test_removed_test_file_selects_nothing():
+    # Deleting a test file selects nothing: the missing path must not
+    # appear in files/whole_files (5.8 lists runnable test files), even
+    # though the store still holds nodes for it.
+    gone = "tests/test_gone.py"
+    lib = FI(scopes=[SC("f", body="b1")])
+    test_fi = FI(scopes=[SC("test_f")])
+    gone_fi = FI(scopes=[SC("test_g")])
+    vb = VB()
+    index = IDX({
+        LIB: PF(LIB, "d", lib),
+        TEST: PF(TEST, "dt", test_fi, test=True),
+    })
+    node_lib = NODE(vb, TEST + "::test_f", TEST, "r1", funcs=[(LIB, "f")])
+    node_gone = NODE(vb, gone + "::test_g", gone, "r1", funcs=[(LIB, "f")])
+    run = RUN(vb, "r1", {LIB: "d", TEST: "dt", gone: "dg-old"})
+    deps = SNAP(vb, [run], [node_lib, node_gone])
+    inputs = INP(index, deps,
+                 versions={"d": lib, "dt": test_fi, "dg-old": gone_fi},
+                 changed=(gone,))
+    d = PL.plan(inputs)
+    assert d.files == ()
+    assert d.whole_files == ()
+    assert d.selected == 0
+    assert "file" not in units_by_kind(d)
 
 
 def test_unrecorded_file_in_reach_selected_whole():
