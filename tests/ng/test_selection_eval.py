@@ -164,26 +164,39 @@ def test_union_or_full_prefers_full_only_when_affordable():
     assert se.ground_truth_target((), v1_is_full=False, affordable=True) == ("union", ())
 
 
-@pytest.mark.parametrize(("indicators", "expected"), [
-    ({"nondeterministic": True}, "R1"),
-    ({"order_dependent": True}, "R1"),
-    ({"shared_state": True}, "R1"),
-    ({"dynamic_name": True}, "R2"),
-    ({"import_side_effect": True}, "R3"),
-    ({"spawned_binary": True}, "R4"),
-    ({"recorder_tamper": True}, "R5"),
-    ({"py_as_data": True}, "R6"),
-    ({"installed_package": True}, "R7"),
-    ({"line_number_dependent": True}, "R8"),
-    ({"background_thread": True}, "R9"),
-    ({}, "unclassified"),
+@pytest.mark.parametrize(("indicators", "site_class", "expected"), [
+    ({"nondeterministic": True}, "comparison-flip", "R1"),
+    ({"order_dependent": True}, "comparison-flip", "R1"),
+    ({"shared_state": True}, "comparison-flip", "R1"),
+    ({"dynamic_name": True}, "constant-change", "R2"),
+    ({"dynamic_name": True}, "attr-change", "R2"),
+    ({"import_side_effect": True}, "import-change", "R3"),
+    ({"spawned_binary": True}, "comparison-flip", "R4"),
+    ({"recorder_tamper": True}, "comparison-flip", "R5"),
+    ({"py_as_data": True}, "comparison-flip", "R6"),
+    ({"installed_package": True}, "comparison-flip", "R7"),
+    ({"line_number_dependent": True}, "comparison-flip", "R8"),
+    ({"background_thread": True}, "comparison-flip", "R9"),
+    ({}, "comparison-flip", "unclassified"),
+    # Spec preconditions gate R2/R3: a dynamic-name signal on a
+    # function-body change, or an import-side-effect signal on a
+    # non-import change, must not classify.
+    ({"dynamic_name": True}, "comparison-flip", "unclassified"),
+    ({"dynamic_name": True}, None, "unclassified"),
+    ({"import_side_effect": True}, "comparison-flip", "unclassified"),
+    ({"import_side_effect": True}, None, "unclassified"),
 ])
-def test_miss_classification_mapping(indicators, expected):
-    assert se.classify_miss(indicators) == expected
+def test_miss_classification_mapping(indicators, site_class, expected):
+    assert se.classify_miss(indicators, site_class=site_class) == expected
 
 
 def test_miss_classification_priority_is_documented_order():
-    assert se.classify_miss({"dynamic_name": True, "spawned_binary": True}) == "R2"
+    assert se.classify_miss({"dynamic_name": True, "spawned_binary": True},
+                            site_class="constant-change") == "R2"
+    # The same signals on a function-body change fall through to R4:
+    # the R2 gate blocks, the R4 signal still counts.
+    assert se.classify_miss({"dynamic_name": True, "spawned_binary": True},
+                            site_class="comparison-flip") == "R4"
 
 
 def test_baseline_failures_are_not_misses():
@@ -290,36 +303,69 @@ def test_check_mutant_rejects_noop_unparseable_and_multi_site():
     assert se.check_mutant("X = 1\n", "X = 2\n") == "X = 2\n"
 
 
-@pytest.mark.parametrize(("snippet", "indicator", "expected"), [
-    ("def f(a):\n    return getattr(a, 'b')\n", "dynamic_name", "R2"),
-    ("configure()\n", "import_side_effect", "R3"),
+@pytest.mark.parametrize(("snippet", "indicator", "site_class", "expected"), [
+    ("def f(a):\n    return getattr(a, 'b')\n", "dynamic_name",
+     "constant-change", "R2"),
+    ("configure()\n", "import_side_effect", "import-change", "R3"),
     ("def run():\n    import subprocess\n    subprocess.run(['x'])\n",
-     "spawned_binary", "R4"),
-    ("DB = 'selection.db'\n", "recorder_tamper", "R5"),
-    ("import ast\ntree = ast.parse('x=1')\n", "py_as_data", "R6"),
-    ("import importlib.metadata\n", "installed_package", "R7"),
-    ("n = node.lineno\n", "line_number_dependent", "R8"),
+     "spawned_binary", "comparison-flip", "R4"),
+    ("DB = 'selection.db'\n", "recorder_tamper", "comparison-flip", "R5"),
+    ("import ast\ntree = ast.parse('x=1')\n", "py_as_data",
+     "comparison-flip", "R6"),
+    ("import importlib.metadata\n", "installed_package", "comparison-flip",
+     "R7"),
+    ("n = node.lineno\n", "line_number_dependent", "comparison-flip", "R8"),
     ("def start():\n    import threading\n    threading.Thread().start()\n",
-     "background_thread", "R9"),
-    ("import random\nx = random.random()\n", "nondeterministic", "R1"),
-    ("def bump():\n    global STATE\n    STATE = 1\n", "order_dependent", "R1"),
-    ("import multiprocessing\n", "shared_state", "R1"),
+     "background_thread", "comparison-flip", "R9"),
+    ("import random\nx = random.random()\n", "nondeterministic",
+     "comparison-flip", "R1"),
+    ("def bump():\n    global STATE\n    STATE = 1\n", "order_dependent",
+     "comparison-flip", "R1"),
+    ("import multiprocessing\n", "shared_state", "comparison-flip", "R1"),
 ])
-def test_every_indicator_can_fire_and_classifies(snippet, indicator, expected):
+def test_every_indicator_can_fire_and_classifies(snippet, indicator,
+                                                site_class, expected):
     signals = se.indicators_for(snippet)
     assert signals[indicator] is True
-    assert se.classify_miss({indicator: True}) == expected
-    assert se.classify_miss(signals) == expected
+    assert se.classify_miss({indicator: True},
+                            site_class=site_class) == expected
+    assert se.classify_miss(signals, site_class=site_class) == expected
 
 
 def test_ground_truth_argv_uses_ptest_with_result_json():
     union = se.ground_truth_argv("uv run ptest", ("a.py", "b.py"),
                                  "run-1.json", full=False)
-    assert union == ["uv", "run", "ptest", "a.py", "b.py",
-                     "--result-json", "run-1.json"]
+    assert union == ["uv", "run", "ptest", "--result-json", "run-1.json",
+                     "a.py", "b.py"]
     full = se.ground_truth_argv("uv run ptest", ("a.py",), "run-1.json",
                                 full=True)
-    assert full == ["uv", "run", "ptest", "--full", "--result-json", "run-1.json"]
+    assert full == ["uv", "run", "ptest", "--full", "--again",
+                    "--result-json", "run-1.json"]
+
+
+def test_ground_truth_argv_parses_through_ptest_cli():
+    """The harness argv must survive ptest's own option parsing.
+
+    Options precede paths, so ``--result-json`` lands in ``result_path``
+    (not in the pytest tail) for both the union and the full branch.
+    """
+    from ptest import cli as cli_mod
+    union = se.ground_truth_argv(
+        "uv run ptest",
+        ("tests/test_a.py", "tests/test_b.py"),
+        "selection-eval-run-x.json", full=False)
+    parsed = cli_mod._parse_execution(union[3:])
+    assert parsed.result_path == "selection-eval-run-x.json"
+    assert tuple(parsed.runner_argv) == ("tests/test_a.py",
+                                         "tests/test_b.py")
+    assert parsed.mode == cli_mod.C.Mode.SCOPED
+    full = se.ground_truth_argv(
+        "uv run ptest", (), "selection-eval-run-x.json", full=True)
+    parsed_full = cli_mod._parse_execution(full[3:])
+    assert parsed_full.result_path == "selection-eval-run-x.json"
+    assert tuple(parsed_full.runner_argv) == ()
+    assert parsed_full.mode == cli_mod.C.Mode.FULL
+    assert parsed_full.again is True
 
 
 def test_read_result_export_rejects_missing_and_scalar(tmp_path):
@@ -423,10 +469,11 @@ def test_run_mutant_wires_truth_baseline_misses_and_classes(
     monkeypatch.setattr(se, "create_scratch", fake_create)
     monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
     monkeypatch.setattr(se, "plan_v1",
-                        lambda root, changed: FakePlan(
+                        lambda top, root, changed: FakePlan(
                             "selected", ("tests/test_a.py",), 10))
     monkeypatch.setattr(se, "plan_v2",
-                        lambda root, changed: FakePlan("selected", (), 10))
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
     monkeypatch.setattr(se, "_run", fake_run)
     monkeypatch.setattr(se, "store_db_path",
                         lambda root: (_ for _ in ()).throw(
@@ -442,13 +489,19 @@ def test_run_mutant_wires_truth_baseline_misses_and_classes(
     assert record["failed"] == ["tests/test_a.py::test_1"]
     assert record["baseline_failed"] == []
     assert record["misses"] == ["tests/test_a.py::test_1"]
-    assert record["miss_classes"] == ["R1"]
+    # The sampled mutant is a function-body site (raise-entry) whose
+    # changed line carries no R signals, and the missed test file does
+    # not exist on disk: the miss is unclassifiable even though the
+    # module-wide `import random` still shows up as a suggestion.
+    assert record["miss_classes"] == ["unclassified"]
+    assert record["suggestions"] == ["nondeterministic"]
     assert record["v1_files"] == ["tests/test_a.py"]
     assert record["v1_is_full"] is False
     assert record["full_files"] == 10
     assert set(record["planning_ms"]) == {"v1", "v2"}
     text = (out / "selection-eval.md").read_text()
-    assert "tests/test_a.py::test_1" in text and "R1" in text
+    assert "tests/test_a.py::test_1" in text
+    assert "unclassified (suggests: nondeterministic)" in text
 
 
 def test_median_of_three():
@@ -485,3 +538,191 @@ def test_dry_run_lists_mutants_without_touching_git_or_runs(tmp_path, monkeypatc
     listed = json.loads((out / "selection-eval.json").read_text(encoding="utf-8"))
     assert len(listed["mutants"]) == 4
     assert "m000" in capsys.readouterr().out
+
+
+def test_plan_v1_call_uses_0410_rules_and_fails_without_the_knob():
+    seen = {}
+
+    class FakeImpact:
+        def plan(self, top, root, config, changed, *, conftest_edges=True):
+            seen.update(top=top, root=root, changed=changed,
+                        conftest_edges=conftest_edges)
+            return "v1-plan"
+
+    assert se._plan_v1_call(FakeImpact(), "top", "root", "config",
+                            ("a.py",)) == "v1-plan"
+    assert seen["conftest_edges"] is False
+    assert seen["changed"] == ("a.py",)
+
+    class OldImpact:
+        def plan(self, top, root, config, changed):
+            return "v1-plan"
+
+    with pytest.raises(RuntimeError):
+        se._plan_v1_call(OldImpact(), "top", "root", "config", ("a.py",))
+
+
+def test_open_without_py_path_is_not_py_as_data():
+    assert se.indicators_for('open("fixture.py")\n')["py_as_data"] is True
+    assert se.indicators_for(
+        'handle = open("data.json")\n# parsed from docs/schema.py\n'
+    )["py_as_data"] is False
+
+
+def test_function_body_miss_with_incidental_tokens_stays_unclassified(
+        tmp_path):
+    module = ("import random\n\n\n"
+              "STATE = {}\n\n\n"
+              "def fetch(key):\n"
+              "    return getattr(STATE, key)\n\n\n"
+              "def touch():\n"
+              "    global STATE\n"
+              "    STATE = {}\n\n\n"
+              "def compare(first, second):\n"
+              "    if first == second:\n"
+              "        return True\n"
+              "    return False\n")
+    site = next(site for site in se.collect_sites({"pkg/core.py": module})
+                if site.site_class == "comparison-flip")
+    mutated = se.apply_mutation(module, site)
+    # Whole-module keyword hits would claim R1 (random/global) or R2
+    # (getattr) for this function-body change; they are suggestions only.
+    whole = se.indicators_for(mutated)
+    assert whole["nondeterministic"] is True
+    assert whole["dynamic_name"] is True
+    assert whole["order_dependent"] is True
+    assert se.classify_miss(whole, site_class="comparison-flip") == "R1"
+    # The per-miss signals come from the changed line plus the missed
+    # test only, so the incidental module tokens cannot classify.
+    scratch = tmp_path / "scratch"
+    (scratch / "tests").mkdir(parents=True)
+    (scratch / "tests" / "test_core.py").write_text(
+        "from pkg.core import compare\n\n\n"
+        "def test_compare():\n"
+        "    assert compare(1, 1) is True\n")
+    signals = se.signals_for_miss(scratch, "tests/test_core.py::test_compare",
+                                  module, mutated)
+    assert signals["dynamic_name"] is False
+    assert signals["nondeterministic"] is False
+    assert signals["order_dependent"] is False
+    assert se.classify_miss(signals,
+                            site_class="comparison-flip") == "unclassified"
+
+
+def test_test_function_source_ignores_sibling_tests(tmp_path):
+    scratch = tmp_path / "scratch"
+    (scratch / "tests").mkdir(parents=True)
+    (scratch / "tests" / "test_two.py").write_text(
+        "import threading\n\n\n"
+        "def test_noisy():\n"
+        "    threading.Thread().start()\n\n\n"
+        "def test_quiet():\n"
+        "    assert 1 + 1 == 2\n")
+    noisy = se.signals_for_miss(scratch, "tests/test_two.py::test_noisy",
+                                "X = 1\n", "X = 2\n")
+    assert noisy["background_thread"] is True
+    assert se.classify_miss(noisy, site_class="comparison-flip") == "R9"
+    quiet = se.signals_for_miss(scratch, "tests/test_two.py::test_quiet",
+                                "X = 1\n", "X = 2\n")
+    assert quiet["background_thread"] is False
+    assert se.classify_miss(quiet,
+                            site_class="comparison-flip") == "unclassified"
+    missing = se.signals_for_miss(scratch, "tests/test_two.py::test_absent",
+                                  "X = 1\n", "X = 2\n")
+    assert se.classify_miss(missing,
+                            site_class="comparison-flip") == "unclassified"
+
+
+def test_project_prefix_is_empty_for_standalone_project(tmp_path):
+    assert se._project_prefix(tmp_path / "proj") == ""
+
+
+def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
+        tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    child = tmp_path / "services" / "cp"
+    (child / "pkg").mkdir(parents=True)
+    core = ("import random\n\nVALUE = 1\n\n\n"
+            "def add(first, second=True):\n"
+            "    total = first + second\n"
+            "    if total == VALUE:\n"
+            "        return total\n"
+            "    return -1\n")
+    (child / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+    assert se._project_prefix(child) == "services/cp"
+
+    created = {}
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "services" / "cp" / "pkg" / "core.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(core)
+        created[name] = scratch
+        return scratch
+
+    class FakePlan:
+        def __init__(self, kind, files, total):
+            self.kind = kind
+            self.files = files
+            self.total = total
+
+    plans = []
+    runs = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        runs.append((list(cmd), Path(cwd)))
+        export = cmd[cmd.index("--result-json") + 1]
+        assert cmd[:3] == ["uv", "run", "ptest"]
+        Path(cwd, export).write_text("{}\n")
+        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        if "ground-truth" in export:
+            (cache / "lastfailed").write_text(json.dumps(
+                {"services/cp/tests/test_a.py::test_1": True}))
+            code = 1
+        else:
+            (cache / "lastfailed").write_text(json.dumps({}))
+            code = 0
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(
+        se, "plan_v1",
+        lambda top, root, changed: plans.append(("v1", top, root, changed))
+        or FakePlan("selected", ("tests/test_a.py",), 10))
+    monkeypatch.setattr(
+        se, "plan_v2",
+        lambda top, root, changed: plans.append(("v2", top, root, changed))
+        or FakePlan("selected", (), 10))
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda root: (_ for _ in ()).throw(
+                            RuntimeError("no store here")))
+    args = type("Args", (), {
+        "project": str(child), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": False})()
+    assert se.run_campaign(args) == 0
+    # Planning happens in scratch/prefix with a repo-relative change,
+    # from the scratch repo root as top.
+    assert len(plans) == 2
+    for label, top, root, changed in plans:
+        assert top == created["m0001"]
+        assert root == created["m0001"] / "services" / "cp"
+        assert tuple(changed) == ("services/cp/pkg/core.py",)
+    # ptest runs from the scratch repo root with child-prefixed scopes,
+    # options before paths so the export is produced.
+    assert len(runs) == 2
+    for cmd, cwd in runs:
+        assert cwd in (created["m0001"], created["m0001-baseline"])
+        assert cmd[3] == "--result-json"
+        assert cmd[5:] == ["services/cp/tests/test_a.py"]
+    payload = json.loads((out / "selection-eval.json").read_text())
+    record = payload["mutants"][0]
+    assert record["misses"] == ["services/cp/tests/test_a.py::test_1"]
+    assert record["miss_classes"] == ["unclassified"]
+    assert record["suggestions"] == ["nondeterministic"]

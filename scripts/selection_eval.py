@@ -5,12 +5,12 @@ plans v1 (static) and v2 (dynamic) for each mutant in a scratch git
 worktree, runs the ground truth through the branch's ptest, and reports
 misses classified by the spec section 9 residual risks (R1-R9).
 
-Only v2 planning needs the merged T1-T5 tree
-(selection_engine.preview); v1 planning, config/domain loading, the
-subprocess ground-truth/baseline runs and the store backup/restore all
-use base-tree APIs. Every pure-logic unit in this module is stdlib-only
-and covered by tests/ng/test_selection_eval.py. The A1-A5 campaign
-itself is never executed in tests.
+Planning needs the merged tree (v1: impact.plan with conftest_edges
+from T1; v2: selection_engine.preview from T1-T5); config/domain
+loading, the subprocess ground-truth/baseline runs and the store
+backup/restore all use base-tree APIs. Every pure-logic unit in this
+module is stdlib-only and covered by tests/ng/test_selection_eval.py.
+The A1-A5 campaign itself is never executed in tests.
 """
 from __future__ import annotations
 
@@ -76,6 +76,16 @@ _MISS_PRIORITY = (
     ("R9", ("background_thread",)),
 )
 
+#: Site classes that are module-level (skeleton) changes in spec terms.
+#: R2 (dynamic references to changed module-level names) only applies to
+#: these; a function-body miss can never be an R2 no matter what tokens
+#: appear elsewhere in the module.
+_MODULE_LEVEL_SITE_CLASSES = frozenset({
+    "constant-change",
+    "attr-change",
+    "import-change",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class Site:
@@ -106,6 +116,9 @@ class MutantRecord:
     baseline_failed: tuple = ()
     misses: tuple = ()
     miss_classes: tuple = ()
+    # Whole-file keyword hits on the mutated module, demoted to hints:
+    # they never classify, they only suggest where a human should look.
+    suggestions: tuple = ()
     planning_ms: Mapping = field(default_factory=dict)
 
 
@@ -473,12 +486,85 @@ def ground_truth_target(v1_files, v1_is_full, affordable):
     return ("union", tuple(v1_files))
 
 
-def classify_miss(indicators: Mapping[str, bool]) -> str:
-    """Classify a miss by spec section 9 (R1-R9) or 'unclassified'."""
+def classify_miss(indicators: Mapping[str, bool], *,
+                  site_class: str | None = None) -> str:
+    """Classify a miss by spec section 9 (R1-R9) or 'unclassified'.
+
+    ``indicators`` must be signals derived from the missed test and its
+    recorded dependencies (see :func:`signals_for_miss`), never keyword
+    hits across the whole mutated module. Each R class additionally
+    requires its spec precondition: R3 only for an import-line change,
+    R2 only for a module-level (skeleton) change. Anything else is
+    'unclassified' and blocks the release; whole-file keyword hits are
+    reported as suggestions only (see ``MutantRecord.suggestions``).
+    """
     for code, keys in _MISS_PRIORITY:
+        if code == "R3" and site_class != "import-change":
+            continue
+        if code == "R2" and site_class not in _MODULE_LEVEL_SITE_CLASSES:
+            continue
         if any(indicators.get(key) for key in keys):
             return code
     return "unclassified"
+
+
+def _changed_line(original: str, mutated: str) -> str:
+    """The added line(s) of a validated single-edit mutant.
+
+    This is the dependency edge that actually fired: the test failed
+    because of this change, so R signals derived from it describe the
+    miss. Incidental tokens elsewhere in the module are ignored.
+    """
+    import difflib
+    added = [line[2:] for line in difflib.ndiff(
+        original.splitlines(), mutated.splitlines())
+        if line.startswith("+ ") and not line.startswith("+++")]
+    return "\n".join(added)
+
+
+def _test_function_source(scratch_root: Path, nodeid: str) -> str:
+    """Source of the missed test function; "" when it cannot be read.
+
+    Unknown test locations yield no signals (fail towards
+    'unclassified') rather than whole-file guesses.
+    """
+    path, _, rest = nodeid.partition("::")
+    if not path or not rest:
+        return ""
+    name = rest.split("::")[-1].split("[", 1)[0]
+    try:
+        text = (Path(scratch_root) / path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    try:
+        module = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return ""
+    for node in ast.walk(module):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name
+                and node.end_lineno is not None):
+            lines = text.splitlines(keepends=True)
+            return "".join(lines[node.lineno - 1:node.end_lineno])
+    return ""
+
+
+def signals_for_miss(scratch_root: Path, nodeid: str,
+                     original: str, mutated: str) -> dict:
+    """R signals for one miss: missed test function + mutant changed line.
+
+    The mutated module is a recorded dependency of the miss (the test
+    fails because of this change); only the changed line counts, so an
+    incidental ``getattr(`` or ``global`` elsewhere in the file cannot
+    launder a real selection bug into an R class.
+    """
+    merged: dict[str, bool] = {}
+    for signals in (indicators_for(_changed_line(original, mutated)),
+                    indicators_for(_test_function_source(scratch_root,
+                                                         nodeid))):
+        for key, value in signals.items():
+            merged[key] = bool(merged.get(key) or value)
+    return merged
 
 
 def find_misses(mutant_failed, baseline_failed, selected) -> tuple:
@@ -510,6 +596,7 @@ def render_json(report: EvalReport) -> str:
                 "baseline_failed": list(record.baseline_failed),
                 "misses": list(record.misses),
                 "miss_classes": list(record.miss_classes),
+                "suggestions": list(record.suggestions),
                 "planning_ms": dict(record.planning_ms),
             }
             for record in report.mutants
@@ -533,6 +620,9 @@ def render_markdown(report: EvalReport) -> str:
     for record in report.mutants:
         miss = ",".join(record.misses) if record.misses else "none"
         classes = ",".join(record.miss_classes) if record.miss_classes else "-"
+        if ("unclassified" in (record.miss_classes or ())
+                and record.suggestions):
+            classes += f" (suggests: {','.join(record.suggestions)})"
         planning = record.planning_ms or {}
         plan_ms = f"{planning.get('v1', '-')}/{planning.get('v2', '-')}"
         lines.append(f"| {record.mutant_id} | {record.site_class} | "
@@ -622,11 +712,21 @@ RESULT_EXPORT_PREFIX = "selection-eval-run-"
 
 def ground_truth_argv(ptest_cmd: str, files: tuple, export_name: str,
                       full: bool) -> list:
-    """Build ``ptest <files> --result-json`` (or ``ptest --full``) argv."""
+    """Build ``ptest --result-json NAME <files>`` (or ``--full --again``) argv.
+
+    Options must precede the test paths: ptest's ``_parse_execution``
+    treats the first non-option token as the start of the runner tail,
+    so a trailing ``--result-json`` would be passed through to pytest
+    (which rejects it) instead of producing the export.
+    """
     base = shlex.split(ptest_cmd)
     if full:
-        return base + ["--full", "--result-json", export_name]
-    return base + list(files) + ["--result-json", export_name]
+        # --again: the baseline scratch is a pristine checkout of an
+        # already-passed tree, which `ptest --full` would skip as
+        # "already verified"; --again forces the fresh run the campaign
+        # needs for flaky/pre-existing failure marking.
+        return base + ["--full", "--again", "--result-json", export_name]
+    return base + ["--result-json", export_name, *list(files)]
 
 
 def read_result_export(path: Path) -> dict:
@@ -728,15 +828,32 @@ def _planning_domain_config(project_root: Path):
     return platform_mod.domain_paths(None), _planning_config(project_root)
 
 
-def plan_v1(project_root: Path, changed: tuple):
-    """Static plan: impact.plan with the 0.4.10 rules."""
+def plan_v1(top: Path, project_root: Path, changed: tuple):
+    """Static plan: impact.plan with the 0.4.10 rules.
+
+    ``changed`` holds repo-relative (top-relative) paths; ``project_root``
+    is the child under evaluation (``top`` itself for a standalone
+    project). ``conftest_edges=False`` is the 0.4.10 rule set — the
+    merged T1 tree defaults it to True, which would enlarge the v1
+    baseline and tilt the A2 precision comparison in v2's favour.
+    """
     from ptest import impact  # noqa: imported lazily; stdlib-only at import
     config = _planning_config(project_root)
-    root = Path(project_root)
-    return impact.plan(root, root, config, tuple(changed))
+    return _plan_v1_call(impact, top, project_root, config, tuple(changed))
 
 
-def plan_v2(project_root: Path, changed: tuple):
+def _plan_v1_call(impact_mod, top, project_root, config, changed):
+    """Call impact.plan with the 0.4.10 rule set (seam for unit tests)."""
+    import inspect
+    if "conftest_edges" not in inspect.signature(impact_mod.plan).parameters:
+        raise RuntimeError(
+            "v1 planning needs the merged T1 tree "
+            "(impact.plan without conftest_edges is not 0.4.10 rules)")
+    return impact_mod.plan(Path(top), Path(project_root), config,
+                           tuple(changed), conftest_edges=False)
+
+
+def plan_v2(top: Path, project_root: Path, changed: tuple):
     """Dynamic plan: selection_engine.preview (needs the merged T1-T5 tree)."""
     try:
         from ptest import selection_engine  # noqa: needs the merged tree
@@ -745,8 +862,8 @@ def plan_v2(project_root: Path, changed: tuple):
             "plan v2 needs the merged T1-T5 tree "
             "(ptest.selection_engine.preview is absent)") from exc
     domain, config = _planning_domain_config(project_root)
-    root = Path(project_root)
-    return selection_engine.preview(domain, root, root, config, tuple(changed))
+    return selection_engine.preview(domain, Path(top), Path(project_root),
+                                    config, tuple(changed))
 
 
 def store_db_path(project_root: Path) -> Path:
@@ -874,11 +991,14 @@ def indicators_for(mutated_text: str) -> dict:
                                for token in ("selection.db", "PTEST_STATE_DIR",
                                              ".deps", "selection_store",
                                              "dependency file")),
+        # The open() arm requires a `.py` path inside the same call:
+        # `open(` anywhere plus `.py` anywhere else fires on almost any
+        # module and would mislabel real selection bugs as R6.
         "py_as_data": any(token in mutated_text
                           for token in ("ast.parse", "importlib.resources",
                                         "pkgutil", ".py'",
-                                        '.py"')) or (
-            "open(" in mutated_text and ".py" in mutated_text),
+                                        '.py"')) or bool(re.search(
+            r"open\([^()\n]*\.py", mutated_text)),
         "installed_package": any(token in mutated_text
                                  for token in ("site-packages",
                                                "importlib.metadata",
@@ -902,15 +1022,52 @@ def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
                            done.returncode != 0)
 
 
+def _project_prefix(project: Path) -> str:
+    """Posix path of the project relative to its git toplevel.
+
+    ``""`` for a standalone project (the project is the toplevel, or git
+    is unavailable); a monorepo child such as ``services/control-plane``
+    yields ``"services/control-plane"``.
+    """
+    # subprocess directly (not _run): tests stub _run for ptest runs,
+    # and prefix detection must keep working under those stubs.
+    try:
+        done = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              cwd=project, capture_output=True, text=True,
+                              timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if done.returncode != 0:
+        return ""
+    try:
+        rel = Path(project).resolve().relative_to(
+            Path(done.stdout.strip()).resolve())
+    except (OSError, ValueError):
+        return ""
+    text = rel.as_posix()
+    return "" if text == "." else text
+
+
+def _scope_path(prefix: str, path: str) -> str:
+    """A project-relative plan path as a repo-root ptest scope."""
+    return f"{prefix}/{path}" if prefix else path
+
+
 def _run_mutant(args, project: Path, out: Path, store_db, backup,
                 mutant: Mutant) -> MutantRecord:
     """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
     if store_db is not None:
         restore_store(store_db, backup)  # pristine store for planning
+    # A scratch worktree always checks out the whole repo at its root,
+    # so for a monorepo child the mutation, planning and test scopes
+    # live under `scratch/prefix` while ptest itself runs from the
+    # scratch repo root with child-prefixed scopes (monorepo rule).
+    prefix = _project_prefix(Path(project))
     scratch = create_scratch(project, out, mutant.mutant_id)
+    workdir = scratch if not prefix else scratch / prefix
     baseline_scratch = None
     try:
-        target = scratch / mutant.site.path
+        target = workdir / mutant.site.path
         original = target.read_text(encoding="utf-8")
         mutated = apply_mutation(original, mutant.site)
         if mutant.site.site_class == "data-change":
@@ -919,12 +1076,13 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         else:
             mutated = check_mutant(original, mutated)
         target.write_text(mutated, encoding="utf-8")
-        changed = (mutant.site.path,)
+        changed_top = (f"{prefix}/{mutant.site.path}"
+                       if prefix else mutant.site.path)
         before = time.perf_counter()
-        v1 = plan_v1(scratch, changed)
+        v1 = plan_v1(scratch, workdir, (changed_top,))
         v1_ms = (time.perf_counter() - before) * 1000.0
         before = time.perf_counter()
-        v2 = plan_v2(scratch, changed)
+        v2 = plan_v2(scratch, workdir, (changed_top,))
         v2_ms = (time.perf_counter() - before) * 1000.0
         v1_files = tuple(getattr(v1, "files", ()) or ())
         v2_files = tuple(getattr(v2, "files", ()) or ())
@@ -932,10 +1090,13 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         v2_is_full = getattr(v2, "kind", "selected") == "full"
         full_files = int(getattr(v1, "total", 0) or 0)
         union = sorted(set(v1_files) | set(v2_files))
+        union_scopes = tuple(_scope_path(prefix, path) for path in union)
         kind, files = ground_truth_target(
-            union, v1_is_full=v1_is_full, affordable=len(union) <= 200)
+            union_scopes, v1_is_full=v1_is_full,
+            affordable=len(union) <= 200)
         # Baseline without the mutant (pristine scratch worktree), then
-        # ground truth with the mutant, both through the branch's ptest.
+        # ground truth with the mutant, both through the branch's ptest
+        # from the scratch repo root.
         baseline_scratch = create_scratch(
             project, out, mutant.mutant_id + "-baseline")
         baseline_failed = _ptest_failures(
@@ -945,10 +1106,17 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         if v2_is_full:
             covered = mutant_failed
         else:
-            covered = selected_covering(mutant_failed, v2_files)
+            covered = selected_covering(
+                mutant_failed,
+                tuple(_scope_path(prefix, path) for path in v2_files))
         misses = find_misses(mutant_failed, baseline_failed, covered)
-        signals = indicators_for(mutated)
-        miss_classes = tuple(classify_miss(signals) for _ in misses)
+        whole = indicators_for(mutated)
+        suggestions = tuple(sorted(key for key, hit in whole.items() if hit))
+        miss_classes = tuple(
+            classify_miss(
+                signals_for_miss(scratch, miss, original, mutated),
+                site_class=mutant.site.site_class)
+            for miss in misses)
         return MutantRecord(
             mutant_id=mutant.mutant_id,
             site_class=mutant.site.site_class,
@@ -957,6 +1125,7 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
             v1_is_full=v1_is_full, full_files=full_files,
             failed=mutant_failed, baseline_failed=baseline_failed,
             misses=misses, miss_classes=miss_classes,
+            suggestions=suggestions,
             planning_ms={"v1": v1_ms, "v2": v2_ms})
     finally:
         if baseline_scratch is not None:
