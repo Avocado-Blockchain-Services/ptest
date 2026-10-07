@@ -1217,8 +1217,14 @@ def indicators_for(mutated_text: str) -> dict:
 
 def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
                     full: bool, label: str, scope: tuple = ()) -> tuple:
-    """Run one file set through ptest and return the failing node ids."""
-    export_name = f"{RESULT_EXPORT_PREFIX}{label}-{scratch.name}.json"
+    """Run one file set through ptest and return the failing node ids.
+
+    Each run gets a fresh export name: ptest never overwrites an existing
+    file, and a persistent scratch would otherwise refuse every export
+    after the first (exit 70 on a green run).
+    """
+    export_name = (f"{RESULT_EXPORT_PREFIX}{label}-{scratch.name}-"
+                   f"{os.urandom(4).hex()}.json")
     done = _run(ground_truth_argv(ptest_cmd, tuple(files), export_name, full,
                                   scope=scope),
                 cwd=scratch, timeout=_RUN_TIMEOUT_S)
@@ -1229,6 +1235,10 @@ def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
         if candidate.is_file():
             export = candidate
     try:
+        if done.returncode not in (0, 1):
+            # Incomplete, timed out or cancelled: its failure list is
+            # partial, so it is no ground truth.
+            raise RuntimeError("ptest could not complete the run")
         return failing_nodeids(export, scratch, done.returncode != 0)
     except RuntimeError as exc:
         lines = str(getattr(done, "stderr", "") or "").strip().splitlines()
@@ -1238,6 +1248,11 @@ def _ptest_failures(ptest_cmd: str, scratch: Path, files: tuple,
                           ][-40:])
         raise RuntimeError(f"{exc}; ptest exit {done.returncode}:\n{tail}") \
             from exc
+    finally:
+        for leftover in (scratch / export_name,
+                         *(scratch / part / export_name for part in scope)):
+            if leftover.is_file() and not leftover.is_symlink():
+                leftover.unlink()
 
 
 def _project_prefix(project: Path) -> str:

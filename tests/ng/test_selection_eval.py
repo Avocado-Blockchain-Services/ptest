@@ -939,3 +939,38 @@ def test_v2_covering_is_node_level():
     assert se.v2_covering(failed, _Plan(kind="none"), "") == ()
     nested = tuple(f"svc/{node}" for node in failed)
     assert se.v2_covering(nested, plan, "svc") == ("svc/tests/test_a.py::t1",)
+
+
+def test_an_incomplete_ground_truth_is_not_evaluated(tmp_path, monkeypatch):
+    """Exit 70/124 runs report a partial failure list: never ground truth."""
+    seen = _campaign(tmp_path, monkeypatch, v1=_Plan(), v2=_Plan(),
+                     failing=lambda label, cwd: (
+                         ("tests/test_a.py::test_1",) if label == "ground"
+                         else ()))
+    real_run = se._run
+
+    def incomplete(cmd, cwd, timeout=600):
+        done = real_run(cmd, cwd, timeout)
+        if "--full" in cmd and "ground" in cmd[cmd.index("--result-json") + 1]:
+            return type("Done", (), {"returncode": 70,
+                                     "stderr": "ptest: incomplete (exit 70)"})()
+        return done
+
+    monkeypatch.setattr(se, "_run", incomplete)
+    assert se.run_campaign(seen["args"]) == 0
+    record = _report(seen)["mutants"][0]
+    assert "ptest could not complete the run" in record["error"]
+    assert "ptest: incomplete (exit 70)" in record["error"]
+    assert record["misses"] == []
+
+
+def test_each_run_exports_to_a_fresh_name_and_cleans_up(tmp_path,
+                                                        monkeypatch):
+    seen = _campaign(tmp_path, monkeypatch, v1=_Plan(), v2=_Plan(),
+                     failing=lambda label, cwd: ())
+    assert se.run_campaign(seen["args"]) == 0
+    exports = [cmd[cmd.index("--result-json") + 1]
+               for _, cmd, _ in seen["runs"]]
+    assert len(set(exports)) == len(exports) == 2
+    for scratch in seen["created"].values():
+        assert not list(scratch.rglob(se.RESULT_EXPORT_PREFIX + "*"))

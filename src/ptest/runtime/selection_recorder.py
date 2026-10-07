@@ -329,6 +329,36 @@ def _is_pure_write(mode: object, flags: object) -> bool:
     return False
 
 
+def _opens_directory(flags: object) -> bool:
+    """``os.open(..., O_DIRECTORY)``: a directory is never a data read."""
+    try:
+        return (isinstance(flags, int)
+                and bool(flags & getattr(os, "O_DIRECTORY", 0)))
+    except Exception:
+        return False
+
+
+def _dir_fd_relative(path: object, mode: object) -> bool:
+    """A bare-name ``os.open`` whose name does not exist under the cwd.
+
+    The ``open`` audit event omits ``dir_fd``, so a name opened relative
+    to a directory descriptor (``shutil.rmtree``'s fd walk, run by pytest
+    when it cleans old temp dirs) would resolve against the cwd and land
+    as a phantom data path. ``os.open`` reports ``mode`` as None; a
+    relative name that exists under the cwd is still recorded.
+    """
+    try:
+        if mode is not None:
+            return False
+        if isinstance(path, bytes):
+            path = os.fsdecode(path)
+        if not isinstance(path, str) or not path or os.path.isabs(path):
+            return False
+        return not os.path.lexists(path)
+    except Exception:
+        return False
+
+
 class _Ctx:
     """What one test, fixture or ambient context executed."""
 
@@ -1040,7 +1070,8 @@ class Recorder:
                 except (OSError, ValueError):
                     candidate = None
                 if (isinstance(candidate, str)
-                        and _data_path(candidate.replace(os.sep, "/"))):
+                        and _data_path(candidate.replace(os.sep, "/"))
+                        and not os.path.isdir(real)):
                     # Recorded whatever its size: dropping a large file
                     # would silently lose D(T) and violate spec N1. The
                     # engine bounds its own digest reads.
@@ -1088,7 +1119,8 @@ class Recorder:
                 path = args[0] if len(args) > 0 else None
                 mode = args[1] if len(args) > 1 else None
                 flags = args[2] if len(args) > 2 else None
-                if _is_pure_write(mode, flags):
+                if (_is_pure_write(mode, flags) or _opens_directory(flags)
+                        or _dir_fd_relative(path, mode)):
                     return
                 rel = self._resolve_data(path)
                 if rel is not None:

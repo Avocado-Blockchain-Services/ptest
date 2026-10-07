@@ -954,3 +954,57 @@ def test_no_forkserver_socket_connect_stays_clean(tmp_path, monkeypatch):
     rec.enter_test("t.py::t1")
     rec._handle_audit("socket.connect", (object(), "/tmp/pymp-test/sock-abc123"))
     assert rec._current.opaque is False
+
+
+_RMTREE_SCRIPT = r"""
+import json, os, shutil, sys
+from ptest.runtime import selection_recorder as recorder
+
+checkout, outside = sys.argv[1], sys.argv[2]
+rec = recorder.Recorder(checkout_root=checkout, run_id="d" * 32,
+                        report_path=checkout + "/report.json",
+                        role="controller")
+rec.recording = True
+os.chdir(checkout)
+sys.addaudithook(rec._handle_audit)
+shutil.rmtree(outside)
+print(json.dumps(sorted(rec._ambient.data)))
+"""
+
+
+def test_rmtree_outside_the_checkout_records_no_phantom_data(tmp_path):
+    """pytest cleans old temp dirs with shutil.rmtree's fd walk; its
+    dir_fd-relative opens must not land as data paths. Before the fix
+    each removed subdirectory became one, overflowing the 4096 cap and
+    making the whole run opaque."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    outside = tmp_path / "pytest-of-user" / "pytest-1"
+    for index in range(30):
+        (outside / f"test_case_{index}0" / "sub").mkdir(parents=True)
+        (outside / f"test_case_{index}0" / "sub" / "f.txt").write_text("x")
+    proc = subprocess.run(
+        [sys.executable, "-c", _RMTREE_SCRIPT, str(checkout), str(outside)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == []
+    assert not outside.exists()
+
+
+def test_directory_and_dir_fd_opens_are_not_data(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "cfg.json").write_text("{}")
+    rec = _recorder(tmp_path)
+    rec.recording = True
+    rec.enter_test("t.py::t1")
+    rec._handle_audit("open", ("data", None, os.O_RDONLY | os.O_DIRECTORY))
+    rec._handle_audit("open", (str(tmp_path / "data"), "r", None))
+    rec._handle_audit("open", ("phantom_dir0", None, os.O_RDONLY))
+    assert rec._current.data == set()
+    # A real relative os.open, and a builtin open of an absent file (an
+    # absence the test may depend on), are still recorded.
+    rec._handle_audit("open", ("data/cfg.json", None, os.O_RDONLY))
+    rec._handle_audit("open", ("data/missing.json", "r", None))
+    assert rec._current.data == {"data/cfg.json", "data/missing.json"}
