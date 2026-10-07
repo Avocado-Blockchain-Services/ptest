@@ -604,13 +604,22 @@ class _Resolver:
             for position, stmt in enumerate(indexes[rel].statements):
                 if stmt.kind == "import":
                     for imp in by_statement.get(position, []):
-                        if imp.local is None:
-                            continue
                         if imp.name == "*":
+                            # Star imports carry local=None by construction
+                            # (index_source), so this branch must come before
+                            # the local-is-None skip or _stars stays empty
+                            # and neither bound_names() expansion nor the
+                            # resolve() star fallback can ever fire.
                             stars.append(imp)
+                        elif imp.local is None:
+                            continue
                         else:
                             bound[imp.local] = ("import", imp)
-                elif stmt.kind in ("def", "class", "assign"):
+                elif stmt.kind in ("def", "class", "assign", "effect"):
+                    # "effect" included: a mixed-target assign such as
+                    # x = d['k'] = v still binds its plain Name targets
+                    # (stmt.bound holds only those; pure mutating targets
+                    # yield () so nothing is added for them).
                     for name in stmt.bound:
                         bound[name] = ("local",)
             self._bindings[rel] = bound
@@ -829,13 +838,19 @@ def build_project_index(project_root: Path, config: C.Config, *,
                         bound.add(C.selection_name_key(rel, imp.local))
                 statement_refs.append(frozenset(targets))
                 statement_bound.append(frozenset(bound))
-            elif stmt.kind in ("def", "class", "assign"):
+            elif stmt.kind in ("def", "class", "assign", "effect"):
+                # Design 4.4: effect statements (mutating and mixed-target
+                # assigns) resolve their refs like any other statement, so
+                # an upstream change can match them and propagate through
+                # AM; stmt.bound holds only the plain Name targets (possibly
+                # none), which stay bound conservatively as before.
                 statement_refs.append(frozenset(
                     key for chain in stmt.refs
                     for key in resolver.resolve(rel, chain)))
                 statement_bound.append(frozenset(
                     C.selection_name_key(rel, name) for name in stmt.bound))
             else:
+                # "doc": no refs, no bindings.
                 statement_refs.append(frozenset())
                 statement_bound.append(frozenset())
         files[rel] = C.ProjectFile(

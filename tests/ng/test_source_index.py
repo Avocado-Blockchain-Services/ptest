@@ -690,6 +690,99 @@ def test_build_star_reexport_chain_refs_propagate(tmp_path):
                                                           "tests/test_x.py")
 
 
+# --- regression: multi-level star chains propagate (finding 1, attempt 3) ---
+
+def test_build_star_chain_three_levels_propagate(tmp_path):
+    # _Resolver used to drop every star import (local is None), so a name
+    # could not pass through more than one star re-export and star-fed
+    # scope refs resolved to nothing.
+    init_git_repo(tmp_path, files={
+        "pkg/__init__.py": "from .mid import *\n",
+        "pkg/mid.py": "from .core import *\nOWN = 1\n",
+        "pkg/core.py": "TIMEOUT = 5\n",
+        "tests/test_x.py": ("from pkg import TIMEOUT\n"
+                            "def test_x():\n    assert TIMEOUT\n"),
+    })
+    index = S.build_project_index(tmp_path, _config(), key=None,
+                                  cache=None)
+    key = C.selection_name_key
+
+    mid = index.files["pkg/mid.py"]
+    mid_star = [i for i, st in enumerate(mid.index.statements)
+                if st.kind == "import" and st.bound == ("*",)]
+    assert len(mid_star) == 1
+    assert key("pkg/core.py", "TIMEOUT") in mid.statement_refs[mid_star[0]]
+
+    top = index.files["pkg/__init__.py"]
+    top_star = [i for i, st in enumerate(top.index.statements)
+                if st.kind == "import" and st.bound == ("*",)]
+    assert len(top_star) == 1
+    # TIMEOUT arrives through mid's own star (bound_names(mid) expands it);
+    # OWN is mid's own binding. Each level points at its direct target and
+    # the planner fixpoint carries the change transitively.
+    assert key("pkg/mid.py", "TIMEOUT") in top.statement_refs[top_star[0]]
+    assert key("pkg/mid.py", "OWN") in top.statement_refs[top_star[0]]
+    assert key("pkg/__init__.py",
+               "TIMEOUT") in top.statement_bound[top_star[0]]
+    # The importing test resolves to the re-export, which the change
+    # fingerprint now reaches through the chain.
+    assert key("pkg/__init__.py", "TIMEOUT") in _all_refs(index,
+                                                          "tests/test_x.py")
+
+
+def test_build_star_imported_name_resolves_in_function_scope(tmp_path):
+    # A name a module gets from a star import must resolve inside function
+    # bodies too (conservative star handling), not be dropped.
+    init_git_repo(tmp_path, files={
+        "pkg/__init__.py": "",
+        "pkg/consts.py": "LIMIT = 10\n",
+        "pkg/app.py": ("from pkg.consts import *\n"
+                       "def get():\n    return LIMIT\n"),
+    })
+    index = S.build_project_index(tmp_path, _config(), key=None,
+                                  cache=None)
+    key = C.selection_name_key
+
+    assert key("pkg/consts.py",
+               "LIMIT") in index.files["pkg/app.py"].scope_refs["get"]
+
+
+# --- regression: effect statements resolve refs (finding 2, attempt 3) ---
+
+def test_build_effect_statements_resolve_refs_and_keep_plain_bound(tmp_path):
+    # Mixed-target and mutating assigns are "effect", but their refs must
+    # still resolve (design 4.4: upstream changes propagate through AM) and
+    # their plain Name targets must stay bound (pre-fix assign behavior).
+    init_git_repo(tmp_path, files={
+        "pkg/__init__.py": "",
+        "pkg/consts.py": "LIMIT = 10\n",
+        "pkg/app.py": ("from pkg.consts import LIMIT\n"
+                       "d = {}\n"
+                       "x = d['k'] = LIMIT\n"
+                       "SETTINGS = {}\n"
+                       "SETTINGS['limit'] = LIMIT\n"
+                       "(a, b.c) = 1, 2\n"),
+    })
+    index = S.build_project_index(tmp_path, _config(), key=None,
+                                  cache=None)
+    key = C.selection_name_key
+    pf = index.files["pkg/app.py"]
+    kinds = [st.kind for st in pf.index.statements]
+    assert kinds == ["import", "assign", "effect", "assign", "effect",
+                     "effect"]
+
+    mixed = 2
+    assert key("pkg/consts.py", "LIMIT") in pf.statement_refs[mixed]
+    assert key("pkg/app.py", "x") in pf.statement_bound[mixed]
+
+    mutating = 4
+    assert key("pkg/consts.py", "LIMIT") in pf.statement_refs[mutating]
+    assert pf.statement_bound[mutating] == frozenset()
+
+    unpack = 5
+    assert key("pkg/app.py", "a") in pf.statement_bound[unpack]
+
+
 # --- regression: mutating assigns are effectful (finding 2) ---
 
 def test_index_source_mutating_assign_targets_are_effect():
