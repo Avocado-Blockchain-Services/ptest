@@ -876,7 +876,9 @@ def _index_many(raws: list) -> list[C.FileIndex]:
             import concurrent.futures
             import multiprocessing
             import threading
-            method = "fork" if threading.active_count() == 1 \
+            # fork is cheapest but only safe single-threaded on Linux.
+            method = "fork" if (sys.platform.startswith("linux")
+                                and threading.active_count() == 1) \
                 else "forkserver"
             context = multiprocessing.get_context(method)
             with concurrent.futures.ProcessPoolExecutor(
@@ -916,7 +918,10 @@ def build_project_index(project_root: Path, config: C.Config, *,
     indexes: dict[str, C.FileIndex] = {}
     if key is not None and cache is not None:
         wanted = sorted({digest for digest in digests.values() if digest})
-        found = dict(cache.get_many(wanted) or {})
+        try:
+            found = dict(cache.get_many(wanted) or {})
+        except Exception:
+            found = {}  # the cache only saves work; it never fails a plan
         decoded: dict[str, C.FileIndex | None] = {}
         for digest in wanted:
             blob = found.get(digest)
@@ -935,7 +940,10 @@ def build_project_index(project_root: Path, config: C.Config, *,
         for digest in wanted:
             per_digest[digest] = decoded[digest]
         if fresh:
-            cache.put_many(fresh)
+            try:
+                cache.put_many(fresh)
+            except Exception:
+                pass  # unsaved entries are simply indexed again next time
         for rel in rels:
             digest = digests[rel]
             if digest:

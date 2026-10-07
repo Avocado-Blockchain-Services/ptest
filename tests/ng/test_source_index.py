@@ -884,3 +884,34 @@ def test_dump_distinguishes_what_ast_dump_does():
         assert dumps(left) != dumps(right), (left, right)
     deep = "x = " + " + ".join(["1"] * 5000)
     assert S._dump(ast.parse(deep))  # iterative: no recursion limit
+
+
+class _BrokenCache:
+    def get_many(self, digests):
+        raise RuntimeError("database is locked")
+
+    def put_many(self, blobs):
+        raise RuntimeError("database is locked")
+
+
+def test_a_failing_cache_never_fails_the_index(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("def f():\n    return 1\n")
+    index = S.build_project_index(tmp_path, _config(), key=b"k" * 32,
+                                  cache=_BrokenCache())
+    assert index.complete is True
+    assert index.files["pkg/a.py"].index.parsed is True
+
+
+def test_parallel_indexing_matches_serial(monkeypatch):
+    """A cold plan indexes many files in a process pool; the result is
+    identical to the serial path, and a pool failure falls back to it."""
+    raws = [f"import os\nVALUE_{n} = {n}\n\ndef f{n}(x):\n"
+            f"    return os.path.join(x, '{n}')\n".encode()
+            for n in range(80)] + [None, b"def broken(:\n"]
+    serial = [S._index_or_unparsed(raw) for raw in raws]
+    assert S._index_many(raws) == serial
+    import concurrent.futures
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                        lambda **kw: (_ for _ in ()).throw(OSError("no")))
+    assert S._index_many(raws) == serial
