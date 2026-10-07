@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -436,6 +437,10 @@ class Recorder:
         # later tests is a dependency of every test that runs its owner.
         self._first: dict[object, object] = {}
         self._edges: set[tuple[object, object]] = set()
+        # The project code that last started in the current context: the
+        # owner of code started on another thread with no project caller.
+        self._last_key: object = None
+        self._main_thread = threading.main_thread()
         self._test_ctx: _Ctx | None = None
         self._fixture_owners: list[object] = []
         self._file_project: dict[str, bool] = {}
@@ -732,6 +737,7 @@ class Recorder:
 
     def _switch(self) -> None:
         """Ownership check plus restart on every context switch."""
+        self._last_key = None
         try:
             if self._tool is None or not self._active:
                 return
@@ -1029,6 +1035,7 @@ class Recorder:
             except Exception:
                 frame = None
             self._note(key, frame)
+            self._last_key = key
         except Exception:
             pass
 
@@ -1036,11 +1043,15 @@ class Recorder:
         """Note ``key`` in the current context and, while its owner runs
         for the first time in this process, the edge owner → key.
 
-        The owner is the nearest project frame from ``frame`` up, else the
-        function fixture being set up (code started on another thread or
-        a greenlet has no project caller). Everything an owner ran on its
-        first run is state later runs may reuse instead of rebuilding. A
-        module body runs once per process, so its importer always owns it.
+        The owner is the nearest project frame from ``frame`` up. Code
+        started on another thread or a greenlet has no project caller; it
+        belongs to the function fixture being set up and to the project
+        code that last started in this context when it runs on another
+        thread (the code that handed it over, e.g. through
+        ``asyncio.to_thread``). Everything an
+        owner ran on its first run is state later runs may reuse instead
+        of rebuilding. A module body runs once per process, so its
+        importer always owns it.
         Ambient sightings need no owner: ambient is shared by every test.
         """
         try:
@@ -1058,12 +1069,18 @@ class Recorder:
                     break
                 frame = frame.f_back
                 depth += 1
-            if owner is None and self._fixture_owners:
-                owner = self._fixture_owners[-1]
-            if owner is None or owner == key:
-                return
-            if key[0] == "M" or self._first.get(owner) is token:
-                self._edges.add((owner, key))
+            owners = [owner]
+            if owner is None:
+                owners = []
+                if threading.current_thread() is not self._main_thread:
+                    owners.append(self._last_key)
+                if self._fixture_owners:
+                    owners.append(self._fixture_owners[-1])
+            for owner in owners:
+                if owner is None or owner == key:
+                    continue
+                if key[0] == "M" or self._first.get(owner) is token:
+                    self._edges.add((owner, key))
         except Exception:
             pass
 

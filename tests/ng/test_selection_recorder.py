@@ -1051,6 +1051,28 @@ def thread_init():
     _built = "built"
 
 
+_threaded = None
+
+
+def _prep():
+    return "p"
+
+
+def thread_build():
+    return "t"
+
+
+def get_threaded():
+    global _threaded
+    if _threaded is None:
+        _prep()
+        worker = threading.Thread(target=thread_build)
+        worker.start()
+        worker.join()
+        _threaded = "t"
+    return _threaded
+
+
 def fixture_body():
     if _built is None:
         worker = threading.Thread(target=thread_init)
@@ -1088,6 +1110,7 @@ def first():
         rec.exit_function_fixture()
     lazy.get_engine()
     lazy.dispatch(False)
+    lazy.get_threaded()
 
 def second():
     rec.enter_function_fixture(fixture)
@@ -1097,6 +1120,7 @@ def second():
         rec.exit_function_fixture()
     lazy.get_engine()
     lazy.dispatch(True)
+    lazy.get_threaded()
 
 def third():
     lazy.dispatch(False)
@@ -1186,6 +1210,19 @@ def test_thread_started_by_a_fixture_reaches_later_fixture_users(tmp_path):
     nodes = _lazy_project(tmp_path)
     assert "pkg/lazy.py::thread_init" in nodes["test_first"]["functions"]
     assert "pkg/lazy.py::thread_init" in nodes["test_second"]["functions"]
+
+
+def test_thread_started_by_code_reaches_later_callers(tmp_path):
+    """Code started on another thread outside any fixture (asyncio
+    to_thread from a helper) belongs to the project code that started just
+    before it in the same test. Before the fix it had no owner
+    (control-plane race tests reach the template through _worker_engine,
+    not the db fixture: 11 misses)."""
+    nodes = _lazy_project(tmp_path)
+    assert "pkg/lazy.py::thread_build" in nodes["test_first"]["functions"]
+    assert "pkg/lazy.py::thread_build" in nodes["test_second"]["functions"]
+    for name in ("test_third", "test_fourth"):
+        assert "pkg/lazy.py::thread_build" not in nodes[name]["functions"]
 
 
 def test_one_shot_branch_of_a_shared_caller_stays_local(tmp_path):
