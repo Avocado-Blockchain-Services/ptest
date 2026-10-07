@@ -947,10 +947,25 @@ def restore_store(store_db: Path, backup: Path | None) -> None:
     shutil.copy2(backup, store_db)
 
 
-def isolate_scratch(scratch: Path, prefix: str, project_id: str) -> Path:
-    """The scratch project dir, its config pointed at the campaign store."""
+def isolate_scratch(scratch: Path, prefix: str, project_id: str,
+                    source: Path | None = None) -> Path:
+    """The scratch project dir, its config pointed at the campaign store.
+
+    ``source`` is the real project dir: an untracked ``.env`` beside the
+    repo root or the project is symlinked in (shared, never copied).
+    """
     workdir = scratch if not prefix else scratch / prefix
     overlay_project_id(workdir / ".ptest.toml", project_id)
+    if source is not None:
+        source = Path(source)
+        top = source
+        for _ in prefix.split("/") if prefix else ():
+            top = top.parent
+        for origin, target in ((top / ".env", scratch / ".env"),
+                               (source / ".env", workdir / ".env")):
+            if (origin.is_file() and not target.exists()
+                    and not target.is_symlink()):
+                target.symlink_to(origin)
     return workdir
 
 
@@ -963,7 +978,7 @@ def seed_records(args, project: Path, out: Path, project_id: str) -> tuple:
     prefix = _project_prefix(Path(project))
     scratch = create_scratch(project, out, "seed")
     try:
-        isolate_scratch(scratch, prefix, project_id)
+        isolate_scratch(scratch, prefix, project_id, project)
         return _ptest_failures(args.ptest, scratch, (), True, "seed",
                                scope=(prefix,) if prefix else ())
     finally:
@@ -1155,7 +1170,8 @@ def _scope_node(prefix: str, nodeid: str) -> str:
 
 
 def _run_mutant(args, project: Path, out: Path, store_db, backup,
-                mutant: Mutant, project_id: str) -> MutantRecord:
+                mutant: Mutant, project_id: str,
+                seed_failed: tuple = ()) -> MutantRecord:
     """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
     if store_db is not None:
         restore_store(store_db, backup)  # pristine store for planning
@@ -1165,7 +1181,7 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
     # scratch repo root with child-prefixed scopes (monorepo rule).
     prefix = _project_prefix(Path(project))
     scratch = create_scratch(project, out, mutant.mutant_id)
-    workdir = isolate_scratch(scratch, prefix, project_id)
+    workdir = isolate_scratch(scratch, prefix, project_id, project)
     scope = (prefix,) if prefix else ()
     baseline_scratch = None
     try:
@@ -1196,32 +1212,38 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
         kind, files = ground_truth_target(
             union_scopes, v1_is_full=v1_is_full,
             affordable=len(union) <= 200)
-        # Baseline without the mutant (pristine scratch worktree), then
-        # ground truth with the mutant, both through the branch's ptest
-        # from the scratch repo root.
-        baseline_scratch = create_scratch(
-            project, out, mutant.mutant_id + "-baseline")
-        isolate_scratch(baseline_scratch, prefix, project_id)
-        baseline_failed = _ptest_failures(
-            args.ptest, baseline_scratch, files, kind == "full", "baseline",
-            scope=scope)
-        mutant_failed = _ptest_failures(
-            args.ptest, scratch, files, kind == "full", "ground-truth",
-            scope=scope)
-        # Pytest ids are child-relative under a nested child; compare,
-        # record and resolve them as repo-root scopes (spec 6.7 misses
-        # are defined over the same file set the plans select).
-        baseline_failed = tuple(
-            _scope_node(prefix, node) for node in baseline_failed)
+        # Ground truth with the mutant through the branch's ptest from the
+        # scratch repo root. Pytest ids are child-relative under a nested
+        # child; compare, record and resolve them as repo-root scopes
+        # (spec 6.7 misses are defined over the file set the plans select).
         mutant_failed = tuple(
-            _scope_node(prefix, node) for node in mutant_failed)
+            _scope_node(prefix, node) for node in _ptest_failures(
+                args.ptest, scratch, files, kind == "full", "ground-truth",
+                scope=scope))
         if v2_is_full:
             covered = mutant_failed
         else:
             covered = selected_covering(
                 mutant_failed,
                 tuple(_scope_path(prefix, path) for path in v2_files))
+        # The seed run is the pristine baseline. A candidate miss is
+        # confirmed by rerunning its files on a pristine scratch, so a
+        # flaky or order-dependent test is not reported as a miss.
+        baseline_failed = tuple(
+            _scope_node(prefix, node) for node in seed_failed)
         misses = find_misses(mutant_failed, baseline_failed, covered)
+        if misses:
+            baseline_scratch = create_scratch(
+                project, out, mutant.mutant_id + "-baseline")
+            isolate_scratch(baseline_scratch, prefix, project_id, project)
+            confirm = tuple(sorted({file_part(node) for node in misses}))
+            rerun = tuple(
+                _scope_node(prefix, node) for node in _ptest_failures(
+                    args.ptest, baseline_scratch, confirm, False,
+                    "baseline", scope=scope))
+            baseline_failed = tuple(sorted(set(baseline_failed)
+                                           | set(rerun)))
+            misses = find_misses(mutant_failed, baseline_failed, covered)
         whole = indicators_for(mutated)
         suggestions = tuple(sorted(key for key, hit in whole.items() if hit))
         miss_classes = tuple(
@@ -1265,9 +1287,15 @@ def run_campaign(args) -> int:
     backup = (backup_store(store_db, out / "scratch" / "store-backup")
               if store_db is not None else None)
     try:
-        records = [_run_mutant(args, project, out, store_db, backup, mutant,
-                               project_id)
-                   for mutant in mutants]
+        records = []
+        for mutant in mutants:
+            records.append(_run_mutant(args, project, out, store_db, backup,
+                                       mutant, project_id, seed_failed))
+            # Partial reports survive an interrupted multi-hour campaign.
+            _write_reports(out, EvalReport(seed=args.seed,
+                                           mutants=tuple(records)))
+            print(f"{mutant.mutant_id} done ({len(records)}/{len(mutants)})",
+                  file=sys.stderr, flush=True)
     finally:
         if store_db is not None:
             restore_store(store_db, None)

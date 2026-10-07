@@ -602,11 +602,76 @@ def test_campaign_never_touches_the_real_project_store(tmp_path, monkeypatch):
         "classes": list(se.MUTATION_CLASSES), "out": str(out),
         "ptest": "uv run ptest", "benchmark_overhead": False})()
     assert se.run_campaign(args) == 0
-    assert len(seen_ids) == 3
+    # seed + ground truth; no candidate miss, so no baseline rerun
+    assert len(seen_ids) == 2
     assert all(text == f'project_id = "{campaign}"\n' for text in seen_ids)
     assert (project / ".ptest.toml").read_text() == config_text
     assert real_store.read_bytes() == b"shared-records"
     assert not store.exists()
+
+
+def test_candidate_miss_failing_on_pristine_rerun_is_not_a_miss(
+        tmp_path, monkeypatch):
+    """A test that also fails on the pristine tree (flaky, order-dependent)
+    is confirmed by a scoped baseline rerun and never reported."""
+    core = "VALUE = 1\n\n\ndef add(first):\n    return first + VALUE\n"
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        (scratch / "pkg").mkdir(parents=True, exist_ok=True)
+        (scratch / "pkg" / "core.py").write_text(core)
+        return scratch
+
+    class FakePlan:
+        kind, files, total = "selected", (), 10
+
+    runs = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        export = cmd[cmd.index("--result-json") + 1]
+        runs.append((export, list(cmd)))
+        Path(cwd, export).write_text("{}\n")
+        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        failing = {} if "seed" in export else {"tests/test_a.py::test_1": True}
+        (cache / "lastfailed").write_text(json.dumps(failing))
+        return type("Done", (), {"returncode": 1 if failing else 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "plan_v1", lambda top, root, changed: FakePlan())
+    monkeypatch.setattr(se, "plan_v2", lambda top, root, changed: FakePlan())
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda pid: (_ for _ in ()).throw(RuntimeError("x")))
+    args = type("Args", (), {
+        "project": str(project), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": False})()
+    assert se.run_campaign(args) == 0
+    record = json.loads((out / "selection-eval.json").read_text())["mutants"][0]
+    assert record["misses"] == []
+    assert record["baseline_failed"] == ["tests/test_a.py::test_1"]
+    baseline = [cmd for export, cmd in runs if "baseline" in export]
+    assert len(baseline) == 1 and baseline[0][-1] == "tests/test_a.py"
+
+
+def test_isolate_scratch_links_env_never_copies(tmp_path):
+    top = tmp_path / "repo"
+    child = top / "services" / "cp"
+    child.mkdir(parents=True)
+    (top / ".env").write_text("SECRET=1\n")
+    scratch = tmp_path / "scratch"
+    (scratch / "services" / "cp").mkdir(parents=True)
+    workdir = se.isolate_scratch(scratch, "services/cp", "ab" * 16, child)
+    assert workdir == scratch / "services" / "cp"
+    assert (scratch / ".env").is_symlink()
+    assert (scratch / ".env").resolve() == (top / ".env").resolve()
+    assert not (workdir / ".env").exists()
 
 
 def test_median_of_three():
