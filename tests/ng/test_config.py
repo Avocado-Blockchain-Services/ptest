@@ -1281,3 +1281,117 @@ def test_config_stall_timeout_render_round_trips(tmp_path, value):
     assert resolution.config is not None
     expected = None if value is None else float(value)
     assert resolution.config.runner.stall_timeout_s == expected
+
+
+# --- dynamic selection: [selection] dynamic -----------------------------------
+
+def _write_dynamic_config(root: Path, extra: str = "") -> Path:
+    path = root / ".ptest.toml"
+    path.write_text(
+        "version = 1\n"
+        'project_id = "ab1234567890ab1234567890ab123456"\n'
+        "\n[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["python"]\n'
+        'test_roots = ["tests"]\n'
+        "\n[resources]\n"
+        "\n[selection]\n"
+        "enabled = true\n"
+        f"{extra}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_selection_dynamic_defaults_true(tmp_path):
+    _write_dynamic_config(tmp_path)
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.selection.dynamic is True
+
+
+@pytest.mark.parametrize("value, expected", [("true", True), ("false", False)])
+def test_selection_dynamic_parses_bool(tmp_path, value, expected):
+    _write_dynamic_config(tmp_path, f"dynamic = {value}\n")
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.selection.dynamic is expected
+
+
+@pytest.mark.parametrize("value", [
+    "1", "0", "1.0", '"true"', '"false"', "[true]", "{a = 1}",
+])
+def test_selection_dynamic_non_bool_disables_selection(tmp_path, value):
+    # Like every other [selection] type error (e.g. full_ratio = true):
+    # fail closed with a policy-invalid warning, never invalid-config.
+    _write_dynamic_config(tmp_path, f"dynamic = {value}\n")
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.selection.enabled is False
+    assert [warning.code for warning in resolution.warnings] == [
+        "policy-invalid"]
+
+
+def test_selection_dynamic_unknown_key_disables_selection(tmp_path):
+    _write_dynamic_config(tmp_path, "dynamik = true\n")
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.selection.enabled is False
+    assert [warning.code for warning in resolution.warnings] == [
+        "policy-invalid"]
+
+
+def _dynamic_config(**overrides):
+    fields = {
+        "kind": C.RunnerKind.PYTEST,
+        "launcher": ("python",),
+        "args": (),
+        "full_args": (),
+        "test_roots": ("tests",),
+        "workers": 1,
+        "lifecycle": "cooperative-process-group",
+    }
+    return C.Config(
+        runner=C.RunnerConfig(**fields),
+        setup=None,
+        resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(enabled=True, closed_inputs=False,
+                                    **overrides),
+        project_id="ab" * 16,
+    )
+
+
+def test_selection_dynamic_renders_only_when_false():
+    rendered = _serialize_fresh(_dynamic_config()).decode("utf-8")
+    assert "dynamic" not in rendered
+    assert "full_ratio = 0.7\n" in rendered
+    assert "dynamic = false\n" not in rendered
+    rendered_false = _serialize_fresh(
+        _dynamic_config(dynamic=False)).decode("utf-8")
+    assert "full_ratio = 0.7\ndynamic = false\n" in rendered_false
+
+
+def test_selection_dynamic_render_round_trips(tmp_path):
+    text = _serialize_fresh(_dynamic_config(dynamic=False)).decode("utf-8")
+    _write_dynamic_config(tmp_path, "".join(
+        line + "\n" for line in text.splitlines()
+        if line.startswith("dynamic")))
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config is not None
+    assert resolution.config.selection.dynamic is False
+
+
+def test_selection_dynamic_leaves_policy_digest_unchanged():
+    import hashlib
+    for policy in (C.SelectionPolicy(enabled=True, closed_inputs=False),
+                   C.SelectionPolicy(enabled=True, closed_inputs=False,
+                                     dynamic=False),
+                   C.SelectionPolicy(enabled=True, closed_inputs=False,
+                                     dynamic=True)):
+        assert hashlib.sha256(repr(policy).encode()).hexdigest().startswith(
+            "43bc98485c25")

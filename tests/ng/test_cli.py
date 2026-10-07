@@ -847,6 +847,71 @@ def test_nonempty_status_and_history_are_real_producer_data(
     assert _tree_bytes(domain.root) == before
 
 
+def _install_selection_status(monkeypatch, lines, seen=None):
+    import types as _types
+
+    def status_lines(domain, items):
+        if seen is not None:
+            seen.append((domain, items))
+        return list(lines)
+
+    mod = _types.SimpleNamespace(status_lines=status_lines)
+    monkeypatch.setattr("ptest.cli._selection_api", lambda: mod)
+
+
+def test_status_shows_selection_store_line_only_when_a_store_exists(
+        inspection_project, monkeypatch, capsys):
+    domain, root = inspection_project
+    seen = []
+    _install_selection_status(
+        monkeypatch,
+        ["selection store: 12 tests recorded · 2.0 KB · newest 5.0s ago"],
+        seen)
+
+    assert main(("--fixture-domain", str(domain.root), "status")) == 0
+
+    captured = capsys.readouterr()
+    assert ("selection store: 12 tests recorded · 2.0 KB · newest 5.0s ago"
+            in captured.out)
+    assert len(seen) == 1
+    items = seen[0][1]
+    assert len(items) == 1
+    declaration, config = items[0]
+    assert declaration is None
+    assert config.project_id == "ab" * 16
+
+
+def test_status_hides_selection_line_without_a_store(
+        inspection_project, monkeypatch, capsys):
+    domain, _root = inspection_project
+    _install_selection_status(monkeypatch, [])
+    before = _tree_bytes(domain.root)
+
+    assert main(("--fixture-domain", str(domain.root), "status")) == 0
+
+    captured = capsys.readouterr()
+    assert "selection store" not in captured.out
+    assert captured.out.startswith("queued: 0\nactive: 0\n")
+    assert _tree_bytes(domain.root) == before
+
+
+def test_status_json_gains_no_selection_data(
+        inspection_project, monkeypatch, capsys):
+    domain, _root = inspection_project
+    _install_selection_status(
+        monkeypatch, ["selection store: 1 test recorded · 4 B · newest 1.0s ago"])
+
+    assert main(("--fixture-domain", str(domain.root), "status", "--json")) == 0
+
+    captured = capsys.readouterr()
+    document = C.decode_public_document(captured.out)
+    assert document.kind == "status"
+    assert document.error is None
+    assert not any("selection" in key or "store" in key
+                   for key in document.data)
+    assert captured.err == ""
+
+
 def test_human_errors_escape_and_bound_path_evidence(
         inspection_project, monkeypatch, capsys):
     from ptest import config

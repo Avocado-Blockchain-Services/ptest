@@ -1571,3 +1571,181 @@ def test_uncappable_vitest_keeps_exclusive_admission(case, fake_exec_node, monke
     assert _node_record(root)["argv"][1:] == [
         "node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
     assert _node_record(root)["vitest_env"] == {}
+
+
+# --- dynamic selection recording and ingest (T5) ------------------------------
+
+def _selection_env(monkeypatch, **overrides):
+    """Stub operations._selection_engine with a recording fake."""
+    import types
+
+    calls: dict = {}
+    fake = types.SimpleNamespace()
+
+    def prepare_run(domain, config, request, report_path, run_id):
+        calls["prepare"] = (config, request, report_path, run_id)
+        return overrides.get("env", ((C.SELECTION_RECORD_ENV, "1"),)), \
+            overrides.get("binding")
+
+    def after_run(**kwargs):
+        calls["after"] = kwargs
+
+    fake.prepare_run = prepare_run
+    fake.after_run = after_run
+    monkeypatch.setattr("ptest.operations._selection_engine", lambda: fake)
+    return calls
+
+
+def _fake_binding(root):
+    import types
+
+    return types.SimpleNamespace(path=Path(root) / "native-a001.json")
+
+
+def _pytest_selection_config(root, **policy):
+    from dataclasses import replace
+
+    config = config_api.resolve_config(root).config
+    fields = {
+        "enabled": True, "closed_inputs": False, "input_roots": (),
+        "ignored_inputs": (), "environment": (), "full_triggers": (),
+        "always": (), "no_tests": (), "non_input_outputs": (),
+        "full_ratio": 0.70, "groups": (), "dynamic": True,
+    }
+    fields.update(policy)
+    return replace(config, selection=C.SelectionPolicy(**fields))
+
+
+def test_selection_record_env_matrix(case):
+    """D9 through the real engine: record env exactly for pytest runs
+    with selection enabled and dynamic on; silent otherwise."""
+    import types
+
+    from ptest import selection_engine
+
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+    report = Path(root) / "native-a001.json"
+    scoped = C.RunRequest(mode=C.Mode.SCOPED,
+                          argv=("tests/test_native.py",))
+
+    def run(config, request):
+        env, binding = selection_engine.prepare_run(
+            domain, config, request, report, "ab" * 16)
+        return env, binding
+
+    env, binding = run(_pytest_selection_config(root), scoped)
+    assert (C.SELECTION_RECORD_ENV, "1") in env
+    assert binding is None
+    # Deselect without an ingest module still records, but binds nothing:
+    # every test in the argv files runs.
+    env, binding = run(
+        _pytest_selection_config(root),
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",),
+                     deselect=("tests/test_native.py::test_body",)))
+    assert (C.SELECTION_RECORD_ENV, "1") in env
+    assert binding is None
+    assert C.SELECTION_DESELECT_ENV not in dict(env)
+
+    silent = [
+        _pytest_selection_config(root, dynamic=False),
+        _pytest_selection_config(root, enabled=False),
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",),
+                     shadow=True),
+    ]
+    for config in silent[:2]:
+        assert run(config, scoped) == ((), None)
+    assert run(_pytest_selection_config(root), silent[2]) == ((), None)
+    command = types.SimpleNamespace(
+        runner=types.SimpleNamespace(kind=C.RunnerKind.COMMAND),
+        selection=_pytest_selection_config(root).selection)
+    assert run(command, scoped) == ((), None)
+
+
+def test_selection_prepare_run_delegates_to_engine(case, monkeypatch):
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+    config = config_api.resolve_config(root).config
+    calls = _selection_env(monkeypatch)
+    prepared = C.PreparedRun(argv=("pytest",), cwd=root, env_updates=())
+
+    out = operations._selection_prepare_run(
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",)),
+        prepared, _fake_binding(root), "ab" * 16)
+
+    assert (C.SELECTION_RECORD_ENV, "1") in out.env_updates
+    assert calls["prepare"][0] is config
+    assert calls["prepare"][2] == _fake_binding(root).path
+
+
+def test_selection_prepare_run_never_fails(case, monkeypatch):
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+    config = config_api.resolve_config(root).config
+
+    def boom():
+        raise ImportError("no selection_engine")
+
+    monkeypatch.setattr("ptest.operations._selection_engine", boom)
+    prepared = C.PreparedRun(argv=("pytest",), cwd=root, env_updates=())
+
+    out = operations._selection_prepare_run(
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",)),
+        prepared, _fake_binding(root), "ab" * 16)
+
+    assert out is prepared
+
+
+def test_selection_argv_files_picks_test_files():
+    request = C.RunRequest(
+        mode=C.Mode.SCOPED,
+        argv=("tests/test_a.py", "tests/test_b.py::TestC::test_x",
+              "--changed", "not-a-test.txt", "tests/helper.py"))
+    assert operations._selection_argv_files(request) == (
+        "tests/test_a.py", "tests/test_b.py")
+
+
+def test_basic_pytest_scoped_pass_with_deselect_records_no_proof(case):
+    """N5: a changed-mode scoped pass publishes no baseline, verified
+    record or full proof, even with deselect ids."""
+    from ptest import history
+
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+    config = config_api.resolve_config(root).config
+    checkout = operations._checkout(config)
+
+    result = operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",),
+                     deselect=("tests/test_native.py::test_body",)))
+
+    assert (result.status, result.exit_code) == (C.Status.PASSED, 0)
+    assert result.baseline_published is False
+    assert result.full_gate_eligible is False
+    assert result.source_valid is False
+    view = history.read_history(domain, checkout)
+    assert view.baseline is None
+
+
+def test_selection_after_run_receives_ingest_flags(case, monkeypatch):
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+    config = config_api.resolve_config(root).config
+    calls = _selection_env(monkeypatch)
+
+    result = operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_native.py",)))
+
+    assert result.status is C.Status.PASSED
+    after = calls["after"]
+    assert after["execution"] == "scoped"
+    assert after["project_id"] == config.project_id
+    assert len(after["run_id"]) == 32
+    assert after["valid_handoff"] is True
+    assert after["argv_files"] == ("tests/test_native.py",)
+    assert after["cancelled"] is False
+    assert after["setup_failed"] is False

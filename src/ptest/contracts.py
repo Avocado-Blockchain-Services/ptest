@@ -13,13 +13,17 @@ into :class:`Problem` with stable machine codes.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import re
 import struct
+from array import array
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
@@ -517,6 +521,9 @@ class SelectionPolicy:
     non_input_outputs: tuple = ()
     full_ratio: float = 0.70
     groups: tuple = ()
+    # repr=False keeps repr(SelectionPolicy), and so every policy digest
+    # derived from it, byte-identical to 0.4.10 for any value of the key.
+    dynamic: bool = field(default=True, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enabled", _check_bool("selection.enabled", self.enabled))
@@ -525,6 +532,7 @@ class SelectionPolicy:
                       "always", "no_tests", "non_input_outputs"):
             object.__setattr__(self, field, _as_str_tuple(f"selection.{field}", getattr(self, field)))
         object.__setattr__(self, "full_ratio", _check_float("selection.full_ratio", self.full_ratio, lo=0.1, hi=1.0))
+        object.__setattr__(self, "dynamic", _check_bool("selection.dynamic", self.dynamic))
         object.__setattr__(self, "groups", _check_tuple("selection.groups", self.groups))
         for group in self.groups:
             if not isinstance(group, Group):
@@ -1133,6 +1141,9 @@ class RunRequest:
     again: bool = False
     changed_note: str | None = None
     next_hint: bool = False
+    # Recorded, unselected node ids inside the scoped argv files; the bridge
+    # deselects exactly these (unknown ids always run). Never persisted.
+    deselect: tuple = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1166,6 +1177,10 @@ class RunRequest:
             _check_str("request.changed_note", self.changed_note)
         object.__setattr__(self, "next_hint",
                            _check_bool("request.next_hint", self.next_hint))
+        object.__setattr__(self, "deselect",
+                           _check_deselect("request.deselect", self.deselect))
+        if self.deselect and self.mode is not Mode.SCOPED:
+            raise ValueError("request.deselect requires scoped mode")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1276,6 +1291,454 @@ def stack_dump_pid(report_name: str, name: str) -> int | None:
             or not digits.isdigit() or digits[0] == "0"):
         return None
     return int(digits)
+
+
+
+# ---------------------------------------------------------------------------
+# Dependency-recorded test selection (ptest 0.5).
+#
+# One frozen contract shared by impact/source_index (T1), selection_planner
+# (T2), selection_store/selection_ingest (T3), the bridge recorder (T4) and
+# the integration (T5). The bridge imports no ptest code: it duplicates the
+# literal values it needs and its tests pin them equal to these. Nothing here
+# reaches RunResult, history or any public JSON (N9): the dependency store is
+# a separate SQLite file that older ptest never opens.
+
+SELECTION_PROTOCOL = "ptest-selection-v1"
+SOURCE_INDEX_VERSION = 1
+SELECTION_STORE_DIR = "projects"
+SELECTION_STORE_NAME = "selection.db"
+SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024
+SELECTION_STORE_TARGET_BYTES = 48 * 1024 * 1024
+SELECTION_MAX_RUNS = 256
+SELECTION_MAX_SIGNATURES = 128
+SELECTION_RECORD_ENV = "PTEST_SELECTION_RECORD"
+SELECTION_DESELECT_ENV = "PTEST_SELECTION_DESELECT"
+SELECTION_DEPS_INFIX = ".deps-"
+SELECTION_DEPS_FORMAT = "ptest-selection-deps-v1"
+SELECTION_DEPS_MAX_BYTES = 64 * 1024 * 1024
+SELECTION_DESELECT_SUFFIX = ".deselect"
+SELECTION_DESELECT_FORMAT = "ptest-selection-deselect-v1"
+SELECTION_DESELECT_MAX_BYTES = 16 * 1024 * 1024
+SELECTION_DESELECT_MAX_IDS = 200000
+SELECTION_NODEID_MAX_BYTES = 4096
+SELECTION_PATH_MAX_BYTES = 4096
+SELECTION_CONTEXT_MAX_FUNCTIONS = 100000
+SELECTION_CONTEXT_MAX_DATA = 4096
+SELECTION_DATA_MAX_BYTES = 16 * 1024 * 1024
+SELECTION_TOOL_IDS = (3, 4, 2)
+SELECTION_TOOL_NAME = "ptest-selection"
+SELECTION_ABSENT_DIGEST = ""
+SELECTION_UNREADABLE_DIGEST = "?"
+SELECTION_OUTCOMES = frozenset({
+    "passed", "failed", "error", "skipped", "xfailed", "xpassed", "unknown",
+})
+SELECTION_PASSING_OUTCOMES = frozenset({"passed", "skipped", "xfailed"})
+SELECTION_FIXTURE_SCOPES = frozenset({"class", "module", "package", "session"})
+SELECTION_STATEMENT_KINDS = frozenset({"def", "class", "import", "assign", "doc", "effect"})
+SELECTION_DEFINITION_KINDS = frozenset({"def", "class", "import", "assign"})
+SELECTION_SKIP_DIRS = frozenset({
+    "node_modules", "__pycache__", "site-packages", "build", "dist", "venv",
+    ".tox", "htmlcov",
+})
+SELECTION_OUTPUT_DIRS = frozenset({
+    "build", "dist", "node_modules", ".venv", "venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "htmlcov",
+    ".hypothesis",
+})
+# Spawned executables that can run project Python (basename, fullmatch).
+SELECTION_LAUNCHER_PATTERN = (
+    r"(?:python|pypy)[0-9.]*(?:\.exe)?|uv|uvx|pytest|py\.test|ptest"
+    r"|sh|bash|dash|zsh|fish|env|nohup|timeout|xargs"
+)
+
+
+def _selection_relpath_ok(path: object) -> bool:
+    if not isinstance(path, str) or not path or "\x00" in path or "\\" in path:
+        return False
+    if path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+        return False
+    try:
+        if len(path.encode("utf-8")) > SELECTION_PATH_MAX_BYTES:
+            return False
+    except UnicodeEncodeError:
+        return False
+    return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def selection_relpath_safe(path: object) -> bool:
+    """A checkout-relative POSIX path that can never escape the checkout."""
+    return _selection_relpath_ok(path)
+
+
+def selection_code_path(path: object) -> bool:
+    """A project ``.py`` path the source index walks (impact's skip rules)."""
+    if not _selection_relpath_ok(path) or not path.endswith(".py"):
+        return False
+    parts = path.split("/")
+    return not any(part.startswith(".") or part in SELECTION_SKIP_DIRS
+                   or part.endswith(".egg-info") for part in parts[:-1]) \
+        and not parts[-1].startswith(".")
+
+
+def selection_data_path(path: object) -> bool:
+    """A project data path a test may depend on (never code or tool output)."""
+    if not _selection_relpath_ok(path):
+        return False
+    lowered = path.lower()
+    if lowered.endswith((".py", ".pyc", ".pyo")):
+        return False
+    return not any(part.startswith(".") or part in SELECTION_SKIP_DIRS
+                   or part in SELECTION_OUTPUT_DIRS or part.endswith(".egg-info")
+                   for part in path.split("/"))
+
+
+def selection_nodeid_safe(nodeid: object) -> bool:
+    """A node id that may be bound for exact-match deselection."""
+    if not isinstance(nodeid, str) or "::" not in nodeid or "\x00" in nodeid:
+        return False
+    try:
+        if len(nodeid.encode("utf-8")) > SELECTION_NODEID_MAX_BYTES:
+            return False
+    except UnicodeEncodeError:
+        return False
+    return _selection_relpath_ok(nodeid.split("::", 1)[0])
+
+
+def selection_test_file(nodeid: str) -> str:
+    """The test file part of a node id (text before the first ``::``)."""
+    return nodeid.split("::", 1)[0]
+
+
+def selection_normalize_qualname(qualname: object) -> str | None:
+    """Map a raw ``co_qualname`` to its indexed scope; None is module-level code.
+
+    ``f.<locals>.g`` -> ``f``; ``C.m`` -> ``C.m``; ``C.<lambda>`` -> ``C``;
+    ``<module>``, ``<genexpr>``, ``<lambda>`` at module level and any invalid
+    value -> None.
+    """
+    if (not isinstance(qualname, str) or not qualname or "\x00" in qualname
+            or len(qualname) > 1024):
+        return None
+    kept: list[str] = []
+    for part in qualname.split("."):
+        if not part or part.startswith("<"):
+            break
+        kept.append(part)
+    return ".".join(kept) or None
+
+
+def selection_name_key(path: str, name: str) -> str:
+    """Canonical key of one module-level name: ``<path>:<name>``."""
+    return f"{path}:{name}"
+
+
+def selection_key_path(key: str) -> str:
+    """The path part of a name key (names never contain ``:``)."""
+    return key.rsplit(":", 1)[0]
+
+
+def selection_file_digest(key: bytes, raw: bytes) -> str:
+    """Keyed content digest; byte-identical to ``source.snapshot`` file digests."""
+    return hmac.new(key, raw, hashlib.sha256).hexdigest()
+
+
+def selection_ids(values: Iterable[int]) -> array:
+    """The one id-set representation: sorted, unique, ``array('I')``."""
+    return array("I", sorted(set(values)))
+
+
+def selection_static_reach(reverse: Mapping[str, frozenset[str]],
+                           seeds: Iterable[str]) -> frozenset[str]:
+    """Seeds plus every path that transitively imports one (reverse edges)."""
+    queue = [seed for seed in seeds if isinstance(seed, str)]
+    seen = set(queue)
+    while queue:
+        current = queue.pop()
+        for importer in reverse.get(current, ()):
+            if importer not in seen:
+                seen.add(importer)
+                queue.append(importer)
+    return frozenset(seen)
+
+
+def selection_store_path(domain_root: Path, project_id: str) -> Path:
+    """``<state>/projects/<project_id>/selection.db`` (never created here)."""
+    if not isinstance(project_id, str) or not re.fullmatch(r"[0-9a-f]{32}", project_id):
+        raise ValueError("selection store needs a 32-hex project id")
+    return Path(domain_root) / SELECTION_STORE_DIR / project_id / SELECTION_STORE_NAME
+
+
+def selection_deps_path(report_path: Path, pid: int) -> Path:
+    """One bridge process's dependency file: ``<report>.deps-<pid>``."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("dependency file pid must be a positive int")
+    return Path(f"{report_path}{SELECTION_DEPS_INFIX}{pid}")
+
+
+def selection_deps_pid(report_name: str, name: str) -> int | None:
+    """The PID in ``name`` when it names a dependency file of ``report_name``."""
+    prefix = report_name + SELECTION_DEPS_INFIX
+    if not name.startswith(prefix):
+        return None
+    digits = name[len(prefix):]
+    if (not 1 <= len(digits) <= 10 or not digits.isascii()
+            or not digits.isdigit() or digits[0] == "0"):
+        return None
+    return int(digits)
+
+
+def selection_deselect_path(report_path: Path) -> Path:
+    """The private deselect binding of one attempt: ``<report>.deselect``."""
+    return Path(f"{report_path}{SELECTION_DESELECT_SUFFIX}")
+
+
+def _check_deselect(name: str, value: object) -> tuple:
+    items = _check_tuple(name, value)
+    if len(items) > SELECTION_DESELECT_MAX_IDS:
+        raise ValueError(f"{name} exceeds {SELECTION_DESELECT_MAX_IDS} node ids")
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError(f"{name}[] must be str, got {type(item).__name__}")
+        if not selection_nodeid_safe(item):
+            raise ValueError(f"{name}[] is not a safe node id")
+    return items
+
+
+# -- source index (T1 builds; T2 diffs; T3 caches the encoded bytes) --------
+
+@dataclass(frozen=True, slots=True)
+class ImportIndex:
+    """One import of a file, unresolved (content-only, path independent)."""
+
+    level: int                 # 0 absolute; n leading dots
+    module: str                # dotted text after the dots ("" for ``from . import x``)
+    name: str | None           # None for ``import a.b``; the name for ``from``; "*" for star
+    local: str | None          # bound module-level name; None when not at module top level
+    aliased: bool              # ``import a.b as c`` binds a.b (else ``import a.b`` binds a)
+    statement: int             # index into FileIndex.statements; -1 when nested
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeIndex:
+    """One function or method scope (nested code folded into it)."""
+
+    qualname: str              # selection_normalize_qualname form, never "<locals>"
+    body: str                  # sha256 hex of the AST-normalised body
+    skeleton: str              # sha256 hex: decorators, signature, defaults, returns, type params, async
+    refs: tuple[tuple[str, ...], ...]   # raw dotted Load chains in the body, sorted, unique
+
+
+@dataclass(frozen=True, slots=True)
+class ClassIndex:
+    """One class (nested classes are their own entries)."""
+
+    qualname: str
+    skeleton: str              # bases, keywords, decorators, type params
+    body: str                  # non-function class-body statements in order
+    refs: tuple[tuple[str, ...], ...]   # raw chains in the skeleton and non-function body
+
+
+@dataclass(frozen=True, slots=True)
+class StatementIndex:
+    """One top-level statement of a module."""
+
+    kind: str                  # one of SELECTION_STATEMENT_KINDS
+    bound: tuple[str, ...]     # module-level names bound, sorted; ("*",) for a star import
+    refs: tuple[tuple[str, ...], ...]   # raw chains: def/class skeleton only; import none; else whole statement
+    fingerprint: str           # def: function skeleton; class: class skeleton; else whole statement
+
+
+@dataclass(frozen=True, slots=True)
+class FileIndex:
+    """Everything the planner needs from one file content (cache value)."""
+
+    parsed: bool               # False: unreadable, undecodable, too large or a syntax error
+    imports: tuple[ImportIndex, ...]
+    scopes: tuple[ScopeIndex, ...]          # sorted by qualname, unique (duplicates merged)
+    classes: tuple[ClassIndex, ...]         # sorted by qualname, unique
+    statements: tuple[StatementIndex, ...]  # module order
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ProjectFile:
+    """One indexed file with plan-time resolution (path dependent)."""
+
+    path: str
+    digest: str                # selection_file_digest of the bytes; "" when no key
+    index: FileIndex
+    modules: tuple[str, ...]   # dotted module names (impact._module_names)
+    test: bool                 # a test file under a test root
+    support: bool              # a non-test file under a test root
+    imports: frozenset[str]    # project paths imported anywhere in the file (static edges)
+    scope_refs: Mapping[str, frozenset[str]]     # scope qualname -> resolved name keys
+    class_refs: Mapping[str, frozenset[str]]     # class qualname -> resolved name keys
+    statement_refs: tuple[frozenset[str], ...]   # aligned with index.statements
+    statement_bound: tuple[frozenset[str], ...]  # aligned; star imports expanded
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ProjectIndex:
+    """The current source index of one project (built once per plan)."""
+
+    root: Path
+    files: Mapping[str, ProjectFile]
+    test_files: frozenset[str]
+    reverse: Mapping[str, frozenset[str]]   # path -> importers (+ conftest.py -> tests under its dir)
+    unparsed: frozenset[str]
+    complete: bool             # False when the walk exceeded impact.MAX_SCAN_FILES
+
+
+class ParseCache(Protocol):
+    """Digest-keyed encoded FileIndex blobs (the store implements it)."""
+
+    def get_many(self, digests: Iterable[str]) -> Mapping[str, bytes]: ...
+
+    def put_many(self, blobs: Mapping[str, bytes]) -> None: ...
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PlanningContext:
+    """Ambient planning inputs for ``impact.plan`` (set through impact.PLANNING)."""
+
+    key: bytes | None
+    cache: ParseCache | None
+
+
+# -- dependency records (T4 writes files; T3 reads/stores; T2 decides) ------
+
+@dataclass(frozen=True, slots=True, eq=False)
+class DepVocabulary:
+    """Interned ids. Every id below indexes one of these tuples."""
+
+    paths: tuple[str, ...]                        # path id -> checkout-relative path
+    functions: tuple[tuple[int, str], ...]        # function id -> (path id, normalised qualname)
+    fixtures: tuple[tuple[str, str, str], ...]    # fixture id -> (baseid, argname, scope)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ContextDeps:
+    """What one test, fixture or ambient context executed (selection_ids arrays)."""
+
+    functions: array           # function ids
+    modules: array             # path ids whose module body ran in this context
+    data: array                # path ids of data files opened
+    opaque: bool
+
+
+def selection_empty_context(*, opaque: bool = False) -> ContextDeps:
+    return ContextDeps(functions=array("I"), modules=array("I"),
+                       data=array("I"), opaque=opaque)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RunBaseline:
+    """The code a run executed against, and its ambient (collection-time) deps."""
+
+    run_id: str
+    recorded_at: float
+    compatibility: str
+    digests: Mapping[int, str]  # path id -> keyed digest for every .py and recorded data path
+    ambient: ContextDeps
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class NodeRecord:
+    nodeid: str
+    test_file: str
+    outcome: str               # one of SELECTION_OUTCOMES
+    run_id: str
+    deps: ContextDeps
+    fixtures: array            # fixture ids (higher-scope fixtures the test used)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class FixtureRecord:
+    fixture: int
+    run_id: str
+    deps: ContextDeps
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class DependencySnapshot:
+    """The whole store as the planner sees it."""
+
+    vocabulary: DepVocabulary
+    runs: Mapping[str, RunBaseline]
+    nodes: Mapping[str, NodeRecord]
+    fixtures: Mapping[int, FixtureRecord]
+    demotions: Mapping[str, str]   # nodeid -> keyed digest of its test file when demoted
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionStoreMeta:
+    size_bytes: int
+    nodes: int
+    runs: int
+    newest_recorded_at: float | None
+    python: tuple[int, int] | None
+    inactive_reason: str | None
+    audit_checked: int
+    audit_misses: int
+    demoted: int
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RecordedNode:
+    nodeid: str
+    outcome: str
+    deps: ContextDeps          # ids into RunDependencies.vocabulary
+    fixtures: array
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RunDependencies:
+    """One run's merged dependency files (run-local vocabulary)."""
+
+    vocabulary: DepVocabulary
+    nodes: Mapping[str, RecordedNode]
+    fixtures: Mapping[int, ContextDeps]
+    ambient: ContextDeps
+    complete: bool             # every expected process file present, valid, not dropped
+    recording: bool            # at least one process had an active recorder
+    python: tuple[int, int] | None
+    inactive_reason: str | None
+    notes: tuple[str, ...]
+
+
+# -- planner (T2) -------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True, eq=False)
+class SelectionInputs:
+    index: ProjectIndex
+    deps: DependencySnapshot
+    versions: Mapping[str, FileIndex]    # recorded keyed digest -> old FileIndex (when cached)
+    data_digests: Mapping[str, str]      # recorded data path -> current digest ("" absent, "?" unreadable)
+    compatibility: str                   # current compatibility fingerprint
+    changed: frozenset[str]              # git-changed relevant paths under the project
+    test_roots: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ChangedUnit:
+    kind: str                  # "function" | "name" | "module" | "data" | "file" | "unrecorded"
+    label: str                 # path::qualname | path:name | path
+    tests: int                 # recorded tests selected because of it
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionDecision:
+    full_reason: str | None    # the dynamic engine requires the full suite
+    files: tuple[str, ...]     # test files to run, sorted
+    deselect: tuple[str, ...]  # recorded, unselected node ids inside partially selected files, sorted
+    whole_files: tuple[str, ...]  # files selected whole (static rule, unrecorded, changed test file)
+    selected: int              # recorded tests that will run
+    reached: int               # recorded tests that executed changed code but already passed on it
+    recorded: int              # usable recorded tests in current test files
+    total_files: int           # test files on disk
+    units: tuple[ChangedUnit, ...]
+    fallbacks: tuple[tuple[str, str], ...]   # (node id or test file, reason)
+    coverage: float            # share of test files with a usable record
 
 
 @dataclass(frozen=True, kw_only=True)

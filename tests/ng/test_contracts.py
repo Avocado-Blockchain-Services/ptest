@@ -2291,3 +2291,194 @@ def test_stack_dump_pid_extracts_own_report_pid():
 ])
 def test_stack_dump_pid_rejects_foreign_or_malformed_names(name):
     assert C.stack_dump_pid("native-a001-deadbeef.json", name) is None
+
+
+# --- dependency-recorded selection barrier (T5 owner of record) ---------------
+
+def _policy(**overrides):
+    fields = {
+        "enabled": True, "closed_inputs": False, "input_roots": (),
+        "ignored_inputs": (), "environment": (), "full_triggers": (),
+        "always": (), "no_tests": (), "non_input_outputs": (),
+        "full_ratio": 0.70, "groups": (),
+    }
+    fields.update(overrides)
+    return C.SelectionPolicy(**fields)
+
+
+def test_selection_policy_dynamic_defaults_true_and_leaves_repr():
+    assert _policy().dynamic is True
+    assert _policy(dynamic=False).dynamic is False
+    assert repr(_policy()) == repr(_policy(dynamic=False)) == repr(
+        _policy(dynamic=True))
+    assert "dynamic" not in repr(_policy(dynamic=False))
+
+
+@pytest.mark.parametrize("value", ["yes", 1, 0, 1.0, None, (True,)])
+def test_selection_policy_dynamic_accepts_bool_only(value):
+    with pytest.raises(TypeError):
+        _policy(dynamic=value)
+
+
+def test_selection_protocol_and_store_constants():
+    assert C.SELECTION_PROTOCOL == "ptest-selection-v1"
+    assert C.SOURCE_INDEX_VERSION == 1
+    assert C.SELECTION_STORE_DIR == "projects"
+    assert C.SELECTION_STORE_NAME == "selection.db"
+    assert C.SELECTION_STORE_MAX_BYTES == 64 * 1024 * 1024
+    assert C.SELECTION_STORE_TARGET_BYTES == 48 * 1024 * 1024
+    assert C.SELECTION_MAX_RUNS == 256
+    assert C.SELECTION_MAX_SIGNATURES == 128
+    assert C.SELECTION_RECORD_ENV == "PTEST_SELECTION_RECORD"
+    assert C.SELECTION_DESELECT_ENV == "PTEST_SELECTION_DESELECT"
+    assert C.SELECTION_DEPS_INFIX == ".deps-"
+    assert C.SELECTION_DEPS_FORMAT == "ptest-selection-deps-v1"
+    assert C.SELECTION_DEPS_MAX_BYTES == 64 * 1024 * 1024
+    assert C.SELECTION_DESELECT_SUFFIX == ".deselect"
+    assert C.SELECTION_DESELECT_FORMAT == "ptest-selection-deselect-v1"
+    assert C.SELECTION_DESELECT_MAX_BYTES == 16 * 1024 * 1024
+    assert C.SELECTION_DESELECT_MAX_IDS == 200000
+    assert C.SELECTION_NODEID_MAX_BYTES == 4096
+    assert C.SELECTION_PATH_MAX_BYTES == 4096
+    assert C.SELECTION_CONTEXT_MAX_FUNCTIONS == 100000
+    assert C.SELECTION_CONTEXT_MAX_DATA == 4096
+    assert C.SELECTION_DATA_MAX_BYTES == 16 * 1024 * 1024
+    assert C.SELECTION_TOOL_IDS == (3, 4, 2)
+    assert C.SELECTION_TOOL_NAME == "ptest-selection"
+    assert C.SELECTION_OUTCOMES == frozenset({
+        "passed", "failed", "error", "skipped", "xfailed", "xpassed",
+        "unknown",
+    })
+    assert C.SELECTION_PASSING_OUTCOMES == frozenset(
+        {"passed", "skipped", "xfailed"})
+    assert C.SELECTION_FIXTURE_SCOPES == frozenset(
+        {"class", "module", "package", "session"})
+    assert "python" in C.SELECTION_LAUNCHER_PATTERN
+
+
+def test_selection_relpath_safe_rejects_escapes():
+    assert C.selection_relpath_safe("tests/test_a.py")
+    assert C.selection_relpath_safe("pkg/core.py")
+    for bad in ("", "/abs/path.py", "C:/win.py", "../up.py", "a/../b.py",
+                "a//b.py", ".", "..", "a/./b.py", "back\\slash.py",
+                "nul\x00.py"):
+        assert not C.selection_relpath_safe(bad), bad
+    # Dot components are fine as a bare relative path; the code/data
+    # path rules exclude them.
+    assert C.selection_relpath_safe(".venv/x.py")
+
+
+def test_selection_code_and_data_paths():
+    assert C.selection_code_path("pkg/core.py")
+    assert not C.selection_code_path("pkg/core.pyc")
+    assert not C.selection_code_path("data/config.json")
+    assert not C.selection_code_path(".venv/lib/x.py")
+    assert not C.selection_code_path("__pycache__/x.py")
+    assert not C.selection_code_path(".hidden/x.py")
+    assert C.selection_data_path("data/config.json")
+    assert not C.selection_data_path("pkg/core.py")
+    assert not C.selection_data_path("pkg/core.pyc")
+    assert not C.selection_data_path(".venv/data.json")
+    assert not C.selection_data_path("build/out.json")
+    assert not C.selection_data_path(".pytest_cache/x.json")
+
+
+def test_selection_nodeid_safe():
+    assert C.selection_nodeid_safe("tests/test_a.py::TestC::test_x")
+    assert C.selection_nodeid_safe("tests/test_a.py::test_x[param-1-ü]")
+    assert not C.selection_nodeid_safe("tests/test_a.py")
+    assert not C.selection_nodeid_safe("../evil.py::test_x")
+    assert not C.selection_nodeid_safe("tests/test_a.py::bad\x00id")
+    assert C.selection_test_file("tests/test_a.py::TestC::test_x") == \
+        "tests/test_a.py"
+
+
+def test_selection_normalize_qualname():
+    assert C.selection_normalize_qualname("helper") == "helper"
+    assert C.selection_normalize_qualname("C.method") == "C.method"
+    assert C.selection_normalize_qualname("outer.<locals>.inner") == "outer"
+    assert C.selection_normalize_qualname("C.<lambda>") == "C"
+    assert C.selection_normalize_qualname("<module>") is None
+    assert C.selection_normalize_qualname("<lambda>") is None
+    assert C.selection_normalize_qualname("") is None
+    assert C.selection_normalize_qualname(None) is None
+    assert C.selection_normalize_qualname(42) is None
+
+
+def test_selection_name_key_round_trip():
+    assert C.selection_name_key("pkg/a.py", "helper") == "pkg/a.py:helper"
+    assert C.selection_key_path("pkg/a.py:helper") == "pkg/a.py"
+
+
+def test_selection_file_digest_matches_keyed_snapshot():
+    import hashlib
+    import hmac as hmac_std
+    digest = C.selection_file_digest(b"k" * 64, b"content")
+    assert digest == hmac_std.new(b"k" * 64, b"content",
+                                  hashlib.sha256).hexdigest()
+
+
+def test_selection_ids_are_sorted_unique_arrays():
+    from array import array
+    assert C.selection_ids([3, 1, 3, 2]) == array("I", [1, 2, 3])
+    assert C.selection_ids([]) == array("I")
+
+
+def test_selection_static_reach_follows_reverse_edges():
+    reverse = {"a.py": frozenset({"b.py"}), "b.py": frozenset({"c.py"})}
+    assert C.selection_static_reach(reverse, {"a.py"}) == frozenset(
+        {"a.py", "b.py", "c.py"})
+    assert C.selection_static_reach(reverse, {"zzz.py"}) == frozenset(
+        {"zzz.py"})
+
+
+def test_selection_store_and_binding_paths():
+    root = Path("/state")
+    assert C.selection_store_path(root, "ab" * 16) == \
+        root / "projects" / ("ab" * 16) / "selection.db"
+    with pytest.raises(ValueError):
+        C.selection_store_path(root, "not-hex")
+    report = Path("/tmp/native-a001.json")
+    assert C.selection_deps_path(report, 42) == Path("/tmp/native-a001.json.deps-42")
+    with pytest.raises(ValueError):
+        C.selection_deps_path(report, 0)
+    assert C.selection_deps_pid("native-a001.json",
+                                "native-a001.json.deps-42") == 42
+    assert C.selection_deps_pid("native-a001.json",
+                                "native-a001.json.deps-042") is None
+    assert C.selection_deps_pid("native-a001.json", "other.deps-42") is None
+    assert C.selection_deselect_path(report) == Path(
+        "/tmp/native-a001.json.deselect")
+
+
+def test_selection_empty_context():
+    plain = C.selection_empty_context()
+    assert plain.opaque is False
+    assert len(plain.functions) == 0
+    assert C.selection_empty_context(opaque=True).opaque is True
+
+
+def test_run_request_deselect_defaults_empty_and_scoped_only():
+    assert C.RunRequest(mode=C.Mode.SCOPED).deselect == ()
+    assert C.RunRequest(
+        mode=C.Mode.SCOPED,
+        deselect=("tests/test_a.py::test_x",)).deselect == (
+        "tests/test_a.py::test_x",)
+    with pytest.raises(ValueError):
+        C.RunRequest(mode=C.Mode.FULL,
+                     deselect=("tests/test_a.py::test_x",))
+    with pytest.raises(ValueError):
+        C.RunRequest(mode=C.Mode.SCOPED, deselect=("no-separator",))
+    with pytest.raises(ValueError):
+        C.RunRequest(mode=C.Mode.SCOPED,
+                     deselect=("../evil.py::test_x",))
+    with pytest.raises(TypeError):
+        C.RunRequest(mode=C.Mode.SCOPED, deselect="tests/test_a.py::test_x")
+
+
+def test_run_request_deselect_over_limit_rejected():
+    with pytest.raises(ValueError):
+        C.RunRequest(
+            mode=C.Mode.SCOPED,
+            deselect=tuple(f"tests/test_{i}.py::test_x" for i in range(
+                C.SELECTION_DESELECT_MAX_IDS + 1)))

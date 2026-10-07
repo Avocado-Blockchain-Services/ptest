@@ -468,6 +468,76 @@ def format_workers_cap(workers: int, project_workers: int) -> str:
             f"so plain `ptest` needs no --workers")
 
 
+def summarize_units(units) -> str:
+    """Join changed-unit counts in design 2.8 order for the start line."""
+    words = (("function", "function"), ("name", "name"),
+             ("module", "module"), ("data", "data file"),
+             ("file", "test file"),
+             ("unrecorded", "unrecorded test file"))
+    counts: dict = {}
+    for unit in units or ():
+        kind = getattr(unit, "kind", None)
+        counts[kind] = counts.get(kind, 0) + 1
+    parts = []
+    for kind, word in words:
+        count = counts.get(kind, 0)
+        if count:
+            parts.append(f"{C.plural(count, word)} changed")
+    return ", ".join(parts) if parts else "dependencies changed"
+
+
+def _format_store_bytes(size: int) -> str:
+    try:
+        value = int(size)
+    except (TypeError, ValueError):
+        return "0 B"
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value / (1024 * 1024):.1f} MB"
+
+
+def format_store_bytes(size: int) -> str:
+    """Human byte count for store sizes (``4.0 KB``, ``1.2 MB``)."""
+    return _format_store_bytes(size)
+
+
+def format_selection_store(declaration: str | None, nodes: int,
+                           size_bytes: int,
+                           newest_age_s: float | None) -> str:
+    """Human-only status line for one selection store (JSON unchanged)."""
+    head = ("selection store" if not declaration
+            else f"selection store {declaration}")
+    age = ("unknown" if newest_age_s is None
+           else format_duration(max(0.0, newest_age_s)) + " ago")
+    return (f"{head}: {C.plural(int(nodes), 'test')} recorded · "
+            f"{_format_store_bytes(size_bytes)} · newest {age} ago")
+
+
+def format_selection_audit(misses: int) -> str:
+    """The always-printed self-audit line for a full run with misses."""
+    return (f"ptest: selection audit: {C.plural(misses, 'failing test')} "
+            f"would not have been selected — they now run whenever a "
+            f"change statically reaches them")
+
+
+def format_selection_vaudit(checked: int, misses: int) -> str:
+    """The ``-v`` self-audit summary, printed even with no misses."""
+    return (f"ptest: -v selection audit: {checked} failing tests "
+            f"checked · {misses} misses")
+
+
+def format_selection_recorded(tests: int, processes: int) -> str:
+    """The ``-v`` line for a run whose dependencies were recorded."""
+    return f"ptest: -v selection: recorded {tests} tests from {processes} processes"
+
+
+def format_selection_not_recorded(reason: str) -> str:
+    """The ``-v`` line for a run that recorded nothing."""
+    return f"ptest: -v selection: not recorded: {reason}"
+
+
 def emit(line: str, *, quiet: bool = False, stream=None) -> bool:
     """Write one status line to stderr; quiet suppresses it."""
     if quiet or not line:
@@ -492,4 +562,7 @@ __all__ = [
     "format_setup_start", "format_setup_done", "format_setup_failed",
     "format_setup_run_start", "format_setup_run_done",
     "format_end", "format_timing", "holder_label", "emit",
+    "summarize_units", "format_store_bytes", "format_selection_store",
+    "format_selection_audit", "format_selection_vaudit",
+    "format_selection_recorded", "format_selection_not_recorded",
 ]
