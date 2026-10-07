@@ -917,11 +917,19 @@ def overlay_dynamic(config_path: Path, value: bool) -> bytes:
 def benchmark_overhead(project: Path, out: Path, ptest_cmd: str) -> dict:
     """Full run with dynamic=false vs true, back to back, 3x; medians."""
     repo = project
+    # A scratch worktree checks out the whole repo at its root, so for a
+    # monorepo child the benchmark targets the child's own config and
+    # runs from the child dir. Overlaying the repo-root manifest would
+    # append [selection] to the [monorepo] manifest, which
+    # parse_monorepo_manifest rejects — every run would fail.
+    prefix = _project_prefix(Path(project))
     scratch = create_scratch(repo, out, "overhead")
     try:
-        config_path = scratch / ".ptest.toml"
+        workdir = scratch if not prefix else scratch / prefix
+        config_path = workdir / ".ptest.toml"
         if not config_path.is_file():
-            raise RuntimeError("benchmark needs a .ptest.toml at the project root")
+            raise RuntimeError(
+                f"benchmark needs a .ptest.toml at {workdir}")
         base = shlex.split(ptest_cmd) + ["--full", "--again"]
         samples = {"dynamic-false": [], "dynamic-true": []}
         for _ in range(3):
@@ -929,7 +937,7 @@ def benchmark_overhead(project: Path, out: Path, ptest_cmd: str) -> dict:
                 previous = overlay_dynamic(config_path, value)
                 try:
                     started = time.perf_counter()
-                    done = _run(base, cwd=scratch)
+                    done = _run(base, cwd=workdir)
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
                     if done.returncode != 0:
                         raise RuntimeError(f"benchmark run failed ({label})")
@@ -1053,6 +1061,23 @@ def _scope_path(prefix: str, path: str) -> str:
     return f"{prefix}/{path}" if prefix else path
 
 
+def _scope_node(prefix: str, nodeid: str) -> str:
+    """A pytest node id as a repo-root scope (idempotent).
+
+    Pytest records ``lastfailed`` ids relative to the child's rootdir
+    (e.g. ``tests/test_a.py::test_1``), while v2 plan files are compared
+    as repo-root scopes (``services/cp/tests/test_a.py``). Without the
+    prefix, ``file_part`` never matches and every selected failure
+    counts as a miss. Already-prefixed ids pass through unchanged.
+    """
+    if not prefix:
+        return nodeid
+    head, sep, tail = nodeid.partition("::")
+    if head == prefix or head.startswith(prefix + "/"):
+        return nodeid
+    return f"{prefix}/{head}{sep}{tail}" if sep else f"{prefix}/{head}"
+
+
 def _run_mutant(args, project: Path, out: Path, store_db, backup,
                 mutant: Mutant) -> MutantRecord:
     """Plan v1/v2, run ground truth + baseline, detect/classify misses."""
@@ -1103,6 +1128,13 @@ def _run_mutant(args, project: Path, out: Path, store_db, backup,
             args.ptest, baseline_scratch, files, kind == "full", "baseline")
         mutant_failed = _ptest_failures(
             args.ptest, scratch, files, kind == "full", "ground-truth")
+        # Pytest ids are child-relative under a nested child; compare,
+        # record and resolve them as repo-root scopes (spec 6.7 misses
+        # are defined over the same file set the plans select).
+        baseline_failed = tuple(
+            _scope_node(prefix, node) for node in baseline_failed)
+        mutant_failed = tuple(
+            _scope_node(prefix, node) for node in mutant_failed)
         if v2_is_full:
             covered = mutant_failed
         else:
@@ -1156,8 +1188,18 @@ def run_campaign(args) -> int:
             restore_store(store_db, backup)
             if backup is not None and backup.is_file():
                 backup.unlink()
-    overhead = (benchmark_overhead(project, out, args.ptest)
-                if args.benchmark_overhead else {})
+    # The benchmark stays after the mutant loop (mutants are measured
+    # against the pristine store), but a benchmark failure must not
+    # discard the records already computed: write the reports with
+    # empty overhead first, then re-raise.
+    try:
+        overhead = (benchmark_overhead(project, out, args.ptest)
+                    if args.benchmark_overhead else {})
+    except Exception:
+        _write_reports(out, EvalReport(seed=args.seed,
+                                       mutants=tuple(records),
+                                       overhead_ms={}))
+        raise
     _write_reports(out, EvalReport(seed=args.seed,
                                    mutants=tuple(records), overhead_ms=overhead))
     return 0

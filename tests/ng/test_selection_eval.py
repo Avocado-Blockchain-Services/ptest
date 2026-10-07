@@ -508,6 +508,63 @@ def test_median_of_three():
     assert se.median([3.0, 1.0, 2.0]) == 2.0
 
 
+def test_campaign_writes_reports_when_benchmark_fails(
+        tmp_path, monkeypatch):
+    core = ("VALUE = 1\n\n\ndef add(first, second=True):\n"
+            "    return first + second\n")
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "core.py").write_text(core)
+    out = tmp_path / "out"
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "pkg" / "core.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(core)
+        return scratch
+
+    class FakePlan:
+        def __init__(self, kind, files, total):
+            self.kind = kind
+            self.files = files
+            self.total = total
+
+    def fake_run(cmd, cwd, timeout=600):
+        export = cmd[cmd.index("--result-json") + 1]
+        Path(cwd, export).write_text("{}\n")
+        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "lastfailed").write_text(json.dumps({}))
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "plan_v1",
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
+    monkeypatch.setattr(se, "plan_v2",
+                        lambda top, root, changed: FakePlan(
+                            "selected", (), 10))
+    monkeypatch.setattr(se, "_run", fake_run)
+    monkeypatch.setattr(se, "store_db_path",
+                        lambda root: (_ for _ in ()).throw(
+                            RuntimeError("no store here")))
+    monkeypatch.setattr(se, "benchmark_overhead",
+                        lambda project, out, ptest: (_ for _ in ()).throw(
+                            RuntimeError("benchmark run failed")))
+    args = type("Args", (), {
+        "project": str(project), "mutants": 1, "seed": 5,
+        "classes": list(se.MUTATION_CLASSES), "out": str(out),
+        "ptest": "uv run ptest", "benchmark_overhead": True})()
+    with pytest.raises(RuntimeError):
+        se.run_campaign(args)
+    # The mutant records survive the benchmark failure.
+    payload = json.loads((out / "selection-eval.json").read_text())
+    assert len(payload["mutants"]) == 1
+    assert payload["overhead_ms"] == {}
+
+
 def test_arg_parsing_defaults():
     args = se.parse_args(["--project", "proj", "--mutants", "5",
                           "--seed", "9", "--out", "outdir"])
@@ -677,11 +734,15 @@ def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
         export = cmd[cmd.index("--result-json") + 1]
         assert cmd[:3] == ["uv", "run", "ptest"]
         Path(cwd, export).write_text("{}\n")
-        cache = Path(cwd) / ".pytest_cache" / "v" / "cache"
+        # Pytest records lastfailed under the child's rootdir with
+        # child-relative ids — never repo-root-prefixed ids at the
+        # scratch root.
+        cache = (Path(cwd) / "services" / "cp" / ".pytest_cache"
+                 / "v" / "cache")
         cache.mkdir(parents=True, exist_ok=True)
         if "ground-truth" in export:
             (cache / "lastfailed").write_text(json.dumps(
-                {"services/cp/tests/test_a.py::test_1": True}))
+                {"tests/test_a.py::test_1": True}))
             code = 1
         else:
             (cache / "lastfailed").write_text(json.dumps({}))
@@ -726,3 +787,63 @@ def test_run_campaign_on_nested_project_plans_and_runs_at_repo_root(
     assert record["misses"] == ["services/cp/tests/test_a.py::test_1"]
     assert record["miss_classes"] == ["unclassified"]
     assert record["suggestions"] == ["nondeterministic"]
+
+
+def test_scope_node_prefixes_child_relative_ids_idempotently():
+    assert se._scope_node("", "tests/test_a.py::test_1") == (
+        "tests/test_a.py::test_1")
+    assert se._scope_node("services/cp", "tests/test_a.py::test_1") == (
+        "services/cp/tests/test_a.py::test_1")
+    assert se._scope_node(
+        "services/cp",
+        "services/cp/tests/test_a.py::test_1") == (
+        "services/cp/tests/test_a.py::test_1")
+    assert se._scope_node("services/cp", "tests/test_a.py") == (
+        "services/cp/tests/test_a.py")
+    # A selected child-relative failure matches the prefixed v2 plan,
+    # so it is covered rather than a miss.
+    assert se.selected_covering(
+        (se._scope_node("services/cp", "tests/test_a.py::test_1"),),
+        ("services/cp/tests/test_a.py",)) == (
+        "services/cp/tests/test_a.py::test_1",)
+
+
+def test_benchmark_overhead_on_nested_child_uses_child_config_and_cwd(
+        tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    child = tmp_path / "services" / "cp"
+    child.mkdir(parents=True)
+    (tmp_path / ".ptest.toml").write_text(
+        '[monorepo]\nversion = 1\n[[monorepo.child]]\n'
+        'path = "services/cp"\n')
+    created = {}
+
+    def fake_create(repo, outdir, name):
+        scratch = outdir / "scratch" / name
+        target = scratch / "services" / "cp" / ".ptest.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('[project]\nname = "cp"\n')
+        created[name] = scratch
+        return scratch
+
+    runs = []
+
+    def fake_run(cmd, cwd, timeout=600):
+        runs.append(Path(cwd))
+        assert list(cmd)[:4] == ["uv", "run", "ptest", "--full"]
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(se, "create_scratch", fake_create)
+    monkeypatch.setattr(se, "remove_scratch", lambda repo, scratch: None)
+    monkeypatch.setattr(se, "_run", fake_run)
+    samples = se.benchmark_overhead(child, tmp_path / "out", "uv run ptest")
+    assert set(samples) == {"dynamic-false", "dynamic-true"}
+    assert all(len(values) == 3 for values in samples.values())
+    # Every run happens in the child dir, never at the scratch root
+    # where the [monorepo] manifest lives.
+    assert runs and all(
+        cwd == created["overhead"] / "services" / "cp" for cwd in runs)
+    # The overlay is reverted after each run.
+    assert (created["overhead"] / "services" / "cp" / ".ptest.toml"
+            ).read_text() == '[project]\nname = "cp"\n'
