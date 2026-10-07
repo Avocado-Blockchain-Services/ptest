@@ -425,3 +425,67 @@ def test_cleanup_removes_only_own_files(tmp_path):
     assert linked.is_symlink()  # never unlinked through links
     assert not stray.exists()  # our name, regular, owned: removed
     I.cleanup(report)  # idempotent, never raises
+
+
+# --- lazily built state across workers --------------------------------------
+
+def _template_run(report, lazy):
+    controller = _payload(100, role="controller", workers=["gw0", "gw1"],
+                          nodes=[])
+    _write_deps(report, 100, controller)
+    paths = ["tests/conftest.py", "alembic/versions/0003.py", "data/seed.sql"]
+    # gw0 built the template: db -> _migrate -> upgrade, module, data.
+    builder = _payload(
+        101, role="worker", worker_id="gw0", paths=paths,
+        functions=[[0, "db", 10], [0, "_migrate", 20], [1, "upgrade", 5]],
+        nodes=[_node("tests/test_a.py::test_first", funcs=[0, 1, 2],
+                     modules=[1], data=[2])])
+    builder["lazy"] = lazy
+    _write_deps(report, 101, builder)
+    # gw1 found the template ready: it ran db only.
+    reuser = _payload(
+        102, role="worker", worker_id="gw1", paths=["tests/conftest.py"],
+        functions=[[0, "db", 10]],
+        nodes=[_node("tests/test_b.py::test_reuse", funcs=[0]),
+               _node("tests/test_b.py::test_plain")])
+    _write_deps(report, 102, reuser)
+    return I.read_run(report, run_id=RUN_ID, expected_workers=2)
+
+
+def _names(run, nodeid):
+    vb = run.vocabulary
+    deps = run.nodes[nodeid].deps
+    return ({vb.paths[vb.functions[num][0]] + "::" + vb.functions[num][1]
+             for num in deps.functions},
+            {vb.paths[num] for num in deps.modules},
+            {vb.paths[num] for num in deps.data})
+
+
+def test_state_one_worker_built_reaches_tests_on_other_workers(tmp_path):
+    """persea control-plane: one xdist worker migrates the template database
+    and marks it ready; the others reuse it without running the migration.
+    The builder's ownership edges reach every test that ran the fixture,
+    on any worker. Before the fix only the builder's tests recorded the
+    migration (573 missed failures on a migration edit)."""
+    run = _template_run(_report(tmp_path), [
+        [["f", 0], ["f", 1]], [["f", 1], ["f", 2]],
+        [["f", 1], ["m", 1]], [["f", 1], ["d", 2]]])
+    assert run.complete is True
+    funcs, mods, data = _names(run, "tests/test_b.py::test_reuse")
+    assert {"tests/conftest.py::_migrate",
+            "alembic/versions/0003.py::upgrade"} <= funcs
+    assert mods == {"alembic/versions/0003.py"}
+    assert data == {"data/seed.sql"}
+    assert _names(run, "tests/test_b.py::test_plain") == (set(), set(), set())
+
+
+@pytest.mark.parametrize("lazy", [
+    "edges", [["f", 0]], [[["f", 0], ["x", 1]]], [[["f", 0], ["f", 99]]],
+    [[["d", 2], ["f", 1]]], [[["f", True], ["f", 1]]],
+])
+def test_malformed_lazy_edges_are_ignored_not_fatal(tmp_path, lazy):
+    run = _template_run(_report(tmp_path), lazy)
+    assert run.complete is True
+    funcs, mods, data = _names(run, "tests/test_b.py::test_reuse")
+    assert funcs == {"tests/conftest.py::db"}
+    assert mods == set() and data == set()

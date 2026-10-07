@@ -156,6 +156,34 @@ def _parse_ctx(data: object, n_funcs: int, n_paths: int) -> dict | None:
             "data": list(datas), "opaque": opaque}
 
 
+def _parse_lazy(data: object, n_funcs: int,
+                n_paths: int) -> list[tuple[tuple, tuple]]:
+    """Optional ownership edges of lazily built state; malformed → none.
+
+    Each edge is ``[owner, state]`` with refs ``["f", function]``,
+    ``["m", path]`` or (state only) ``["d", path]``. Older bridges write
+    no key; a bad list loses only this widening, never the file.
+    """
+    if not isinstance(data, list):
+        return []
+    edges = []
+    for entry in data:
+        if not isinstance(entry, list) or len(entry) != 2:
+            return []
+        refs = []
+        for ref in entry:
+            if (not isinstance(ref, list) or len(ref) != 2
+                    or ref[0] not in ("f", "m", "d") or not _is_int(ref[1])
+                    or ref[1] not in range(n_funcs if ref[0] == "f"
+                                           else n_paths)):
+                return []
+            refs.append((ref[0], ref[1]))
+        if refs[0][0] == "d":
+            return []
+        edges.append((refs[0], refs[1]))
+    return edges
+
+
 def _parse_file(payload: object, *, pid: int, run_id: str) -> dict | None:
     """Validate one deps object; None when it must not be trusted."""
     if not isinstance(payload, dict):
@@ -267,13 +295,42 @@ def _parse_file(payload: object, *, pid: int, run_id: str) -> dict | None:
             python = (python[0], python[1])
     if inactive is not None:
         inactive = inactive[:200] if isinstance(inactive, str) else None
-    return {"role": role, "worker_id": worker_id, "recording": recording,
+    return {"lazy": _parse_lazy(payload.get("lazy"), len(functions),
+                                len(paths)),
+            "role": role, "worker_id": worker_id, "recording": recording,
             "workers": list(workers), "overflow": overflow, "tamper": tamper,
             "paths": list(paths),
             "functions": [(item[0], item[1]) for item in functions],
             "ambient": ambient_ctx, "fixtures": parsed_fixtures,
             "nodes": parsed_nodes, "python": python,
             "inactive_reason": inactive}
+
+
+def _with_lazy(deps: ContextDeps,
+               lazy: dict[tuple, set[tuple]]) -> ContextDeps:
+    """``deps`` plus the state built under any code it ran, transitively.
+
+    Edges come from every process of the run: state one worker built and
+    the others reused (a template database guarded by a marker) belongs
+    to every test that ran the code that builds it.
+    """
+    stack = [("f", num) for num in deps.functions if ("f", num) in lazy]
+    stack += [("m", num) for num in deps.modules if ("m", num) in lazy]
+    if not stack:
+        return deps
+    found: set[tuple] = set()
+    while stack:
+        for state in lazy.get(stack.pop(), ()):
+            if state not in found:
+                found.add(state)
+                stack.append(state)
+    funcs = {num for kind, num in found if kind == "f"}
+    mods = {num for kind, num in found if kind == "m"}
+    datas = {num for kind, num in found if kind == "d"}
+    return ContextDeps(
+        functions=selection_ids((*deps.functions, *funcs)),
+        modules=selection_ids((*deps.modules, *mods)),
+        data=selection_ids((*deps.data, *datas)), opaque=deps.opaque)
 
 
 def _merge(parsed: list[dict]) -> RunDependencies:
@@ -306,6 +363,7 @@ def _merge(parsed: list[dict]) -> RunDependencies:
             funcs.append((intern_path(path), key[1]))
         return func_index[key]
 
+    lazy: dict[tuple, set[tuple]] = {}
     for item in parsed:
         recording = recording or item["recording"]
         if python is None and item["python"] is not None:
@@ -397,11 +455,39 @@ def _merge(parsed: list[dict]) -> RunDependencies:
             merged_nodes[nodeid] = RecordedNode(
                 nodeid=nodeid, outcome=outcome, deps=deps, fixtures=refs)
 
+        def dense(ref: tuple) -> tuple | None:
+            kind, num = ref
+            if kind != "f":
+                if num in (bad_code if kind == "m" else bad_data):
+                    return None
+                return (kind, intern_path(file_paths[num]))
+            path_idx, raw = item["functions"][num]
+            if path_idx in bad_code:
+                return None
+            qualname = selection_normalize_qualname(raw)
+            if qualname is None:
+                return ("m", intern_path(file_paths[path_idx]))
+            return ("f", intern_func(file_paths[path_idx], qualname))
+
+        for owner_ref, state_ref in item.get("lazy", ()):
+            owner, state = dense(owner_ref), dense(state_ref)
+            if owner is not None and state is not None and owner != state:
+                lazy.setdefault(owner, set()).add(state)
+
         ambient = remap(item["ambient"])
         ambient_funcs.update(ambient.functions)
         ambient_modules.update(ambient.modules)
         ambient_data.update(ambient.data)
         ambient_opaque = ambient_opaque or ambient.opaque
+
+    if lazy:
+        merged_nodes = {
+            nodeid: RecordedNode(nodeid=node.nodeid, outcome=node.outcome,
+                                 deps=_with_lazy(node.deps, lazy),
+                                 fixtures=node.fixtures)
+            for nodeid, node in merged_nodes.items()}
+        merged_fixtures = {key: _with_lazy(deps, lazy)
+                           for key, deps in merged_fixtures.items()}
 
     return RunDependencies(
         vocabulary=DepVocabulary(

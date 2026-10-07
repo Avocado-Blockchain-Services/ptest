@@ -1095,26 +1095,29 @@ class Recorder:
             self._own_files = frozenset(names)
         return self._own_files
 
-    def _apply_lazy_owners(self) -> None:
-        """Give every context that ran an owner the state it built.
+    def _lazy_edges(self) -> list[tuple[object, object]]:
+        """Ownership edges ``(owner, state)`` of lazily built state.
 
         A function or data file first seen in one context, seen in no
         other, and caused by code first run in that same context, is
-        lazily built state: later contexts that run the owner reuse it
-        instead of rebuilding it. A module body runs once per process, so
-        a lazily imported module always belongs to its importer.
+        state built once and reused (memoised engines, ``lru_cache``, a
+        template database). A module body runs once per process, so a
+        lazily imported module always belongs to its importer. Ingest
+        applies the edges of every process of the run to every test, so
+        state one xdist worker built and the others reused through an
+        external store (a database marker) reaches them all.
         """
+        edges: list[tuple[object, object]] = []
         try:
-            contexts = [*self._fixtures.values(),
+            contexts = [self._ambient, *self._fixtures.values(),
                         *(node.ctx for node in self._nodes.values())]
             seen_in: dict[object, int] = {}
-            for ctx in (self._ambient, *contexts):
+            for ctx in contexts:
                 for entry in ctx.functions:
                     seen_in[entry] = seen_in.get(entry, 0) + 1
                 for rel in ctx.data:
                     key = ("D", rel)
                     seen_in[key] = seen_in.get(key, 0) + 1
-            children: dict[object, list[object]] = {}
             for key, (token, owner) in self._first.items():
                 if owner is None or token is self._ambient:
                     continue
@@ -1124,51 +1127,10 @@ class Recorder:
                 if key[0] != "M" and (first_owner[0] is not token
                                       or seen_in.get(key, 0) != 1):
                     continue
-                children.setdefault(owner, []).append(key)
-            if not children:
-                return
-            closures: dict[object, set[object]] = {}
-
-            def closure(root: object) -> set[object]:
-                done = closures.get(root)
-                if done is not None:
-                    return done
-                found: set[object] = set()
-                stack = list(children.get(root, ()))
-                while stack:
-                    key = stack.pop()
-                    if key in found:
-                        continue
-                    found.add(key)
-                    stack.extend(children.get(key, ()))
-                closures[root] = found
-                return found
-
-            for ctx in contexts:
-                gained: set[object] = set()
-                for entry in ctx.functions:
-                    if entry in children:
-                        gained |= closure(entry)
-                for rel in ctx.modules:
-                    key = ("M", rel)
-                    if key in children:
-                        gained |= closure(key)
-                for key in gained:
-                    if key[0] == "M":
-                        ctx.modules.add(key[1])
-                    elif key[0] == "D":
-                        if key[1] not in ctx.data:
-                            if len(ctx.data) >= _CONTEXT_MAX_DATA:
-                                ctx.opaque = True
-                            else:
-                                ctx.data.add(key[1])
-                    elif key not in ctx.functions:
-                        if len(ctx.functions) >= _CONTEXT_MAX_FUNCTIONS:
-                            ctx.opaque = True
-                        else:
-                            ctx.functions.add(key)
+                edges.append((owner, key))
         except Exception:
-            pass
+            return []
+        return edges
 
     def _discover(self, code: object) -> None:
         """Arm every project code object under ``code`` for PY_START."""
@@ -1539,6 +1501,24 @@ class Recorder:
         # array, not key triples.
         fixture_index = {key: index
                          for index, key in enumerate(ordered_fixtures)}
+        lazy_entries = []
+
+        def ref(key: object) -> list | None:
+            if isinstance(key, tuple) and len(key) == 2:
+                kind, rel = key
+                if rel in path_index:
+                    return ["m" if kind == "M" else "d", path_index[rel]]
+                return None
+            if key in function_index:
+                return ["f", function_index[key]]
+            return None
+
+        for owner, key in self._lazy_edges():
+            owner_ref, key_ref = ref(owner), ref(key)
+            if owner_ref is not None and key_ref is not None \
+                    and owner_ref[0] != "d":
+                lazy_entries.append([owner_ref, key_ref])
+        lazy_entries.sort()
         node_entries = []
         for nodeid in sorted(self._nodes):
             node = self._nodes[nodeid]
@@ -1582,6 +1562,7 @@ class Recorder:
                                          function_index),
             "fixtures": fixture_entries,
             "nodes": node_entries,
+            "lazy": lazy_entries,
         }
 
     def _header(self, *, overflow: bool) -> dict:
@@ -1622,7 +1603,6 @@ class Recorder:
         try:
             if not self._report_path:
                 return None
-            self._apply_lazy_owners()
             payload = self._payload()
             try:
                 raw = json.dumps(payload, ensure_ascii=True,

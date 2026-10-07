@@ -1065,6 +1065,8 @@ from types import SimpleNamespace
 checkout = sys.argv[1]
 sys.path.insert(0, checkout)
 from ptest.runtime import selection_recorder as module
+import os
+os.chmod(checkout, 0o700)
 rec = module.Recorder(checkout_root=checkout, run_id="c" * 32,
                       report_path=checkout + "/rep.json", role="controller")
 assert rec.activate() is True, rec.inactive_reason
@@ -1108,17 +1110,20 @@ run("tests/test_l.py::test_third", third)
 run("tests/test_l.py::test_fourth", fourth)
 path = rec.write_deps()
 rec.deactivate()
-payload = json.loads(open(path).read())
-paths = payload["paths"]
-funcs = payload["functions"]
+from pathlib import Path
+from ptest import selection_ingest
+run = selection_ingest.read_run(Path(checkout) / "rep.json", run_id="c" * 32,
+                                expected_workers=1)
+assert run.complete, run.notes
+vb = run.vocabulary
 out = {}
-for node in payload["nodes"]:
-    out[node["nodeid"].rsplit("::", 1)[1]] = {
-        "functions": sorted(paths[funcs[i][0]] + "::" + funcs[i][1]
-                            for i in node["functions"]),
-        "modules": sorted(paths[i] for i in node["modules"]),
-        "data": sorted(paths[i] for i in node["data"]),
-        "opaque": node["opaque"],
+for nodeid, node in run.nodes.items():
+    out[nodeid.rsplit("::", 1)[1]] = {
+        "functions": sorted(vb.paths[vb.functions[i][0]] + "::"
+                            + vb.functions[i][1] for i in node.deps.functions),
+        "modules": sorted(vb.paths[i] for i in node.deps.modules),
+        "data": sorted(vb.paths[i] for i in node.deps.data),
+        "opaque": node.deps.opaque,
     }
 print(json.dumps(out))
 '''

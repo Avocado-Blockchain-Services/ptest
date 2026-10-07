@@ -640,13 +640,90 @@ def test_memoised_template_reaches_every_fixture_user(tmp_path):
     twin = _run_bridge(root, ["-p", "no:cacheprovider", "tests/test_db.py"],
                        record=True)
     assert twin.returncode == 0, twin.stdout + twin.stderr
-    (_, payload), = _read_deps(twin.report_path)
-    nodes = _decode(payload)["nodes"]
+    from ptest import selection_ingest
+    run = selection_ingest.read_run(twin.report_path, run_id=twin.run_id,
+                                    expected_workers=1)
+    assert run.complete is True, run.notes
+    vb = run.vocabulary
+
+    def names(nodeid):
+        deps = run.nodes[nodeid].deps
+        return ({vb.functions[num][1] for num in deps.functions},
+                {vb.paths[num] for num in deps.modules})
+
     for name in ("test_a", "test_b"):
-        node = nodes[f"tests/test_db.py::{name}"]
-        assert "migrations/m0001.py" in node["modules"], name
-        assert {entry[1] for entry in node["functions"]} >= {
-            "_migrate", "upgrade"}, name
-    lone = nodes["tests/test_db.py::test_c"]
-    assert "migrations/m0001.py" not in lone["modules"]
-    assert "_migrate" not in {entry[1] for entry in lone["functions"]}
+        funcs, mods = names(f"tests/test_db.py::{name}")
+        assert "migrations/m0001.py" in mods, name
+        assert funcs >= {"_migrate", "upgrade"}, name
+    funcs, mods = names("tests/test_db.py::test_c")
+    assert "migrations/m0001.py" not in mods
+    assert "_migrate" not in funcs
+
+
+_SHARED_TEMPLATE_CONFTEST = '''\
+import fcntl
+import importlib.util
+import os
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parent.parent
+_MARKER = Path(os.environ["TWIN_MARKER_DIR"]) / "template.ready"
+
+
+def _migrate():
+    path = _ROOT / "migrations" / "m0001.py"
+    spec = importlib.util.spec_from_file_location("m0001", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.upgrade()
+
+
+def _ensure_template():
+    with open(_MARKER.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not _MARKER.exists():
+            _MARKER.write_text(_migrate())
+    return _MARKER.read_text()
+
+
+@pytest.fixture
+def db():
+    return _ensure_template()
+'''
+
+
+@_NEEDS_XDIST
+def test_template_one_worker_built_reaches_the_other_worker(tmp_path):
+    """The control-plane shape across processes: whichever xdist worker
+    comes first migrates the shared template and marks it ready; the other
+    reuses it. Every db test on both workers depends on the migration."""
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "migrations").mkdir()
+    (root / "migrations" / "m0001.py").write_text(
+        "REVISION = '0001'\n\n\ndef upgrade():\n    return REVISION\n",
+        encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text(_SHARED_TEMPLATE_CONFTEST,
+                                                encoding="utf-8")
+    body = "".join(f"def test_{n}(db):\n    assert db == '0001'\n\n\n"
+                   for n in range(8))
+    (root / "tests" / "test_db.py").write_text(body, encoding="utf-8")
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    twin = _run_bridge(root, ["-p", "no:cacheprovider", "-n", "2",
+                              "tests/test_db.py"], workers=2, record=True,
+                       extra_env={"TWIN_MARKER_DIR": str(markers)})
+    assert twin.returncode == 0, twin.stdout + twin.stderr
+    from ptest import selection_ingest
+    run = selection_ingest.read_run(twin.report_path, run_id=twin.run_id,
+                                    expected_workers=2)
+    assert run.complete is True, run.notes
+    vb = run.vocabulary
+    assert len(run.nodes) == 8
+    for nodeid, node in run.nodes.items():
+        funcs = {vb.functions[num][1] for num in node.deps.functions}
+        mods = {vb.paths[num] for num in node.deps.modules}
+        assert "migrations/m0001.py" in mods, nodeid
+        assert {"_migrate", "upgrade"} <= funcs, nodeid

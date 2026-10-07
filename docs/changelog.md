@@ -30,8 +30,9 @@
 - State built once per process counts for every test that reuses it: code,
   lazily imported modules and data files first run by one test, caused by a
   caller or fixture that later tests also run, are dependencies of those
-  tests too (a template database migrated by the first user of a fixture, a
-  memoised engine, an `lru_cache` loader). Tests that start the project's
+  tests too, across xdist workers of the same run (a template database one
+  worker migrates and the others reuse, a memoised engine, an `lru_cache`
+  loader). Tests that start the project's
   own interpreter (`python -m pkg`, a checkout script) follow that entry
   module's imports under the static rule.
 - Nested monorepo child scopes: `route_scopes` matches the longest declared
