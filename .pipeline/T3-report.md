@@ -1,117 +1,181 @@
-# T3 report — guard: marker-armed CPU-idle stall detection and dump signal
+# T3 report — dependency store, ingest, deselect writer, uninstall
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T3
-- taskBranch: feature/post-test-stall-T3
-- base: 3ab75e8
-- status: DONE (all acceptance criteria met; see deviations/notes in §5)
-- commit: `855738f` T3: marker-armed CPU-idle stall detection and SIGWINCH dump signal in guard
-- test commands (all from the worktree root, per machine rules): `ptest tests/ng/test_stall_window.py`, `ptest tests/ng/test_guard.py` (full file), `ptest tests/ng/test_guard.py -k "<selection>"`
+status: DONE
+taskWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T3
+taskBranch: feature/dynamic-selection-T3
+taskCommit: 50909be
+baseCommit: f478189
+filesOwned:
+- src/ptest/selection_store.py (new, 1373 lines)
+- src/ptest/selection_ingest.py (new, 665 lines)
+- src/ptest/uninstall.py (+94)
+- tests/ng/test_selection_store.py (new, 30 tests)
+- tests/ng/test_selection_ingest.py (new, 22 tests)
+- tests/ng/test_uninstall.py (+4 tests)
 
-## 1. What changed (owned files only, 7 files, +895/-7 vs base)
+verification:
+- command: `ptest tests/ng/test_selection_store.py tests/ng/test_selection_ingest.py tests/ng/test_uninstall.py` from the task worktree root
+- result: 123 passed, exit 0 (run 2026-10-07, after final edit)
+- TDD: both new suites errored on collection before implementation
+  (ImportError: no module named selection_store/selection_ingest), then
+  iterated red→green; no test was weakened (three test-expectation bugs
+  of mine were corrected to the frozen semantics: dense snapshot ids,
+  run-collapse under shared node ids, FK-valid LRU fixture).
+- A5: synthetic 20k-node store (150 funcs/node) updates in ~6.5 s and
+  occupies 9.3 MiB on disk vs the 64 MiB cap (measured 2026-10-07).
+- No migration generated. No push, no merge, no deploy. `.pipeline/`
+  unstaged (only explicit owned paths committed).
 
-- NEW `src/ptest/stall.py` — pure idle-window logic, no clock, no I/O: `idle_threshold_s(window_s) = max(0.5, 0.02 * window_s)`; `IdleWindow(window_s).observe(now, sample)` over `(pid, create_time) -> CPU-seconds` samples. Per-key positive deltas accumulate, new keys add full value, vanished keys add nothing, `None` resets and reports busy. The retained history keeps the newest pre-cutoff sample as baseline (see §4 for why), plus an idle latch released by real progress or reset.
-- `src/ptest/platform.py` — NEW `group_cpu_times(pgid, *, exclude_pid, limit=8192)`: per-member `user + system + children_user + children_system` keyed by `(pid, create_time)`; skips zombies/excluded pid/vanished races; returns `None` on any ambiguous/unreadable member or past-limit scan (caller treats `None` as busy).
-- `src/ptest/guard.py`
-  - Module globals `_STALL_POLL_S = 1.0` and `_DUMP_WAIT_S` (contracts `STALL_DUMP_WAIT_S` with a `1.0` getattr fallback while the shared-contracts barrier is absent), both read at call time.
-  - `_State` gains `dump_requested` / `external_cancel`. `cancel()` (signal handler, control frame, unexpected-error path) sets `external_cancel`. `fail(problem, *, dump=False)` records the first problem, arms `dump_requested` only when first and no cancel pending, and closes the spawn with SIGTERM without marking external cancel. All existing single-arg `fail()` callers are behaviour-identical.
-  - NEW `_StallWatcher` (marker lstat at most every `_STALL_POLL_S`; armed = lstat `S_ISREG` + `st_uid == getuid`; then CPU samples into `IdleWindow`), built only when phase == `execution`, `manifest.stall_timeout_s` is a positive number, and `prepared.report_path is not None`.
-  - `_run_one` child loop: deadline check first (`fail(..., dump=True)`), then stall check (skipped once `cancel_signal` is set — first problem wins), then on cancel: `_dump_and_wait` (SIGWINCH via `_signal_group` + bounded `control.poll` wait interruptible by external cancel) only when a dump was requested, no external cancel exists, and a report binding exists; then the existing `_cancel_and_reap`.
-  - `run_guard` final return treats `post-test-stall` like `execution-timeout` (not `_EXIT_PROTOCOL`). Frozen message: `tests finished but runner processes stayed idle for {stall_s:g}s without exiting`.
-- NEW `tests/ng/test_stall_window.py` — 13 unit tests (threshold floor/fraction, span, sliding, None-reset, new/vanished/reused-pid members, threshold boundary, `group_cpu_times` live-child/exclude/unreadable/limit).
-- `tests/ng/test_guard.py` — 17 new test items: stall kill with dump-before-SIGTERM ordering + no second attempt; group-wide child dumps; N1 unarmed survival; N2 armed-busy survival; symlink/FIFO/dir/other-report markers never arm; N9 deadline SIGWINCH without stall; D4/B9 no-report-path no-signal/no-wait; N8 control-cancel + SIGINT (130) no-signal/no-delay; mid-dump-wait cancel promptness; deadline-wins race; N5 forged-identity `_signal_group`; `fail`/`cancel` dump-request unit semantics. Plus `Harness.start` `stall_poll`/`dump_wait`/`stall_timeout` env knobs.
-- NEW `tests/ng/fixtures/processes/stall_workload.py` — bridge simulator: `armed-idle`, `unarmed-idle`, `armed-busy` (socket-released CPU spin), `armed-idle-child` (same-group child with own dump file); O_EXCL|O_NOFOLLOW|O_CLOEXEC marker + dump creation, faulthandler SIGWINCH registration, blocking frame `stall_blocked_teardown` for dump identification, `.term` note recording `15` vs `released`.
-- `tests/ng/fixtures/processes/guard_driver.py` — `GUARD_STALL_POLL` / `GUARD_DUMP_WAIT` global patches and a `GUARD_STALL_TIMEOUT` decode-time manifest injection seam (test-only; needed only until the contracts barrier lands — see §5).
+## Acceptance anchoring (design T3 checkboxes)
 
-No migration (none exists in this repo). No push/merge/deploy; no live databases touched.
+- Store basics: update→snapshot round trip with dense ids and
+  `selection_ids` arrays (store.py:714 snapshot;
+  test_update_snapshot_round_trip); replace-only-ran + fixture
+  replacement (test_update_replaces_only_ran_nodes,
+  test_fixture_records_replaced_per_run); per-run baselines,
+  unreferenced-run prune (test_unreferenced_runs_pruned); two-full-
+  inventory prune (test_full_prunes_nodes_absent_from_two_inventories);
+  mark_outcomes/invalidate/demote/record_audit/note_inactive/meta
+  (store.py:1281-1373; dedicated tests).
+- Concurrency: two threads × 25 updates, distinct + shared node, no
+  sleeps; BEGIN IMMEDIATE + busy_timeout, last-writer-wins, 51 nodes /
+  50 runs coherent (test_concurrent_updates_from_two_connections).
+- Private files: symlinked db/dir, mode 0644, monkeypatched foreign
+  uid, hard link → `unsafe-path`; create=False never creates; hot
+  journal recovers via storage.open_database + support.leave_hot_journal;
+  garbage bytes → `coordinator-corrupt`, then remove_store + open
+  rebuilds empty (store.py:482 open_store; tests).
+- Size: 20k nodes ≤ cap (9.3 MiB); monkeypatched-target eviction is
+  oldest-first, never fails, and compacts the file below the
+  accumulated peak (post-commit VACUUM, store.py `_vacuum`); cache LRU
+  prune (ancient + unreferenced); capacity-exceeded after evict-and-
+  retry via pinned max_page_count (test_capacity_exceeded…).
+- N7: project A records invisible from project B (test_project_isolation_n7).
+- Never stored: db bytes scanned for source/data sentinels and their
+  unkeyed sha256 — absent (test_never_stores_contents_or_unkeyed_digests).
+- Ingest (ingest.py:442 read_run): serial + xdist merges; completeness
+  (missing worker, count mismatch, overflow, dup/extra controller);
+  10 malformed mutations + truncated JSON + hostile paths (→ opaque,
+  never dropped) + symlink/foreign/mode/nlink/oversize refusals — all
+  incomplete-with-note, never raising, nodes == {} on rejected files;
+  qualname normalisation (`<module>`/`<lambda>` → module body);
+  duplicate-node worst-outcome + union; other-report ignored; scan
+  bounded at 4096 via islice (test_dir_scan_bounded).
+- Deselect writer (ingest.py:550): O_EXCL|O_NOFOLLOW|O_CLOEXEC 0600,
+  exact JSON, ValueError on unsafe ids, brackets/`::`/unicode/newline
+  round trip; cleanup removes only own files, never through links,
+  idempotent (ingest.py:646).
+- Uninstall: REMOVE kind "selection-store" entries for root + each
+  declared child with a valid project id (uninstall.py:512-620);
+  dry-run clean; apply identity-checked; symlink/foreign SKIPPED;
+  all 71 uninstall tests green, JSON shape untouched.
 
-## 2. Verification (all through `ptest` from the worktree root)
+## Integration notes (seams for T5/T6)
 
-- New tests pre-change (TDD red): `ptest tests/ng/test_guard.py -k "stall or ..."` → **8 failed, 11 passed** (all 8 abuse tests failed: stall kill, child dumps, deadline-dump, mid-wait cancel, race-dump, both `fail` unit tests; the 11 passes are negative-preservation tests + the N5 unit test, green before and after as designed).
-- `ptest tests/ng/test_stall_window.py` pre-implementation → collection error (`No module named 'ptest.stall'`).
-- Post-change: `ptest tests/ng/test_stall_window.py` → **13 passed**; `ptest tests/ng/test_guard.py` (full file) → **112 passed, 0 skipped** (includes every pre-existing guard test with unchanged timing assertions); solo re-run of the busy test → **1 passed**.
-- `graphify update .` run in the worktree (index refreshed; no repo files touched by it).
-- Direct probes (throwaway, `/tmp`, not committed): watcher-vs-live-process traces that isolated the §4 eviction bug and confirmed the fix (fires ~1.0 s after arming; True/False alternation observed is cadence gating, not verdict flap).
+1. BARRIER ABSENT — nothing to branch from: no worktree in this run
+   has the section-12 contracts barrier (chain + T2/T5/T6 all sit at
+   f478189 with unmodified contracts.py). Per the task brief I declared
+   the frozen shapes locally instead of patching contracts.py:
+   selection_store.py lines 60-300 alias every SELECTION_*/dataclass/
+   helper name to `contracts` when present, else define the verbatim
+   frozen shape; selection_ingest.py reuses those names from
+   selection_store. When T5 lands the barrier, the aliases take over
+   with no edits here. T3 imports only contracts/files/storage
+   (never T1/T2/T4).
+2. `write_deselect_binding` raises ValueError (bad run id, unsafe id,
+   over-limit, oversize) and OSError (exists/symlink/I/O) — following
+   design 2.6 + the task brief, not the "raises C.Problem" line in the
+   2.5 signature block. T5 operations should catch Exception around it
+   (a write failure still runs everything).
+3. Duplicate-node merge ranks "unknown" below "skipped" (a definitive
+   report beats absence of one); ingest.py:80 `_SEVERITY`. Flag if T5
+   assumes otherwise.
+4. A `None` normalised qualname becomes a module-body (modules-set)
+   entry, not a `(path, "")` function id (ingest.py:354-359).
+5. `update()` keys nodes by `value.nodeid` (mapping keys ignored) —
+   T5 must keep them consistent (they are, by construction).
+6. `PRAGMA max_page_count` is per-connection (verified empirically:
+   it does not persist in the file header), so capacity tests must pin
+   it on the store's own connection.
+7. Eviction needs post-commit VACUUM, not just in-transaction
+   incremental_vacuum: row deletes leave freeblocks, not free pages,
+   so the file never shrinks otherwise (found by re-reading my own
+   diff; proven by the peak-relative shrink assertion).
 
-## 3. Pass 1–3 self-review (dan-jefferies-agent)
+## Honest closing
 
-- Pass 1 (re-read bytes): full `git diff` re-read. Found and fixed: an extra paren in the eviction edit (caught on re-read, verified by re-reading the hunk); a wrong SIGINT exit expectation in my own new test (143 → `128 + SIGINT`, caught by the pre-change red run). No TODO/FIXME/HACK in owned files. All `_State()` constructions are zero-arg (new fields defaulted, safe). Single `lstat`, no-follow, in guard.
-- Pass 2 (re-anchor to design §T3): every acceptance checkbox maps to a passing test — stall kill (message byte-exact, 143, facts phase `execution`, dump-before-SIGTERM by content + `st_mtime_ns` order, `a002` absent), child group dumps, N1, N2, N6/N4 shapes (4 tests), N9, D4/B9 (5 s wait leaves no trace without a binding), N8 ×3, same-poll race (execution-timeout), N5, unit file, existing suite green. Frozen names/values used: `.done` suffix rule (delegates to `contracts.stall_marker_path` when the barrier lands), `_STALL_POLL_S = 1.0`, `_DUMP_WAIT_S = STALL_DUMP_WAIT_S`, SIGWINCH only via `_signal_group`, no guard SIGWINCH handler, per-attempt marker path, post-test-stall final-return handling.
-- Pass 3 (smell sweep): no duplicated concepts (`group_cpu_times`/`IdleWindow`/`_StallWatcher` are new names; kill path reuses `_signal_group`/`_cancel_and_reap`); no new deps; no config changes; `fail()` keyword-only `dump` keeps all existing callers compatible; `group_cpu_times` full-table scan cost (~0.1 s on a loaded box) is within the mandated ≤1/s cadence. Tests kill the no-op: every abuse test failed pre-change; boundary unit tests discriminate idle/busy/reset. `audit-spec` was considered; the brief-mandated Pass 1–3 above already covers diff re-read + criteria anchoring + sweep, so a second audit loop was not run.
+- implemented: all T3 acceptance rows above; 6 owned files committed.
+- verified: 123/123 owned tests green in one run; A5 size measured;
+  eviction shrink, hot-journal recovery, corruption rebuild observed.
+- not verified: cross-task seams that need the merged branch — T5's
+  `after_run` calling read_run/update, T4's real bridge files against
+  read_run (T4 owns that cross-check, gated on my module existing),
+  `ptest --full` (integrated gate, explicitly out of scope for tasks).
+- deferred: none (file list in the brief is fully delivered).
 
-## 4. Root-cause notes (found during the work, fixed)
+## Fix report — review findings round 2 (2026-10-07, dan-jefferies-agent)
 
-- **IdleWindow eviction bug (mine, fixed):** dropping every pre-cutoff history point shrinks the retained span below the window on every pass, so `span >= window` could only hold by float luck — the two real-process kill tests hung (10 s watchdog) while a luck-hit test passed. Fix: retain the newest pre-cutoff sample as baseline; measuring from it can only add pre-window progress, delaying the verdict by at most one sample (safe direction for a kill). Unit expectations updated to the pinned-baseline semantics (burst anchors the window until its sample ages out).
-- **Busy-test load flake (hardened, not weakened):** at 8 cores / load ~11 a single-thread spinner (fair share ~0.7 core) sat too close to the 0.5 s-per-1.0 s threshold and took one false stall in the suite run. The test still uses the design's 1.0 s setup everywhere except N2, which now uses a 2.0 s window: the floor threshold stays 0.5 s, so the spinner needs only a quarter core on average. Assertions unchanged (survive, release, exit 0, no problem). Extra spinner threads were rejected (GIL: no added CPU).
+Worktree: `/home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T3`
+(unchanged). Owned files touched this round:
 
-## 5. Integration notes for the orchestrator (barrier absent in this worktree)
+- src/ptest/selection_store.py (fixes only, no API changes)
+- tests/ng/test_selection_store.py (+4 regression tests)
 
-- The shared-contracts barrier (§9 of design) is **not present** in any worktree (checked chain/T2/T4): no `stall_timeout_s`, no `STALL_*` constants, no `post-test-stall` reason code. My diff touches none of T2's files, so it stays mechanically clean, via two forward-compatible seams: (a) `guard.py` resolves `STALL_DUMP_WAIT_S` / `stall_marker_path` / `manifest.stall_timeout_s` with `getattr` fallbacks equal to the frozen values (real path activates automatically once T2 merges); (b) `guard_driver.py` injects `stall_timeout_s` at manifest-decode time from `GUARD_STALL_TIMEOUT` because `encode_launch_manifest` cannot carry it yet — after the merge, tests can set the field directly and this wrapper becomes inert (it object-sets the same field). `Problem("post-test-stall", ...)` needs no REASON_CODES membership on the guard path (control-frame payloads are opaque dicts).
-- Claimed-vs-shipped delta: none against the T3 design section. Deferred: nothing. Discovered-but-not-fixed: `group_cpu_times` walks the full process table per sample (~0.1 s loaded) — mandated cadence, no action.
-- Confidence: high — every acceptance test is real-process against the real guard, red-before/green-after, plus full-file green (112) proving no existing-timing drift.
+Verification: `ptest tests/ng/test_selection_store.py
+tests/ng/test_selection_ingest.py tests/ng/test_uninstall.py` from the
+task worktree root → 127 passed (was 123; +4 new), exit 0. Pre-fix
+sensitivity proven per test in a scratch worktree at HEAD (0bccd07)
+with the new test file copied over: all 3 behavior tests failed there
+(see below), then the scratch worktree was removed.
 
-## Structured fields
+1. Eviction wipeout (HIGH). `_db_size` now measures
+   `(page_count - freelist_count) * page_size`, and both
+   `PRAGMA incremental_vacuum` call sites are drained with `.fetchall()`
+   (store.py `_db_size`, `_evict_to_target`, `_evict_oldest`). New test
+   `test_eviction_removes_only_oldest_run` measures one run's growth and
+   sets the target to current + growth − 3 pages, then asserts exactly
+   the oldest run is gone (450 nodes over the 3 survivors). Pre-fix this
+   test FAILED (only the newest run survived); post-fix it passes. Note:
+   a first version of this test used a half-run allowance and PASSED on
+   unfixed code — the allowance exceeded what the buggy loop sheds per
+   eviction, so it could not catch the bug; the growth-minus-3-pages
+   form was verified to fail pre-fix before keeping it.
+2. Concurrent first-create classified corrupt (HIGH). `_check_schema`
+   now takes `BEGIN IMMEDIATE` (bounded retry via `_begin_immediate`)
+   and re-reads `sqlite_master` under the lock before creating or
+   declaring corruption; `_create_schema` uses `CREATE TABLE IF NOT
+   EXISTS` / `INSERT OR IGNORE`; the fast path also requires the
+   `schema_version` row (a creator's tables land before its kv rows),
+   falling through to the locked recheck otherwise; COMMIT failure maps
+   to a typed Problem so `open_store` still raises `C.Problem` only. New
+   test `test_concurrent_create_from_two_connections` races two
+   barrier-aligned `open_store(create=True)` over 25 fresh projects and
+   asserts no `coordinator-corrupt` and a coherent store. Pre-fix this
+   test FAILED; post-fix it passes (also re-run in the full suite).
+3. Lock timeout loses an upsert as raw OperationalError (HIGH).
+   `_apply_update` (and `_evict_oldest`, `_check_schema`) take the lock
+   through `_begin_immediate`: transient busy/locked failures retry to a
+   60 s budget (one busy_timeout wait cannot cover a ~6.5 s big update +
+   VACUUM). `update` maps leftovers via `_map_update_error`: transient →
+   retryable `coordinator-unavailable`, I/O → `state-unavailable`,
+   anything else re-raised unchanged (FULL path untouched). New tests:
+   `test_concurrent_update_while_lock_held` (second connection updates
+   while a raw connection holds RESERVED; busy_timeout shrunk to 50 ms
+   and the lock held 0.5 s — 10× past the timeout — instead of a literal
+   >2 s hold, per the no-long-timeouts rule; the retry path is identical)
+   and `test_update_error_mapping_is_typed` (lock→unavailable/retryable,
+   I/O→state-unavailable, unknown error re-raised). Both FAILED pre-fix
+   and pass post-fix; no raw `sqlite3.Error` escapes `update` for lock
+   or I/O causes.
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T3
-- taskBranch: feature/post-test-stall-T3
-- status: DONE
-- commit: 855738f
-- tests: tests/ng/test_stall_window.py 13 passed; tests/ng/test_guard.py 112 passed (full file, 0 skipped)
-
----
-
-# T3 fix report (follow-up, 2026-10-06) — reviewer findings resolved
-
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T3
-- taskBranch: feature/post-test-stall-T3
-- base: 855738f (prior T3 commit); `src/ptest/guard.py` untouched by this fix (verified: `git diff --stat src/ptest/guard.py` empty at commit time)
-- owned files (2): `tests/ng/fixtures/processes/stall_workload.py` (spinner non-blocking), `tests/ng/test_guard.py` (N2 window, race rewrite, multi-attempt test)
-- status: DONE
-- commit: (see `git log` on the task branch; message `T3 fix: non-blocking busy spinner, deterministic race test, multi-attempt marker test`)
-- test commands (all from the worktree root, per machine rules): `ptest tests/ng/test_guard.py -k "<selection>"` per change, then `ptest tests/ng/test_guard.py tests/ng/test_stall_window.py` (final green)
-
-## F1. Busy-spinner fixture fixed at the root cause; N2 back to the mandated 1.0 s window
-
-- Cause confirmed as reported: `stall_cpu_spin_until_released` spun 50 ms then blocked 50 ms in `peer.recv(1)` with `settimeout(0.05)`, idling ≥50% of every pass. The 2.0 s window only widened the margin instead of fixing the fixture.
-- Fix (`stall_workload.py`): `peer.setblocking(False)`; release polls now raise `BlockingIOError` when no byte is waiting. No other use of that socket exists in the workload, and `stall_blocked_teardown` (blocking `recv`) is untouched.
-- Isolated duty measurements through the shipped function on a socketpair, released after 2.0 s (`uv run python /tmp/spin_probe.py`, throwaway, not committed): before `wall 2.0 cpu 0.75` (per the finding); after: `0.97`, `0.88` on repeat runs (one early run read `0.70` while the box sat at load 14 on 8 cores — a pure-spin control showed `0.88` under the same load, so the residual gap is scheduling noise, not the fixture). Even at 2/3 core share the busy workload now clears the 0.5 s-per-1.0 s floor with margin.
-- N2 (`test_stall_armed_busy_survives_window`) returned to `stall_timeout=1.0` with the 2.5 s survival assertion, matching every other real-process stall test and the design's acceptance setup. Passed via `ptest` (1 passed in 10.56 s).
-
-## F2. Same-poll race test rewritten as a deterministic unit-level `_run_one` test
-
-- The old `test_deadline_wins_same_poll_race` (1 s deadline vs 5.0 s window) is deleted: both verdicts could never be due in one pass, so it could not distinguish deadline-first from stall-first and never counted dumps.
-- New test (same name, `monkeypatch`-only, no `harness`): frozen clock + advancing fake `control.poll`, stub child (alive for the verdict pass, reaped after), stub `_stall_watcher_for` returning a watcher whose `check()` is always due (`stall_s=5.0`), stubbed `_signal_group` recording signals, real `_dump_and_wait`. It asserts: `watcher.checks == 0` (stall check skipped once the deadline owns the timeline), exactly one `fail()` call with `("execution-timeout", True)`, signals sent `== [SIGWINCH, SIGTERM]` (one dump, one kill, in order), `result == 0`, and one `runner-facts` frame carrying `execution-timeout`.
-- Self-caught test bug during the work: the first version stubbed `prepared` without `argv`/`cwd`/`env_updates`, so `_run_one` raised `AttributeError` before any verdict (seen in the first M_f run output). Fixed by completing the stub; the test was then observed green on clean code (4 passed together with the multi-attempt and `fail`-semantics unit tests) before any mutation was (re-)applied.
-- Mutation evidence (each: edit `src/ptest/guard.py`, run, exact revert, `git diff` confirms pristine):
-  - M_f (stall check moved before the deadline check, guard kept): test fails with `assert 1 == 0` on `watcher.checks` (stall consulted first; problem would be `post-test-stall`).
-  - M_g (order kept, `state.cancel_signal is None` guard dropped on the stall check): test fails with `assert 1 == 0` on `watcher.checks` (unguarded second consult); the `fail_calls == [("execution-timeout", True)]` assertion is the second tripwire for the same regression.
-
-## F3. Abuse evidence completed: marker-shape mutations + the missing multi-attempt test
-
-- New `test_stall_first_attempt_marker_does_not_arm_second`: a001 `armed-idle` (own report path) is released to exit 0, then an idle a002 with its own report path and no marker must survive a 2.0 s window; asserts both facts (`a001`/`a002`, exit 0, no problems) and `released` term note. Uses the Harness `later`-style two-attempt manifest with per-attempt `report_path`s (the `auto_decide` path answers the a002 decision).
-- Mutation evidence for the marker-shape tests (same edit/run/revert discipline):
-  - M_a (`_marker_armed` → `marker.exists()`, i.e. pre-change existence-only behavior): `foreign_marker[symlink/fifo/dir]` + `symlink_not_written_through` all fail (4 failed, 1 passed); `other_report_marker` still passes, as expected — it tests path binding, not shape.
-  - M_b (`os.lstat` → `os.stat`): exactly the 2 symlink tests fail; fifo/dir pass — `lstat` is load-bearing for symlinks.
-  - M_c (`S_ISREG` check dropped, uid kept): all 4 shape tests fail.
-  - M_d (uid check dropped, `S_ISREG` kept): all 5 pass. Reported honestly: uid-check removal is not observable in this suite (every fixture marker is same-uid; a foreign-uid fixture would need `chown`, unavailable to the test user). The uid conjunct remains defended by code inspection, not by a red run.
-  - M_e (watcher cached across attempts — the exact feared regression, arm state moved out of `_run_one`): the new multi-attempt test fails because a002 is killed mid-window (`psutil.NoSuchProcess` inside `_assert_alive`; a001's stale marker arms the carried-over watcher and the idle a002 reads as stalled).
-
-## Verification (all through `ptest` from the worktree root)
-
-- `ptest tests/ng/test_guard.py tests/ng/test_stall_window.py` → **126 passed** (113 guard incl. the rewritten race unit test and the new multi-attempt test; 13 window), 0 failures.
-- `src/ptest/guard.py` has zero diff vs the prior T3 commit — production behavior is unchanged; this fix is fixture + test only, as the findings required.
-
-## Pass 1–3 self-review (dan-jefferies-agent)
-
-- Pass 1 (re-read bytes): full `git diff` re-read of both owned files. Found: nothing left over (all `TEMP MUTATION` markers reverted; `socket` import still used by the workload; `emitted = []` placed after the `_Control` class but before first use — closure resolves correctly). The `prepared` stub gap (F2) was caught by an actual red run, not by re-reading.
-- Pass 2 (re-anchor to design §T3 + abuse table): `stall_timeout_s = 1.0` everywhere incl. N2; same-poll criterion now asserts one problem / one dump signal / one kill signal with order pinned; `a001 marker vs a002` has a real multi-attempt test; every marker-shape test has a recorded red run except the uid conjunct (M_d, disclosed above).
-- Pass 3 (smell sweep): no new production helpers, no new deps, no config changes; test fakes mirror existing file conventions (`SimpleNamespace` stubs, `monkeypatch.setattr`); `_Child.calls` is a per-test class attribute (defined inside the test, single use — cannot leak across tests); no TODO/FIXME/HACK added.
-- Claimed-vs-shipped delta: none — all three findings fixed. Deferred: nothing. Discovered-but-not-fixed: nothing new (the `group_cpu_times` scan-cost note from the prior report stands).
-- Confidence: high — every changed behavior has a green run on clean code and a recorded red run under the matching mutation, with `guard.py` byte-identical to the reviewed T3 commit.
-
-## Structured fields (fix)
-
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T3
-- taskBranch: feature/post-test-stall-T3
-- status: DONE
-- tests: tests/ng/test_guard.py + tests/ng/test_stall_window.py → 126 passed
-- production diff: none (tests + fixture only)
+Honest closing (this round): implemented all three finding fixes;
+verified 127/127 owned tests green plus pre-fix red on each behavior
+test; not verified: `ptest --full` (integrated gate, out of scope);
+deferred: none; discovered-but-not-fixed: none in owned files.
+Confidence: high — each new test was observed red on unfixed code and
+green on fixed code.
+- discovered-but-not-fixed: none in owned files; out-of-scope smell:
+  none worth filing.
+- confidence: high — every acceptance row has a owning test seen red
+  then green, and the three self-review passes each surfaced a real
+  fix (unused imports, nodeid-key skew, missing VACUUM).

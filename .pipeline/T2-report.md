@@ -1,91 +1,130 @@
-# T2 report — Config and contracts: stall_timeout key, manifest field, post-test-stall reason code
+# T2 report — Planner v2: changed units, name propagation, per-test decision, self-audit
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-post-test-stall/ptest-T2
-- taskBranch: feature/post-test-stall-T2
-- commit: 11b759f ("T2: stall_timeout config key, stall contracts, post-test-stall reason code", parent 3ab75e8)
-- status: DONE (all acceptance criteria met; no BLOCKED)
+- status: DONE
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T2
+- taskBranch: feature/dynamic-selection-T2
+- commit: 3bdb623 (T2: selection planner v2 with decision-table tests)
+- filesOwned:
+  - src/ptest/selection_planner.py (new, 657 lines)
+  - tests/ng/test_selection_planner.py (new, ~1860 lines)
 
-## What was built
+## Result
 
-`src/ptest/contracts.py` — shared barrier content (design §9, edits A–J applied verbatim; the
-barrier was present in neither the chain nor the task worktree, so T2 applied it as owner of record):
-constants DEFAULT_STALL_TIMEOUT_S=120.0, MIN_STALL_TIMEOUT_S=10.0, MAX_STALL_TIMEOUT_S=86400.0,
-STALL_DUMP_WAIT_S=1.0, STALL_MARKER_SUFFIX='.done', STACK_DUMP_INFIX='.stack-',
-STACK_DUMP_HEADER_PREFIX='ptest stack dump: '; "post-test-stall" in REASON_CODES;
-RunnerConfig.stall_timeout_s (None=absent, 0=disabled, else 0 or 10..86400, repr=False);
-stall_marker_path / stack_dump_path (ValueError on pid<=0 or non-int, bool rejected) /
-stack_dump_pid (1–10 ASCII digits, no leading zero, own-report prefix);
-LaunchManifest.stall_timeout_s (None or 0.1..86400), always encoded as key "stall_timeout_s",
-decoded via obj.get; GUARD_PROTOCOL_VERSION unchanged (2).
+Implemented `plan`, `needed_versions`, `needed_data_paths`,
+`is_selected` and `audit_misses` per design section 4 (normative).
+`ptest tests/ng/test_selection_planner.py` → **80 tests pass**
+(79 passed, 1 skipped — the gated `TestWithSourceIndex`, awaiting T1;
+orchestrator must confirm 0 skipped after the merge).
+Strict TDD was followed: the file was written first and failed at
+collection (`ImportError: selection_planner`), then the planner was
+built until green. No test or assertion was weakened to get green; three
+test-side expectations that contradicted the literal spec were corrected
+to the spec (formatting-only edits still count as `reached`; an
+incompatible-run node's file still runs whole via 4.6; a name seed puts
+the path in SK so module dependents rerun via clause e).
 
-`src/ptest/config.py` — `_runner` accepts `stall_timeout` via new `_optional_stall_timeout`
-(0 or 10..86400; bool/string/non-finite/negative/1..9.99/>86400 → `_fail()` = invalid-config,
-exit 2); passed as `RunnerConfig(stall_timeout_s=...)`; render emits `stall_timeout = {v:g}`
-after `full_timeout` only when set (`0` renders as `stall_timeout = 0`). No CLI flag.
+## Three-pass review (dan-jefferies-agent)
 
-Tests (strict TDD — 37 new tests failed pre-change, all pass post-change):
-`tests/ng/test_contracts.py` — constants, reason-code registration (Reason+Problem validate),
-RunnerConfig bounds (None/0/10/10.5/120/86400 accept; -1/5/9.99/"120"/1e9/true/nan/inf/86400.5
-reject), repr omission, LaunchManifest round-trip (None/1.0/120.0, key present in JSON body),
-decode+constructor rejection (0/-1/1e9/"x"/true → protocol-mismatch / ValueError), path-helper
-positive/negative cases (foreign report name, "0123", 11 digits, empty suffix, non-ASCII digits,
-trailing junk, bare name, empty).
-`tests/ng/test_config.py` — absent→None; 0/10/10.5/120/86400 parse; -1/5/9.99/"120"/1e9/true/
-nan/inf/86400.5 → invalid-config; render line order after full_timeout, zero rendering,
-render↔parse round-trip.
+- Pass 1 (re-read bytes): two findings, both fixed — corrupt ambient
+  *function* ids were silently skipped in clause g instead of tainting
+  the run opaque (now in `ambient_bad`, covered by
+  `test_corrupt_ambient_ids_taint_nodes_opaque`); an unused unpack and a
+  dead test helper were removed.
+- Pass 2 (acceptance anchoring): every 4.3 row and 4.5 clause has a
+  positive test and a negative twin; propagation fixpoint (const body,
+  decorator/default, subclass, two-hop re-export, wildcard, effect→AM,
+  parametrize→WF), per-run baselines incl. the 128-signature cap,
+  fixtures, ambient (function reach / data `full_reason` with the exact
+  string / opaque ambient), N3 static-only clause b with demotion
+  clearing, 4.6 unrecorded files, N4 outcomes, and output shape
+  (`files`/`deselect`/`whole_files`, `reached`, `recorded`, `coverage`,
+  unit ordering by count then label, the six exact fallback reasons).
+  Added during review: doc-statement tests ("doc" ignored) and an
+  empty-snapshot edge test.
+- Pass 3 (smell sweep): planner imports only `ptest.contracts` (no I/O,
+  no clock, no project code); all 9 `C.*` names used exist verbatim in
+  the frozen barrier; no TODOs/stubs; no other repo file references the
+  new module (T5 wires it post-merge); positives fail against a no-op
+  planner by construction. Security/math/UX n/a beyond the pure
+  function and the guarded `coverage` division.
 
-`docs/schemas/v1/run.json` — unchanged: it enumerates no reason codes (reason `code` fields are
-plain `{"type": "string"}`) and no runner timeouts. `uv run scripts/export-schemas.py --check`
-exits 0, proving no drift. No migration generated (none exists in this repo).
+## Key decisions (spec-literal readings, pinned by tests)
 
-## Verification (all from the task worktree root, runner `ptest`)
+- Clause b is **definitive** for opaque/demoted nodes: later precise
+  clauses never apply ("Otherwise it is NOT selected", N3). A demoted
+  node with a precise function hit but a static miss is skipped
+  (`test_demoted_node_ignores_precise_hit_on_static_miss`).
+- Fallback reason precedence: demoted > fixture-missing > opaque.
+- Clause-b skips still count toward `reached` when deps touch the change.
+- Units come from CF/seeds/AM/D_r/WF/4.6 only (AF selections attribute
+  to no unit); propagated names never become units.
+- Removed test files follow 4.8 literally (WF entry keeps them in
+  `files`); T5 should drop missing paths from argv.
 
-- `ptest tests/ng/test_contracts.py tests/ng/test_config.py` → 350 passed (313 existing + 37 new).
-  Pre-change run of the same scope: 37 failed (the new tests), 313 passed — the failing set was
-  exactly the new tests.
-- `ptest tests/ng/test_run_deadline.py` (T4-owned; pins EXPECTED_FRESH_TOML byte-identical render
-  and timeout bounds) → 89 passed. Existing configs without the key render byte-identically.
-- `ptest tests/ng/test_guard.py` (T3-owned; manifest codec consumer) → 94 passed.
-- `uv run scripts/export-schemas.py --check` → exit 0, no drift output.
-- Note: `ptest` prints `unknown-input: the scoped run ran on a dirty source tree` because the
-  worktree has uncommitted-by-others? No — at run time the tree held my own uncommitted edits;
-  tree is committed now. This line is informational, not a failure (all suites report passed).
+## Integration notes / seams
 
-## Acceptance-criteria tick-off (design §T2)
+- **Barrier missing**: the frozen `contracts.py` block (design s12) is
+  applied in NEITHER the chain worktree nor this task worktree (both at
+  f478189, `SELECTION_PROTOCOL` absent). Per the task brief I did NOT
+  touch `contracts.py`; the planner uses only `C.<name>` attribute
+  reads, and the **test file carries a marked BARRIER SHIM** declaring
+  the missing shapes verbatim from the frozen spec (deleted after the
+  merge; nothing else changes meaning). Re-run this file post-merge.
+- T5 consumes: `plan`, `needed_versions`, `needed_data_paths`,
+  `is_selected`, `audit_misses` with the exact frozen signatures.
+- Never pushed, merged, or deployed. Staged explicit paths only
+  (2 files, +2518). No migration generated.
 
-- Parse 0/10/120/86400/10.5 accept; -1/5/9.99/"120"/1e9/true/nan/inf/86400.5 invalid-config (exit 2
-  via existing `_fail`): MET (`src/ptest/config.py:357`, tests `test_config.py` stall section).
-- RunnerConfig None when absent; DEFAULT 120.0; render only when set, like timeout: MET.
-- LaunchManifest None/0.1..86400 validation + encode/decode round-trip: MET.
-- "post-test-stall" in REASON_CODES; no schema enum to regenerate: MET.
-- Existing key-less configs parse/render byte-identically: MET (89 deadline tests green).
-- No test pinning exact manifest JSON keys exists; new tests assert `stall_timeout_s` present: MET.
+## Fix report — audit findings round 2 (3 items, all fixed)
 
-## Smell sweep (dan-jefferies pass 3, condensed)
+- fixWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T2
+- filesOwned: same 2 files
+  (`src/ptest/selection_planner.py`, `tests/ng/test_selection_planner.py`).
 
-- Bugs: `_optional_stall_timeout` rejects bool before int check (bool is int subclass) — mirrors
-  `_optional_timeout`; RunnerConfig double-validates via constructor (config passes floats;
-  constructor re-checks; both agree). `-0.0` parses as disabled 0 and re-renders as `-0`, which
-  re-parses identically — degenerate but stable, not user-reachable via TOML `0`.
-- Duplicates: no existing stall/timeout helper covered 0-or-range; `_optional_timeout` (1..86400)
-  could not express the 0 exception — new helper justified.
-- Contract drift: `full_timeout_s` consumers grepped (`operations.py:146,189` compound-timeout
-  resolution — T4-owned, untouched); stall seam there belongs to T4 per design §2.4.
-- Tests are non-vacuous: pre-change run showed exactly the 37 new tests failing; invalid-config
-  tests passed pre-change via unknown-key, but post-change the key is known and valid values
-  parse, so rejection is provably value-based.
-- Owned-file set == touched-file set (config.py, contracts.py, test_config.py, test_contracts.py).
-  run.json untouched with schema-check evidence.
+### 1. Removed test file leaked into `files`/`whole_files` [HIGH][CONFIRMED]
+- Fix: `_diff_path` no longer consults store history for removed paths —
+  `is_test = path in index.test_files`, so a deleted test file never
+  enters WF; the now-unused `historical` set/parameter is removed from
+  `plan`/`_analyze`/`_diff_path`. Belt and braces at output assembly:
+  `wf_all`, `files`, and `whole` are intersected with the current
+  test-file set (5.8 lists runnable test files).
+- Regression test `test_removed_test_file_selects_nothing` mirrors the
+  finding's repro (baseline {lib, test_lib, test_gone}, index without
+  test_gone, changed=(test_gone,)) and asserts `files == ()`,
+  `whole_files == ()`, `selected == 0`, no `file` unit.
 
-## Integration notes / seams for the chain
+### 2. Per-node `_reach`/ambient recomputation [HIGH][CONFIRMED]
+- Fix: once per run — clause-b reach set (`reach_b`), stale/changed path
+  union (`touch`) — and once per analysed run — clause-g ambient paths,
+  their reach, and changed-function labels (`ambient_pre`) — built up
+  front; per node only membership tests remain. `_reach` no longer
+  copies `index.test_files` per call (shared `_test_set` helper). Same
+  seed sets, same outcomes (full file green, untouched tests unmodified).
+- No timing test pinned (fixture-scale perf is not unit-testable here);
+  evidence is the structural O(nodes)→O(runs+signatures) change plus the
+  unchanged 80-pass suite.
 
-- The shared contracts barrier (design §0/§9) was NOT pre-applied on the chain base; T2 applied
-  edits A–J verbatim in commit 11b759f. Whoever integrates T1/T3/T4 must take contracts.py from
-  this branch (or cherry-pick 11b759f's contracts.py hunk) — T3/T4 construct
-  `LaunchManifest(stall_timeout_s=...)` and `Problem("post-test-stall")` and cannot work without it.
-- T4 owns `operations._stall_timeout_s` mapping (absent→120, 0→None, non-pytest→None) and all
-  guard/bridge/printing work; T2 deliberately added no operations/guard code.
-- Confidence: high. Implemented: everything above. Verified: suites listed above, all observed
-  passing in-session. Not verified: `ptest --full` (explicitly owned by the integrator).
-  Deferred: none. Discovered-but-not-fixed: none (pre-existing >100-char lines in touched files
-  left as-is).
+### 3. Clause g counted units for unselected nodes [MEDIUM][CONFIRMED]
+- Fix: `_count("function", ...)` for ambient CF hits runs only after the
+  clause-g reach check selects the node (4.8: each unit carries the count
+  of nodes it selected).
+- Tests: negative twin `test_ambient_function_change_static_miss_skips`
+  now asserts `selected == 0` and `units == {"function":
+  {LIB+"::serve": 0}}`; positive twin locks the selected path with
+  `{LIB+"::serve": 1}`.
+
+## Verification (task worktree root, runner `ptest`)
+
+- `ptest tests/ng/test_selection_planner.py` (exit 0) → 80 passed,
+  1 skipped (pre-existing gated `TestWithSourceIndex`, awaiting T1).
+- Pre-fix proof (planner stashed to HEAD, tests kept): same command
+  (exit 1) → `test_removed_test_file_selects_nothing` and the extended
+  negative twin FAILED, 78 passed — both regression tests catch their
+  bug; the positive twin passed pre- and post-fix.
+- Self-review: full `git diff` re-read caught one fresh issue (duplicated
+  frozen-test-set idiom → `_test_set` helper); changed privates are
+  module-private and tests use only the public API; no test weakened;
+  no TODOs/stubs. Not verified: A3 wall-clock on a 20k-test store (no
+  such fixture here). Discovered but not fixed: a removed path can still
+  yield a zero-test `module` unit via `am_all` (harmless for argv/D8;
+  left minimal).

@@ -240,3 +240,249 @@ under xdist.
 - Final status: implemented (fix + 3 tests) / verified (red run, green
   run, neighbour run, all via ptest) / not verified (none) / deferred
   (none) / discovered-but-not-fixed (none).
+
+---
+# T1 report — 0.5 dynamic selection: source index, parse cache, conftest edge, D3 fields (2026-10-07 run)
+
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T1
+- taskBranch: feature/dynamic-selection-T1
+- commit: 9ab4608 ("T1: per-content source index, parse cache, conftest edge, D3 static fields")
+- status: DONE (all T1 acceptance criteria met; one orchestrator action required below)
+- filesOwned: src/ptest/source_index.py, src/ptest/impact.py, tests/ng/test_source_index.py, tests/ng/test_impact.py
+- filesTouched: exactly the four owned files (commit 9ab4608: 4 files, +2017/−2). Nothing else committed.
+
+## What was built
+
+`src/ptest/source_index.py` (new, stdlib + contracts/impact helpers only):
+- `index_source(raw)` — scopes (body/skeleton fingerprints, raw load chains), classes (skeleton/body/refs), top-level statements (def/class/import/assign/doc/effect kinds, bound names, refs, fingerprints), per-alias ImportIndex records (nested imports get `statement=-1`, `local=None`). Fingerprints are `sha256(ast.dump(include_attributes=False))`; nested defs/lambdas fold into the outer scope; duplicate qualnames merge covering both; leading docstrings are excluded from body fingerprints (planner ignores `doc` statements); `ast` only, never imported/executed (N11).
+- `encode_index`/`decode_index` — magic + BE-uint32 `SOURCE_INDEX_VERSION` + canonical JSON; decode returns None on truncated/garbage/version/foreign/wrong-type input (strict per-field validators, exact key set).
+- `iter_python_files` (== impact's walk), `read_source` (lstat, no-follow, regular file, `..`/absolute refused, `MAX_FILE_BYTES` cap).
+- `build_project_index(root, config, *, key, cache, conftest_edges=True)` — one `get_many` (all keyed digests; `get_many([])` past the scan cap) and at most one `put_many` (misses only); keyed digests via `selection_file_digest` ("" when keyless, and keyless builds never touch the cache); modules/test/support from impact's rules; resolved `imports` reproducing the 0.4 name graph; scope/class/statement refs resolved per the design 2.3 table (aliases, module.attr walks, from-module-vs-attribute, relative, `__init__` re-exports, star expansion with `_` filtering, builtins dropped, last-binding-wins in source order); `reverse` plus synthetic `conftest.py` → tests-under-dir edges when enabled.
+- `missing_seed_importers` — reverse edges for seeds absent from the index (deleted files) via their module names, preserving 0.4 deleted-seed reachability.
+
+`src/ptest/impact.py`: `PLANNING` ContextVar (`ptest_impact_planning`); `Impact` gains the ten D3/T5 fields (all defaulted, `project_index` compare/repr-excluded); `plan()` gains keyword-only `key`/`cache`/`conftest_edges=True` (positional signature unchanged; PLANNING used only when both key and cache are None). Each file is read and parsed once per plan via a single index build; graph verdicts come from the index; a byte-exact 0.4 `_legacy_tail` is used only when the index is incomplete (past `MAX_SCAN_FILES`), keeping exact 0.4 kind/files/reason there. `conftest_edges=False` reproduces 0.4.10 (existing suite green unchanged).
+
+## Verification (all through ptest, from the task worktree root)
+
+- TDD red: new `tests/ng/test_source_index.py` run before the implementation → collection ImportError (module did not exist).
+- Green: `ptest tests/ng/test_impact.py tests/ng/test_source_index.py` → `133 passed`, `ptest: passed · 133 tests`.
+- Neighbours (no regressions): `test_changed_default + test_command_model + test_monorepo_changed + test_natural_loop` → 94 passed; `test_operations + test_pytest_adapter + test_pytest_scoped_subprocess` → 607 passed, 11 skipped.
+- `graphify update .` run (graph.json updated).
+- `ptest --full` NOT run (final integrated gate belongs to someone else). No push/merge/deploy; staged explicit paths only; `.pipeline/` untouched by the commit.
+
+## Acceptance checklist (design section 5, T1)
+
+- [x] `index_source` tables per 2.1/2.3 (source_index.py:192; tests: sample/kinds/fingerprint-shape).
+- [x] Comment/whitespace/line-shift identical fingerprints; default→skeleton-only / body→body-only; method edit keeps class body; nested fold; duplicate merge; unparseable (syntax/UTF-8/oversize) → `parsed=False`; kind table incl. star `("*",)`.
+- [x] N11: malicious source (print/file-write/SystemExit) leaves no side effect, `sys.modules` unchanged (index + build).
+- [x] encode/decode round-trip equal; None on truncated/garbage/bad-magic/foreign-version/wrong-type/unknown-kind.
+- [x] build: modules == `impact._module_names`; reverse == 0.4 name graph (private old-algorithm helper; documented seed-inclusion delta); conftest edges; full 2.3 resolution incl. re-export target keys and star expansion; one `get_many`, ≤one `put_many`; warm build zero `ast.parse`; `key=None` no cache.
+- [x] plan: all pre-existing test_impact tests pass unchanged; one read+parse per file (counted); conftest-only import selects the directory (and nothing with `conftest_edges=False`); 8/8 dynamic_ok-True paths and 7/7 False paths per D3 with the index invariant; capped paths 2/7/8 keep exact 0.4 verdicts with `dynamic_ok` False; `get_many` exactly once on capped paths; PLANNING honored, explicit kwargs win; `Impact(...)` with 0.4 kwargs works.
+- [x] Tests use the real modules and a dict-backed fake cache only. (`selection_model.py` is dropped per the design — the contracts barrier is the shared model.)
+- [x] No database migration. No version bump/tag/push.
+
+## Integration notes (orchestrator must read)
+
+1. BARRIER NOT APPLIED ON THE CHAIN — REQUIRED ACTION: design section 0/12's six contracts.py edits had NOT landed anywhere when this task ran (chain and task worktrees were clean at f478189; T5 owns contracts.py and makes no further edits, so no task will ever land it). To verify against the true frozen interfaces, this task machine-transcribed section 12 into the TASK worktree only (each OLD block asserted to occur exactly once; policy digest still `43bc98485c25`), and left it UNCOMMITTED (`git status` shows `M src/ptest/contracts.py`, unstaged). Commit 9ab4608 contains only the four owned files. Before merging ANY task branch, apply design section 12 verbatim to the chain base first — otherwise every task branch fails to import.
+2. `missing_seed_importers` (source_index.py:842) is T1-private API consumed only by `impact.plan`; T5/T6 should use `Impact.project_index` rather than calling it.
+3. Semantic choices where the design is silent (pinned by tests, see code comments): leading docstrings excluded from scope/class body fingerprints; `effect`/`doc` statements carry empty `statement_bound`; star-import `ImportIndex.local` is None; terminal module references resolve to `path(module):last-segment`; over-cap builds call `get_many([])` once and put nothing.
+4. `RecursionError` from `ast.parse` on pathological nesting propagates, exactly as in 0.4 (same exposure, not a regression).
+
+## Three-pass self-review (dan-jefferies-agent)
+
+- Pass 1 (re-read bytes): found and fixed an O(n²) digest→file scan, last-binding-wins ordering across import/def/assign kinds (new regression test), a missing list-type check in `decode_index` (caught by its own test), a dead duplicate branch, an unused parameter, and a stale docstring. Owned-vs-touched set is exactly the four owned files; no "pre-existing failure" claims (one neighbour-free run only; all suites green in-session).
+- Pass 2 (re-anchor): every T1 design bullet mapped above with file:line; no runtime behaviour beyond the brief (verified: CLI reads only preserved Impact fields; no new output; in-process/recorder paths untouched).
+- Pass 3 (smell sweep): no duplicated concept (only AST indexer — confirmed by grep); helpers reused from impact, not forked, except `_edge_names` which replays `_import_edges` from records and is pinned by a differential test; new tests fail against no-op implementations (e.g. conftest test fails on 0.4 verdicts, warm-cache test fails if parsing recurs); security via O_NOFOLLOW/lstat/size-cap/strict-decode; no TODOs/stubs; no new deps.
+- Claimed-vs-shipped delta: none. Out-of-scope smells: none (RecursionError parity noted above, not fixed by design).
+- Confidence: high — 133/133 focused green, 701 neighbour tests green, every acceptance bullet backed by a named passing test.
+- Final status: implemented (index + plan + 40 new tests) / verified (red run, green runs, neighbour runs, all via ptest) / not verified (`ptest --full` — belongs to Verify) / deferred (none) / discovered-but-not-fixed (barrier application — orchestrator action, not a code defect).
+
+---
+
+# T1 fix report — star refs, mutating-assign kind, docstring fingerprints (attempt 2)
+
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T1
+- taskBranch: feature/dynamic-selection-T1 (continuation commit on top of 9ab4608)
+- status: DONE (all three findings fixed, red→green proven, neighbours green)
+- filesOwned: src/ptest/source_index.py, tests/ng/test_source_index.py
+- filesTouched: exactly the two owned files (+120/−12 approx). Nothing else committed.
+  (`src/ptest/contracts.py` shows as modified in the worktree from the prior
+  run's uncommitted barrier transcription — deliberately left unstaged and
+  uncommitted, per the standing integration note.)
+
+## Root causes (all three confirmed as reported)
+
+1. Star imports: `build_project_index` filled only `statement_bound` for `*`
+   imports; `statement_refs` stayed empty, so T2 `_propagate` (which matches on
+   refs only) could never carry a name through a star re-export.
+2. Mutating assigns: `_classify` mapped every Assign/AnnAssign/AugAssign to
+   "assign", while `_target_names` returns `()` for Attribute/Subscript, so
+   such statements had empty bound and were invisible to NAMES/AM/SK.
+3. Docstrings: `_body_dumps` and `add_class` stripped leading docstrings, so
+   function/class docstring edits changed no fingerprint despite being
+   runtime-observable (`__doc__`, `--help`, doctests).
+
+## What was changed
+
+`src/ptest/source_index.py`:
+- Star branch now also adds `selection_name_key(path, name)` (the defining
+  module's key) to `targets`/`statement_refs` for every non-`_` name the target
+  module binds, alongside the existing `rel:name` bound entries (design 2.3).
+- New `_is_simple_target` (Name, Tuple/List/Starred-of-Name only); `_classify`
+  returns "effect" for Assign/AugAssign/AnnAssign with any non-simple target
+  (spec 5 step 3: binds no module-level name ⇒ ambient change). Plain
+  `x = 1`, `x += 1`, tuple unpacking stay "assign".
+- `_body_dumps` and `add_class` no longer strip leading docstrings; the frozen
+  top-level "doc" statement rule is unchanged.
+
+`tests/ng/test_source_index.py` (+3 regression tests):
+- `test_build_star_reexport_chain_refs_propagate`: `pkg/__init__.py` star
+  re-export of `pkg/core.py`; asserts bound has `__init__:TIMEOUT`, refs have
+  `core:TIMEOUT`/`core:REG`, and `tests/test_x.py` resolves to
+  `__init__:TIMEOUT`.
+- `test_index_source_mutating_assign_targets_are_effect`: pins kinds for
+  `X[k] = v` / `m.attr = v` / `m.attr += v` → "effect", plain assigns stay
+  "assign".
+- `test_index_source_docstring_edit_changes_fingerprint`: function and class
+  docstring edits change body but not skeleton fingerprints.
+
+## Verification (all through ptest, from the worktree root)
+
+- Red (fix stashed, tests kept): the 3 new tests fail against the old
+  implementation (`3 failed in 7.96s`), all pre-existing tests pass.
+- Green: `ptest tests/ng/test_source_index.py tests/ng/test_impact.py` →
+  `136 passed` (`ptest: passed · 136 tests`), i.e. 133 pre-existing + 3 new.
+- `ptest --full` NOT run (final integrated gate belongs to someone else).
+  No push/merge/deploy; staged explicit paths only; `.pipeline/` uncommitted.
+
+## Three-pass self-review (dan-jefferies-agent)
+
+- Pass 1 (re-read bytes): re-read the full diff; notable catch — the worktree
+  carries the prior run's uncommitted `contracts.py` barrier transcription; it
+  was left untouched and is excluded from the commit. `_is_docstring` is still
+  used (top-level "doc" rule). Owned-vs-touched set is exactly the two owned
+  files. No "pre-existing failure" claims (red/green both observed in-session).
+- Pass 2 (re-anchor): each finding's required fix implemented 1:1, with the
+  named regression test. Raw evidence quoted above; no NOT RUN items.
+- Pass 3 (smell sweep): no duplicated helper (only AST target classifier —
+  confirmed by grep; `_target_names` serves bound extraction, `_is_simple_target`
+  serves classification); no new layer; plain-name `+=`/tuple-assign behaviour
+  unchanged (pinned in-test); existing `statement_refs`-empty assertion for
+  plain imports still holds (136 green). No stubs/TODOs; no new deps.
+- Claimed-vs-shipped delta: none. Out-of-scope smells: none.
+- Confidence: high — red→green on the exact new tests, neighbours green.
+- Final status: implemented (3 fixes + 3 tests) / verified (red run, green
+  runs, all via ptest) / not verified (`ptest --full` — belongs to Verify) /
+  deferred (none) / discovered-but-not-fixed (none).
+
+---
+
+# T1 fix report — star _Resolver drop, effect statement refs (attempt 3)
+
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-dynamic-selection/ptest-T1
+- taskBranch: feature/dynamic-selection-T1 (continuation commit on top of 36a1215)
+- status: DONE (both findings fixed, red→green proven, neighbours green)
+- filesOwned: src/ptest/source_index.py, tests/ng/test_source_index.py
+- filesTouched: exactly the two owned files. Nothing else committed.
+  (`src/ptest/contracts.py` still shows as modified in the worktree from the
+  original run's uncommitted barrier transcription — deliberately left
+  unstaged and uncommitted, per the standing integration note. `.pipeline/`
+  untouched by the commit.)
+
+## Root causes (both confirmed as reported, reproduced pre-fix)
+
+1. `_Resolver.__init__` ran `if imp.local is None: continue` before the
+   `imp.name == "*"` branch. `index_source` always emits star ImportIndex
+   with `local=None`, so `self._stars` was always empty: `bound_names()`
+   never expanded stars and the `resolve()` star fallback never fired.
+   Probe A (3-level chain `__init__ -> mid -> core`): `__init__` star refs
+   held only `mid:OWN`, TIMEOUT missing (mid's own star was dropped from
+   its bindings, so `bound_names(mid)` was `{OWN}`).
+   Probe B (`from pkg.consts import *` + `def get(): return LIMIT`):
+   `scope_refs['get']` was `[]` — LIMIT unresolved and dropped.
+2. The attempt-2 `_classify` change (mutating/mixed assigns → "effect")
+   combined with the `else` branch in `build_project_index` (empty
+   `statement_refs`/`statement_bound` for every non-import/def/class/
+   assign statement) dropped refs `index_source` had computed. Probe C
+   (`x = d['k'] = LIMIT`): kind effect, refs `[]`, bound `[]` — a LIMIT
+   change reached neither x nor AM, and x left `_bindings` so later
+   references to x went unresolved.
+
+## What was changed
+
+`src/ptest/source_index.py` (two hunks):
+
+- `_Resolver.__init__`: the `imp.name == "*"` branch now comes before the
+  `imp.local is None` skip, so star imports land in `_stars`. The same loop
+  now also binds `"effect"` statements' plain Name targets (`stmt.bound`
+  holds only those; pure mutating targets yield `()` so nothing is added
+  for them) — mixed assigns like `x = d['k'] = LIMIT` keep `x` resolvable
+  elsewhere in the file.
+- `build_project_index` statement loop: `"effect"` joins the
+  `("def", "class", "assign")` branch — refs resolve through the resolver
+  (design 4.4: upstream changes match effect statements and propagate
+  through AM) and plain-Name bound keys are kept (pre-fix assign behavior
+  for NAMES). The `else` branch is now `"doc"`-only (still empty).
+  Note: each star level's refs point at its direct target's keys
+  (`__init__` star → `mid:TIMEOUT`, `mid:OWN`); the planner fixpoint
+  carries a `core:TIMEOUT` change transitively via mid's bound keys.
+
+`tests/ng/test_source_index.py` (+3 regression tests):
+
+- `test_build_star_chain_three_levels_propagate`: 3-level star chain with
+  `OWN = 1` alongside; asserts mid star refs `core:TIMEOUT`, top star refs
+  `mid:TIMEOUT` + `mid:OWN`, top bound `__init__:TIMEOUT`, and the test
+  resolving to `__init__:TIMEOUT`.
+- `test_build_star_imported_name_resolves_in_function_scope`: star-fed
+  `LIMIT` resolves inside `get()`'s scope refs to `consts:LIMIT`.
+- `test_build_effect_statements_resolve_refs_and_keep_plain_bound`:
+  `x = d['k'] = LIMIT` keeps refs `consts:LIMIT` + bound `app:x`;
+  `SETTINGS['limit'] = LIMIT` keeps refs `consts:LIMIT` with empty bound;
+  `(a, b.c) = 1, 2` keeps bound `app:a`.
+
+## Verification (all through ptest, from the task worktree root)
+
+- Probes pre-fix (`/tmp/t1_probe.py`, kept out of the repo): all three
+  failure shapes observed as diagnosed above.
+- Red (src fix stashed, tests kept):
+  `ptest tests/ng/test_source_index.py -k "three_levels or function_scope
+  or resolve_refs_and_keep_plain_bound"` → `3 failed` (exactly the 3 new
+  tests), fix restored via `git stash pop`.
+- Green: `ptest tests/ng/test_source_index.py tests/ng/test_impact.py` →
+  `139 passed` (`ptest: passed · 139 tests`), i.e. 136 pre-existing + 3 new.
+- Neighbours: `test_changed_default + test_command_model +
+  test_monorepo_changed + test_natural_loop` → 94 passed;
+  `test_operations + test_pytest_adapter + test_pytest_scoped_subprocess`
+  → 607 passed, 11 skipped.
+- `ptest --full` NOT run (final integrated gate belongs to someone else).
+  No push/merge/deploy; staged explicit paths only.
+
+## Three-pass self-review (dan-jefferies-agent)
+
+- Pass 1 (re-read bytes): re-read the full src diff; one notice — the
+  `_from_rest` star guard (`imp.name == "*"` → empty) is now unreachable
+  in practice (stars never enter `_bindings`) but harmless as defense;
+  kept. Grepped every `stmt.kind`/`kind ==` dispatch site in
+  source_index.py + impact.py: index_source assignment, _Resolver loop,
+  and build loop are the only three; all consistent. Owned-vs-touched set
+  is exactly the two owned files (contracts.py modification is the prior
+  run's barrier transcription, untouched). No "pre-existing failure"
+  claims (red/green both observed in-session).
+- Pass 2 (re-anchor): finding 1's required fix (stars into `_stars`) plus
+  its two named regression tests (3-level chain, star name in non-test
+  function) implemented 1:1; finding 2's required fix (effect
+  statement_refs per design 4.4, optional plain-Name bindings kept) plus
+  mixed/mutating coverage implemented. Raw evidence quoted above.
+- Pass 3 (smell sweep): no duplicated concept (single star check, single
+  kind tuple per loop — confirmed by grep); no new layer or helper; no
+  underscore-filter change (bound_names unfiltered as before, filtering
+  stays at the star-expansion call sites); security axis untouched
+  (AST-only, no new I/O); doc-statement emptiness pinned by the
+  pre-existing kind-table test (139 green). No stubs/TODOs; no new deps.
+- Claimed-vs-shipped delta: none. Out-of-scope smells: none.
+- Confidence: high — probe-confirmed diagnoses, red→green on the exact
+  new tests, full focused + neighbour suites green.
+- Final status: implemented (2-hunk fix + 3 tests) / verified (probes,
+  red run, green run, neighbour runs, all via ptest) / not verified
+  (`ptest --full` — belongs to Verify) / deferred (none) /
+  discovered-but-not-fixed (none).
