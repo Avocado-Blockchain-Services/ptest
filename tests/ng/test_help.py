@@ -68,13 +68,15 @@ def test_help_topic_contents_are_command_specific(tmp_path, monkeypatch, capsys)
     _no_execution(monkeypatch)
     monkeypatch.chdir(tmp_path)
     expectations = {
-        "init": ("--runner", "--agents", "--dry-run"),
-        "doctor": ("--probe", "--scope", "--fix", "--dry-run"),
+        "init": ("--runner", "--agents", "--dry-run", "--test-policy",
+                 "--no-test-policy"),
+        "doctor": ("--probe", "--scope", "--fix", "--dry-run", "Test policy"),
         "run": ("--full",),
-        "rules": ("--apply",),
-        "guide": ("--write",),
+        "rules": ("--apply", "--test-policy"),
+        "guide": ("--write", "TOPIC"),
         "history": ("--limit",),
-        "uninstall": ("--self", "--yes", "--dry-run", "--json"),
+        "uninstall": ("--self", "--yes", "--dry-run", "--json",
+                      "ptest-test-policy.md"),
         "update": ("--check", "--version", "--json", "PTEST_NO_UPDATE_CHECK"),
     }
     for topic, markers in expectations.items():

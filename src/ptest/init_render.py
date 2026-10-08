@@ -49,6 +49,27 @@ _SKILL_AGENTS = (
 _RESTART_NEW = "Restart your coding agents to load the new ptest skill."
 _RESTART_UPDATED = "Restart your coding agents to load the updated ptest skill."
 
+CONFLICT_HEADER = ("These lines in your instruction files name a coverage "
+                   "percentage; ptest never edits them. Review them yourself:")
+
+
+def conflict_lines(scan: object) -> tuple[str, ...]:
+    """Display lines for conflicting instruction lines, header included.
+
+    Takes an ``agent_rules.InstructionScan`` (duck-typed ``.lines`` of
+    ``(path, line, text)``). Every repository-derived string is sanitized
+    through ``terminal_text``; empty scans render nothing.
+    """
+    items = tuple(getattr(scan, "lines", None) or ())
+    if not items:
+        return ()
+    rendered = []
+    for item in items:
+        rendered.append(
+            f"  {terminal_text(item.path)}:{item.line}: "
+            f"{terminal_text(item.text)}")
+    return (CONFLICT_HEADER, *rendered)
+
 
 def _display_width(text: str) -> int:
     total = 0
@@ -295,6 +316,7 @@ def render_init(result: C.InitResult, rules: object = None, *,
                 repo_name: str = "",
                 color: bool = False,
                 facts: Sequence[Mapping[str, object]] = (),
+                conflicts: Sequence[str] = (),
                 width: int | None = None) -> str:
     """Render the init summary: wordmark, header, projects, files, warnings.
 
@@ -317,6 +339,8 @@ def render_init(result: C.InitResult, rules: object = None, *,
             blocks.append(files)
     if result.warnings:
         blocks.append(_warning_lines(result, resolved))
+    if conflicts:
+        blocks.append([_clean(line) for line in conflicts if line])
     for block in blocks:
         lines.append("")
         lines.extend(block)

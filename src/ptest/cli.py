@@ -84,6 +84,8 @@ class ParsedArgs:
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
     apply_rules: bool = False
+    test_policy: bool | None = None
+    guide_topic: str | None = None
     uninstall_self: bool = False
     uninstall_yes: bool = False
     update_check: bool = False
@@ -286,6 +288,44 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     )
 
 
+def _guide_topics() -> tuple[str, ...]:
+    """Packaged recipe names for ``ptest guide TOPIC``, in a stable order."""
+    from . import checklist as checklist_api
+
+    return checklist_api.recipe_names()
+
+
+def _test_policy_change_lines(actions: object) -> list[str]:
+    """Display lines for policy-caused plan actions (policy-effective plans).
+
+    The policy file create/update line comes first, then one grouped
+    reference line for in-place block upgrades, then creates of
+    instruction files that are born holding the policy variant, then
+    appends to existing block-less instruction files (which gain the
+    policy variant block under the policy). Every caller passes a plan
+    previewed with the policy in effect, so each listed file is one the
+    apply will write.
+    """
+    lines = [str(action) for action in tuple(actions or ())
+             if action in ("create docs/ptest-test-policy.md",
+                           "update docs/ptest-test-policy.md")]
+    upgrades = [str(action)[len("add test-policy reference to "):]
+                for action in tuple(actions or ())
+                if str(action).startswith("add test-policy reference to ")]
+    if upgrades:
+        lines.append("add one reference line to " + ", ".join(upgrades))
+    for action in tuple(actions or ()):
+        text = str(action)
+        if text.startswith("create ") and text[len("create "):] in (
+                "AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            lines.append(text)
+    for action in tuple(actions or ()):
+        text = str(action)
+        if text.startswith("append managed reference to "):
+            lines.append(text)
+    return lines
+
+
 def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     if command == "init":
         runner = None
@@ -304,11 +344,23 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         review_concurrency = 4
         smoke: bool | None = None
         smoke_seen = no_smoke_seen = False
+        test_policy: bool | None = None
+        test_policy_seen = False
         index = 0
         while index < len(args):
             token = args[index]
             if token == "--dry-run":
                 dry_run = True
+            elif token == "--test-policy":
+                if test_policy_seen:
+                    raise _problem("invalid-config", "init test-policy modes cannot be combined or repeated")
+                test_policy_seen = True
+                test_policy = True
+            elif token == "--no-test-policy":
+                if test_policy_seen:
+                    raise _problem("invalid-config", "init test-policy modes cannot be combined or repeated")
+                test_policy_seen = True
+                test_policy = False
             elif token == "--reveal-command":
                 reveal = True
             elif token == "--from-main":
@@ -433,7 +485,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           review_concurrency=review_concurrency,
                           review_concurrency_explicit=concurrency_seen,
                           doctor_request=doctor_request,
-                          smoke=smoke)
+                          smoke=smoke,
+                          test_policy=test_policy)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -441,9 +494,23 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     if command == "rules":
         if not args:
             return ParsedArgs(command=command)
-        if tuple(args) == ("--apply",):
-            return ParsedArgs(command=command, apply_rules=True)
-        raise _problem("invalid-config", "rules accepts only --apply")
+        apply_rules = test_policy_flag = False
+        seen: set[str] = set()
+        for token in args:
+            if token == "--apply":
+                if "apply" in seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                seen.add("apply")
+                apply_rules = True
+            elif token == "--test-policy":
+                if "test-policy" in seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                seen.add("test-policy")
+                test_policy_flag = True
+            else:
+                raise _problem("invalid-config", "rules accepts only --apply and --test-policy")
+        return ParsedArgs(command=command, apply_rules=apply_rules,
+                          test_policy=test_policy_flag or None)
     if command == "uninstall":
         uninstall_self = uninstall_yes = uninstall_dry = uninstall_json = False
         for token in args:
@@ -761,12 +828,18 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     if command == "guide":
         if not args:
             return ParsedArgs(command=command)
-        if args[0] != "--write":
-            raise _problem("invalid-config", "unknown inspection option")
-        write, index = _value(args, 0, "--write")
-        if index != len(args):
-            raise _problem("invalid-config", "unknown inspection option")
-        return ParsedArgs(command=command, write=write)
+        if args[0] == "--write":
+            write, index = _value(args, 0, "--write")
+            if index != len(args):
+                raise _problem("invalid-config", "unknown inspection option")
+            return ParsedArgs(command=command, write=write)
+        topics = _guide_topics()
+        if len(args) == 1 and args[0] in topics:
+            return ParsedArgs(command=command, guide_topic=args[0])
+        if args[0] in topics or not args[0].startswith("-"):
+            raise _problem("invalid-config",
+                           f"unknown guide topic; topics: {' '.join(topics)}")
+        raise _problem("invalid-config", "unknown inspection option")
     raise _problem("invalid-config", "unknown command")
 
 
@@ -1086,11 +1159,13 @@ def _init_facts(cwd: Path) -> tuple:
 
 
 def _render_init_text(result, rules, *, parsed: ParsedArgs,
-                      repo_name: str, facts: tuple) -> str:
+                      repo_name: str, facts: tuple,
+                      conflicts: tuple = ()) -> str:
     """Render the init header: wordmark, projects, grouped file actions."""
     return init_render.render_init(
         result, rules, dry_run=parsed.dry_run, agents=parsed.agents,
-        repo_name=repo_name, color=sys.stdout.isatty(), facts=facts)
+        repo_name=repo_name, color=sys.stdout.isatty(), facts=facts,
+        conflicts=conflicts)
 
 
 def _render_init_footer_text(result, rules, *, parsed: ParsedArgs,
@@ -2663,6 +2738,13 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         print(C.PTEST_VERSION)
         return 0
     if command == "guide":
+        if parsed.guide_topic is not None:
+            from . import checklist as checklist_api
+            try:
+                sys.stdout.write(checklist_api.load_recipe(parsed.guide_topic))
+            except C.Problem as problem:
+                return _emit_error(problem, kind="guide", json_output=False)
+            return 0
         text = render.render_guide()
         if parsed.write is not None:
             root = config_api.resolve_config(cwd).root
@@ -2677,10 +2759,37 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             # `rules --apply` clears an outdated-guidance warning on its own.
             root = config_api.repository_root(cwd)
             installed = agent_rules.installed_providers(root)
+            with_policy = parsed.test_policy is True
+            if with_policy and not parsed.apply_rules:
+                plan = agent_rules.preview(
+                    root, agents=installed, test_policy=True)
+                sys.stdout.write("preview: " + (", ".join(plan.actions)
+                                                     or "already configured")
+                                         + "\n")
+                _print_policy_conflicts(root)
+                return 0
+            if with_policy and parsed.apply_rules:
+                plan = agent_rules.preview(
+                    root, agents=installed, test_policy=True)
+                changes = _test_policy_change_lines(plan.actions)
+                if not changes:
+                    sys.stdout.write("test policy: already installed\n")
+                    _print_policy_conflicts(root)
+                    return 0
+                sys.stdout.write("will change: " + ", ".join(changes) + "\n")
+                result = agent_rules.apply(
+                    root, agents=installed, test_policy=True)
+                sys.stdout.write("applied: " + (", ".join(result.actions)
+                                                     or "already configured")
+                                         + "\n")
+                _print_policy_conflicts(root)
+                return 0
             result = (agent_rules.apply(root, agents=installed) if parsed.apply_rules
                       else agent_rules.preview(root, agents=installed))
             label = "applied" if parsed.apply_rules else "preview"
             print(f"{label}: " + (", ".join(result.actions) or "already configured"))
+            if agent_rules.test_policy_installed(root):
+                _print_policy_conflicts(root)
             return 0
         except C.Problem as problem:
             return _emit_error(problem, kind="rules", json_output=False)
@@ -2705,7 +2814,29 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                                config_api.FROM_MAIN_REFUSAL)
             agents = _init_agents(parsed, json_output=parsed.json)
             root = config_api.repository_root(cwd)
-            plan = agent_rules.preview(root, agents=agents) if agents else None
+            policy_consent = _init_test_policy(
+                parsed, agents=agents, root=root)
+            recorded = agent_rules.test_policy_installed(root)
+            effective = policy_consent or recorded
+            # A recorded policy alone never routes through apply: without
+            # chosen agents or an explicit --test-policy, init without a
+            # prompt is a refresh (which skips a user-edited policy file
+            # and never touches instruction files), exactly like init
+            # without a recorded policy.
+            wants_apply = bool(agents) or policy_consent
+            plan = (agent_rules.preview(
+                root, agents=agents, test_policy=policy_consent)
+                if wants_apply else None)
+            if effective and plan is not None:
+                policy_changes = _test_policy_change_lines(plan.actions)
+                if policy_changes:
+                    verb = "would change" if parsed.dry_run else "will change"
+                    progress.emit(f"ptest: test policy: {verb}: "
+                                      + ", ".join(policy_changes),
+                                      quiet=parsed.quiet)
+                else:
+                    progress.emit("ptest: test policy: already installed",
+                                  quiet=parsed.quiet)
             result = config_api.init_project(cwd, C.InitOptions(
                 runner=parsed.runner, dry_run=parsed.dry_run,
                 reveal_command=parsed.reveal_command,
@@ -2714,9 +2845,11 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 from_main=parsed.from_main,
             ))
             applied = None
-            if agents and not parsed.dry_run:
-                applied = agent_rules.apply(root, agents=agents)
-            elif not parsed.dry_run and not parsed.agents_explicit:
+            if wants_apply and not parsed.dry_run:
+                applied = agent_rules.apply(
+                    root, agents=agents, test_policy=policy_consent)
+            elif (not parsed.dry_run and not parsed.agents_explicit
+                    and not wants_apply):
                 # No prompt (an agent, CI, a pipe): still refresh guidance
                 # ptest itself installed earlier, never anything new. It is
                 # best effort: the config is already written, so a refresh
@@ -2739,14 +2872,23 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                         result, commit_paths=result.commit_paths + extra)
             payload = C.serialize_init_result(result)
             rules = applied if applied is not None else plan
+            conflicts: tuple[str, ...] = ()
+            if effective:
+                try:
+                    conflicts = init_render.conflict_lines(
+                        agent_rules.coverage_instruction_lines(root))
+                except Exception:
+                    conflicts = ()
             if parsed.json:
                 # Machine output stays byte-compatible: no facts, no footer.
                 sys.stdout.buffer.write(_document("init", payload))
+                for line in conflicts:
+                    progress.emit(line, quiet=parsed.quiet)
             else:
                 facts = () if parsed.dry_run else _init_facts(cwd)
                 sys.stdout.write(_render_init_text(
                     result, rules, parsed=parsed, repo_name=root.name,
-                    facts=facts))
+                    facts=facts, conflicts=conflicts))
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
@@ -2974,6 +3116,54 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             json_output=parsed.json,
         )
     raise _problem("invalid-config", "unknown command")
+
+
+def _print_policy_conflicts(root: Path) -> None:
+    """List conflicting instruction lines on stdout; best effort only."""
+    try:
+        scan = agent_rules.coverage_instruction_lines(root)
+    except Exception:
+        return
+    for line in init_render.conflict_lines(scan):
+        sys.stdout.write(line + "\n")
+
+
+def _init_test_policy(parsed: ParsedArgs, *, agents: tuple[str, ...],
+                      root: Path) -> bool:
+    """Explicit policy flag, else one TTY prompt; the default is No."""
+    if parsed.test_policy is True:
+        return True
+    if parsed.test_policy is False:
+        return False
+    if not agents:
+        return False
+    if parsed.json or parsed.dry_run:
+        return False
+    if not _interactive_review():
+        return False
+    if not parsed.agents_explicit:
+        # A fully interactive init keeps its established question script
+        # (agents, then review): the policy offer follows an explicit
+        # --agents declaration, so existing answer sequences keep working.
+        return False
+    if agent_rules.test_policy_installed(root):
+        return False
+    try:
+        plan = agent_rules.preview(root, agents=agents, test_policy=True)
+    except C.Problem:
+        return False
+    changes = _test_policy_change_lines(plan.actions)
+    if not changes:
+        return False
+    progress.emit("Also install the stricter test policy? It changes:")
+    for line in changes:
+        progress.emit(f"  {line}")
+    progress.emit("[y/N]:")
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
 
 
 def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str, ...]:

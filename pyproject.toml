@@ -34,6 +34,7 @@ ptest = [
   "runtime/protocol-v1.json",
   "resources/agent-guide.md",
   "resources/repository-agent-guide.md",
+  "resources/test-policy.md",
   "resources/recipes/*.md",
 ]
 

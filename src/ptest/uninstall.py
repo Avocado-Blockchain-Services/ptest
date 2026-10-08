@@ -45,6 +45,7 @@ _CONFIG_NAME = ".ptest.toml"
 _CONFIG_MAX_BYTES = 256 * 1024
 _FILE_MAX_BYTES = 256 * 1024
 _GUIDE_REL = "docs/ptest-agent.md"
+_POLICY_REL = "docs/ptest-test-policy.md"
 _BLOCK_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 _REPORT_NAME = "recommendations.md"
 _CHECKOUTS_NAME = "checkouts"
@@ -335,6 +336,23 @@ def _decide_guide(raw: bytes) -> PlanEntry | None:
     return PlanEntry(KEPT, _GUIDE_REL, "edited", "keep")
 
 
+def _is_managed_policy(raw: bytes) -> bool:
+    try:
+        policy = agent_rules._test_policy()
+    except C.Problem:
+        return False
+    if raw == policy:
+        return True
+    return hashlib.sha256(raw).hexdigest() in agent_rules._PREVIOUS_TEST_POLICY_SHA256S
+
+
+def _decide_policy(raw: bytes) -> PlanEntry | None:
+    if _is_managed_policy(raw):
+        return PlanEntry(REMOVE, _POLICY_REL, "managed test policy", "unlink",
+                         rel=_POLICY_REL, expect=raw)
+    return PlanEntry(KEPT, _POLICY_REL, "edited", "keep")
+
+
 def _decide_block(name: str):
     def decide(raw: bytes) -> PlanEntry | None:
         try:
@@ -342,12 +360,12 @@ def _decide_block(name: str):
         except UnicodeDecodeError:
             return PlanEntry(SKIPPED, name, "not UTF-8 text", "skip")
         try:
-            managed = agent_rules._managed_state(text, name)
+            variant = agent_rules.block_variant(text, name)
         except C.Problem:
             return PlanEntry(SKIPPED, name, "unbalanced markers", "skip")
-        if not managed:
+        if variant is None:
             return None
-        block = agent_rules._block(name)
+        block = agent_rules._block(name, test_policy=variant == "policy")
         if text == block:
             return PlanEntry(
                 REMOVE, name, "init-created file holding only the managed block",
@@ -382,11 +400,16 @@ def _guidance_entries(root: Path) -> list[PlanEntry]:
     docs_stamp = _lstat(docs)
     if docs_stamp is not None and stat.S_ISLNK(docs_stamp.st_mode):
         entries.append(PlanEntry(SKIPPED, _GUIDE_REL, "symlink", "skip"))
+        entries.append(PlanEntry(SKIPPED, _POLICY_REL, "symlink", "skip"))
     elif docs_stamp is not None and stat.S_ISDIR(docs_stamp.st_mode):
         entry = _classify(root, _GUIDE_REL, limit=_FILE_MAX_BYTES,
                           decide=_decide_guide)
         if entry is not None:
             entries.append(entry)
+        policy_entry = _classify(root, _POLICY_REL, limit=_FILE_MAX_BYTES,
+                                 decide=_decide_policy)
+        if policy_entry is not None:
+            entries.append(policy_entry)
     for name in _BLOCK_FILES:
         entry = _classify(root, name, limit=_FILE_MAX_BYTES,
                           decide=_decide_block(name))
@@ -662,7 +685,7 @@ def apply_repo(plan: RepoPlan, domain: C.DomainPaths) -> Applied:
                 removed.append(entry.target)
                 if entry.rel.endswith("/SKILL.md"):
                     _prune_skill_dirs(root, entry.rel)
-                if entry.rel == _GUIDE_REL:
+                if entry.rel in (_GUIDE_REL, _POLICY_REL):
                     try:
                         os.rmdir(root / "docs")
                     except OSError:
