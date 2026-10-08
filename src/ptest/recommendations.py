@@ -762,13 +762,20 @@ def _sentinel_section(children: list) -> str:
 def render_recommendations(
         run: object, *,
         verification_scopes: tuple[str | None, ...] | None = None,
-        suite_identities: tuple[tuple[str, str, str], ...] | None = None
+        suite_identities: tuple[tuple[str, str, str], ...] | None = None,
+        test_policy: object | None = None
         ) -> bytes:
     """Render the report with only caller-validated command routes.
 
     The CLI supplies ``verification_scopes`` after checking each route
     against the real dispatcher. Without that private routing context, the
     report uses the safe root ``ptest --full`` command.
+
+    ``test_policy`` is an optional ``policy_facts.PolicyReport``: when it
+    is None the output is byte-identical to the report without it,
+    otherwise a ``## Test policy`` section is inserted after the sentinel
+    and before ``## Changed-input selection and live probe`` (ahead of
+    ``## Final gate``).
     """
     if run is None or isinstance(run, (bytes, str, int, float, bool)):
         raise TypeError(
@@ -901,6 +908,12 @@ def render_recommendations(
             for row in safety + parallel:
                 _emit(row)
     out.append(_sentinel_section(children))
+    if test_policy is not None:
+        from . import policy_render
+        section = policy_render.render_markdown(test_policy)
+        if section:
+            out.append(section.rstrip("\n"))
+            out.append("")
     out.append("## Changed-input selection and live probe")
     out.append("")
     out.append("The root dispatcher applies each affected pytest child's "

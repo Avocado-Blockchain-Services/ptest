@@ -1522,3 +1522,48 @@ def test_parallel_safety_group_holds_only_isolation_then_parallel():
         assert safety_at < out.index("## " + row_id) < parallel_at
     # no main row leaks into the group
     assert out.index("## FIX-001") < safety_at
+
+
+# ---- T2 Test policy section (optional test_policy parameter) ----
+
+def _policy_report():
+    from ptest import policy_facts
+    gate = policy_facts.CoverageGate(
+        "pyproject.toml [tool.coverage.report] fail_under", "85")
+    facts = policy_facts.ProjectPolicyFacts(
+        project=".", gates=(gate,), branch=False, branch_sources=(),
+        omit=(), omit_total=0, pragma_count=0, pragma_complete=True,
+        vitest_not_inspected=False,
+        instructions=policy_facts.InstructionScan(), notes=())
+    return policy_facts.PolicyReport(projects=(facts,))
+
+
+def test_render_without_test_policy_is_byte_identical():
+    from ptest.recommendations import render_recommendations
+    run = _run()
+    assert (render_recommendations(run)
+            == render_recommendations(run, test_policy=None))
+
+
+def test_render_with_test_policy_adds_section():
+    from ptest.recommendations import render_recommendations
+    out = render_recommendations(
+        _run(), test_policy=_policy_report()).decode("utf-8")
+    assert "## Test policy" in out
+    assert out.index("## Test policy") < out.index("## Final gate")
+
+
+def test_render_test_policy_neutralizes_hostile_facts():
+    from ptest import policy_facts
+    from ptest.recommendations import render_recommendations
+    hostile = "`x`](http://e.vil) <img src=x onerror=alert(1)> | cell"
+    gate = policy_facts.CoverageGate("s" + hostile, "85")
+    facts = policy_facts.ProjectPolicyFacts(project=".", gates=(gate,))
+    report = policy_facts.PolicyReport(projects=(facts,))
+    out = render_recommendations(_run(), test_policy=report).decode("utf-8")
+    assert re.search(r"(?<!\\)\]\(http://", out) is None
+    assert "<img" not in out
+    # Attribute payloads survive only inside inert code spans, never as markup.
+    outside_spans = re.sub(r"`[^`]*`", "", out)
+    assert "onerror" not in outside_spans
+    assert "http://e.vil" not in outside_spans
