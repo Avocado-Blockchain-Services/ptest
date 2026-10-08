@@ -157,16 +157,25 @@ def test_group_cpu_times_none_past_limit():
 
 
 def test_group_cpu_times_limit_counts_members_not_host_processes():
-    """A busy host (many unrelated processes) must not disable sampling."""
+    """A busy host (many unrelated processes) must not disable sampling.
+
+    The probe leads its own process group. pytest's group also holds the
+    other xdist workers, whose test subprocesses come and go between two
+    scans, so a limit taken from one scan could be exceeded by the next.
+    The budget is generous: the scan time is not what this test pins.
+    """
     proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"])
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True)
     try:
         members = platform.group_cpu_times(
-            os.getpgrp(), exclude_pid=os.getpid(), limit=8192)
+            proc.pid, exclude_pid=os.getpid(), limit=8192, budget_s=10.0)
         assert members is not None
+        assert len(members) == 1
+        assert len(psutil.pids()) > len(members)
         assert platform.group_cpu_times(
-            os.getpgrp(), exclude_pid=os.getpid(),
-            limit=len(members)) is not None
+            proc.pid, exclude_pid=os.getpid(),
+            limit=len(members), budget_s=10.0) is not None
     finally:
         proc.kill()
         proc.wait()
