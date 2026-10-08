@@ -30,5 +30,6 @@ environment = []
 full_triggers = []
 always = []
 no_tests = []
-non_input_outputs = [".venv"]
+non_input_outputs = [".venv", "graphify-out", "src/ptest_ng.egg-info", "build", "dist",
+                     "terraform/.terraform.lock.hcl", ".claude/scheduled_tasks.lock"]
 full_ratio = 0.7
