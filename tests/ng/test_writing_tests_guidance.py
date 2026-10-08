@@ -175,10 +175,11 @@ def test_readme_and_changelog_cite_no_external_benchmark():
         assert not re.search(r"(?i)swe-bench|leaderboard|benchmark(?:ed)? shows", text)
 
 
-def test_changelog_has_unreleased_section_directly_under_title():
+def test_changelog_newest_section_directly_under_title_documents_the_feature():
     lines = (ROOT / "docs" / "changelog.md").read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# Changelog"
-    assert lines[1] == "" and lines[2] == "## Unreleased"
+    assert lines[1] == ""
+    assert re.fullmatch(r"## (Unreleased|\d+\.\d+\.\d+)", lines[2]), lines[2]
     body = " ".join("\n".join(lines[3:]).split("\n## ", 1)[0].split())
     for needle in ("ptest guide tests", "--test-policy", "Test policy",
                    "coverage gate"):
