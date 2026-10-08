@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import agent_rules
+from .agent_rules import TEST_POLICY_PATH, InstructionScan, coverage_instruction_lines
 from . import contracts as C
 from . import files
 
@@ -27,27 +27,6 @@ __all__ = [
     "collect",
     "TEST_POLICY_PATH",
 ]
-
-TEST_POLICY_PATH = getattr(
-    agent_rules, "TEST_POLICY_PATH", "docs/ptest-test-policy.md")
-
-# Barrier seam: agent_rules.coverage_instruction_lines/InstructionScan land with
-# the barrier commit. Until then _SCANNER is None and collect degrades to a
-# plain "not inspected" note instead of raising. Nothing else changes meaning
-# post-merge; the orchestrator re-runs this file after the merge.
-InstructionScan: Any = getattr(agent_rules, "InstructionScan", None)
-_SCANNER = getattr(agent_rules, "coverage_instruction_lines", None)
-
-
-@dataclass(frozen=True, slots=True)
-class _FallbackScan:
-    lines: tuple = ()
-    skipped: tuple = ()
-    truncated: bool = False
-
-
-if InstructionScan is None:  # pragma: no cover - barrier seam, removed on merge
-    InstructionScan = _FallbackScan
 
 _FILE_BOUND = 256 * 1024
 _MAX_NOTES = 10
@@ -94,14 +73,14 @@ class ProjectPolicyFacts:
     pragma_count: int = 0
     pragma_complete: bool = True  # False when a scan bound stopped the count
     vitest_not_inspected: bool = False
-    instructions: Any = field(default_factory=_FallbackScan)
+    instructions: InstructionScan = field(default_factory=InstructionScan)
     notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class PolicyReport:
     projects: tuple[ProjectPolicyFacts, ...] = ()
-    root_instructions: Any = None  # monorepo root only; None for standalone
+    root_instructions: InstructionScan | None = None  # monorepo root only; None for standalone
     policy_installed: bool = False
 
 
@@ -194,6 +173,24 @@ def _toml_table(doc: Any, *keys: str) -> dict | None:
     return node if isinstance(node, dict) else None
 
 
+def _ini_value(parser: configparser.ConfigParser, name: str, section: str,
+               option: str, notes: list[str]) -> str | None:
+    """One raw INI value or None when unreadable (never raises).
+
+    pytest and coverage.py do not apply ``%`` interpolation, so the
+    parser is built with ``interpolation=None``; this is a second net
+    for any other read failure. A failure adds one per-file note and
+    keeps every fact already gathered.
+    """
+    try:
+        value = parser.get(section, option, fallback=None)
+    except configparser.Error:
+        _note(notes, f"{name} could not be parsed; its coverage "
+                     "settings were not inspected")
+        return None
+    return value
+
+
 def _gather_coverage_py(project_dir: Path, notes: list[str],
                         gates: list[CoverageGate],
                         branch_sources: list[str],
@@ -244,7 +241,7 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
             continue
         if text is None:
             continue
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
         try:
             parser.read_string(text)
         except configparser.Error:
@@ -253,19 +250,20 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
             continue
         if parser.has_section(report_section):
             value = _parse_fail_under(
-                parser.get(report_section, "fail_under", fallback=None))
+                _ini_value(parser, name, report_section, "fail_under",
+                           notes))
             if value is not None:
                 gates.append(CoverageGate(
                     f"{name} [{report_section}] fail_under", value))
         if parser.has_section(run_section):
             if _parse_branch(
-                    parser.get(run_section, "branch",
-                               fallback=None)) is True:
+                    _ini_value(parser, name, run_section, "branch",
+                               notes)) is True:
                 branch_sources.append(f"{name} [{run_section}] branch")
             for section in (run_section, report_section):
                 if parser.has_section(section):
                     omit.extend(_split_omit(
-                        parser.get(section, "omit", fallback=None)))
+                        _ini_value(parser, name, section, "omit", notes)))
     # pytest addopts from INI-style configs.
     addopts_specs = (
         ("pytest.ini", "pytest"),
@@ -279,13 +277,14 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
             continue  # already noted when read as a coverage source
         if text is None:
             continue
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
         try:
             parser.read_string(text)
         except configparser.Error:
             continue  # already noted when read as a coverage source
         if parser.has_section(section):
-            _gather_addopts(parser.get(section, "addopts", fallback=None),
+            _gather_addopts(_ini_value(parser, name, section, "addopts",
+                                       notes),
                             name, gates, branch_sources, notes)
 
 
@@ -349,15 +348,12 @@ def _gather_runner_args(runner: Any, gates: list[CoverageGate],
             f"{label} --cov-branch", gates, branch_sources, notes)
 
 
-def _scan_instructions(project_dir: Path, notes: list[str]) -> Any:
-    if _SCANNER is None:
-        _note(notes, "instruction files were not inspected")
-        return _FallbackScan()
+def _scan_instructions(project_dir: Path, notes: list[str]) -> InstructionScan:
     try:
-        return _SCANNER(Path(project_dir))
+        return coverage_instruction_lines(Path(project_dir))
     except Exception:
         _note(notes, "instruction files were not inspected")
-        return _FallbackScan()
+        return InstructionScan()
 
 
 def _vitest_present(project_dir: Path, runner: Any) -> bool:
@@ -377,11 +373,15 @@ def _vitest_present(project_dir: Path, runner: Any) -> bool:
 def _count_pragma(project_dir: Path, test_roots: tuple[str, ...],
                   notes: list[str]) -> tuple[int, bool]:
     """Count `# pragma: no cover` lines under project_dir (D12 bounds)."""
-    roots = set()
+    roots: list[tuple[str, ...]] = []
     for root in test_roots:
         text = str(root).strip().strip("/")
         if text and text != ".":
-            roots.add(text.split("/")[0])
+            roots.append(tuple(text.split("/")))
+
+    def _under_test_root(rel: Path) -> bool:
+        parts = rel.parts
+        return any(parts[:len(root)] == root for root in roots)
     count = 0
     entries = 0
     py_files = 0
@@ -422,7 +422,7 @@ def _count_pragma(project_dir: Path, test_roots: tuple[str, ...],
                         rel = Path(entry.path).relative_to(project_dir)
                     except ValueError:
                         continue
-                    if rel.parts and rel.parts[0] in roots:
+                    if _under_test_root(rel):
                         continue
                     stack.append(Path(entry.path))
                     continue
@@ -432,7 +432,7 @@ def _count_pragma(project_dir: Path, test_roots: tuple[str, ...],
                     rel = Path(entry.path).relative_to(project_dir)
                 except ValueError:
                     continue
-                if rel.parts and rel.parts[0] in roots:
+                if _under_test_root(rel):
                     continue
                 py_files += 1
                 if py_files > _PRAGMA_MAX_PY_FILES:
@@ -474,8 +474,8 @@ def _count_pragma(project_dir: Path, test_roots: tuple[str, ...],
     return count, True
 
 
-def _project_facts(name: str, project_dir: Path, runner: Any,
-                   scan_instructions: bool) -> ProjectPolicyFacts:
+def _project_facts(name: str, project_dir: Path,
+                   runner: Any) -> ProjectPolicyFacts:
     notes: list[str] = []
     gates: list[CoverageGate] = []
     branch_sources: list[str] = []
@@ -509,8 +509,7 @@ def _project_facts(name: str, project_dir: Path, runner: Any,
         pragma_count, pragma_complete = _count_pragma(
             project_dir, test_roots, notes)
         vitest = _vitest_present(project_dir, runner)
-        instructions = (_scan_instructions(project_dir, notes)
-                        if scan_instructions else _FallbackScan())
+        instructions = _scan_instructions(project_dir, notes)
         return ProjectPolicyFacts(
             project=name, gates=tuple(gates),
             branch=bool(branch_sources),
@@ -523,7 +522,7 @@ def _project_facts(name: str, project_dir: Path, runner: Any,
         _note(notes, f"project {name} could not be inspected ({exc})")
         return ProjectPolicyFacts(
             project=name,
-            instructions=(_FallbackScan()),
+            instructions=(InstructionScan()),
             notes=tuple(notes))
 
 
@@ -561,17 +560,14 @@ def collect(resolution: C.ConfigResolution) -> PolicyReport:
                 except Exception:
                     runner = None
                 projects.append(_project_facts(
-                    str(declaration), root / declaration, runner, True))
-            try:
-                root_scan = _scan_instructions(root, [])
-            except Exception:
-                root_scan = _FallbackScan()
+                    str(declaration), root / declaration, runner))
+            root_scan = _scan_instructions(root, [])
             return PolicyReport(
                 projects=tuple(projects), root_instructions=root_scan,
                 policy_installed=_policy_installed(root))
         runner = (resolution.config.runner
                   if resolution.config is not None else None)
-        project = _project_facts(".", root, runner, True)
+        project = _project_facts(".", root, runner)
         return PolicyReport(
             projects=(project,), root_instructions=None,
             policy_installed=_policy_installed(root))

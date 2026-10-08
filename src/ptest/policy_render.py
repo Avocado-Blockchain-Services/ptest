@@ -70,7 +70,7 @@ def _md(value: object) -> str:
 
 
 def _instruction_lines(scan) -> list:
-    return list(getattr(scan, "lines", ()) or ())
+    return list(scan.lines)
 
 
 def _has_risk(report) -> bool:
@@ -135,9 +135,9 @@ def _project_lines(project, *, markdown: bool) -> list[str]:
         for item in found:
             lines.append(f"  {quote(item.path)}:{item.line}: "
                          f"{quote(item.text)}")
-    for name, reason in list(getattr(project.instructions, "skipped", ())):
+    for name, reason in list(project.instructions.skipped):
         lines.append(f"  {quote(name)}: not inspected ({quote(reason)})")
-    if getattr(project.instructions, "truncated", False):
+    if project.instructions.truncated:
         lines.append("  [more matching lines exist]")
     for note in project.notes:
         lines.append(f"note: {quote(note)}")

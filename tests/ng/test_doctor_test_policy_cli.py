@@ -3,11 +3,10 @@
 Strict TDD: written before ``src/ptest/policy_facts.py`` /
 ``src/ptest/policy_render.py``; failed at collection until they existed.
 
-Seam: the doctor grid wiring (``cli._test_policy_outputs``) lands with the
-barrier/T3. These tests pin everything T2 owns: the facts-to-text pipeline
-on the same resolution doctor uses, human/JSON output compatibility, and
-that doctor writes nothing. The orchestrator re-runs this file post-merge,
-when the terminal block also appears after the grid.
+These tests pin everything T2 owns end to end through ``main``: the
+facts-to-text pipeline on the same resolution doctor uses, the Test policy
+block after the grid (via the barrier ``cli._test_policy_outputs`` call
+sites), human/JSON output compatibility, and that doctor writes nothing.
 """
 from __future__ import annotations
 
@@ -75,20 +74,14 @@ def test_doctor_offline_human_output_mentions_grid(tmp_path, monkeypatch,
     assert "checks" in out
 
 
-def test_barrier_wiring_reports_through_doctor_when_present(
+def test_doctor_offline_prints_test_policy_block_after_grid(
         tmp_path, monkeypatch, capsys):
     """Barrier call sites print the Test policy block after the grid."""
-    import ptest.cli as cli_module
     _repo(tmp_path, files={
         "pyproject.toml": "[tool.coverage.report]\nfail_under = 85\n"})
-    outputs = getattr(cli_module, "_test_policy_outputs", None)
     out = _human_output(monkeypatch, capsys, tmp_path)
-    if outputs is None:
-        # Barrier/T3 not merged yet: the block is produced by the T2
-        # pipeline directly (proven above) and doctor output is unchanged.
-        assert "Test policy" not in out
-    else:
-        assert "Test policy" in out
+    assert "Test policy" in out
+    assert out.index("Test policy") > out.index("· offline ·")
 
 
 # ---- JSON stays byte-compatible ----
@@ -100,6 +93,36 @@ def test_doctor_json_has_no_test_policy_keys(tmp_path, monkeypatch, capsys):
     payload = json.loads(_json_output(monkeypatch, capsys, tmp_path))
     assert "Test policy" not in json.dumps(payload)
     assert "test_policy" not in json.dumps(payload)
+
+
+def test_doctor_json_identical_with_facts_toggled(tmp_path, monkeypatch,
+                                                      capsys):
+    """Design: JSON stdout byte-identical with the facts toggled.
+
+    Same fixture; the toggle flips the facts (real ``collect`` versus an
+    empty ``PolicyReport``), not the files. The human output must change
+    across the toggle (proving the facts were really on in one arm) while
+    ``--json`` stdout stays byte-identical.
+    """
+    from ptest import policy_facts
+    _repo(tmp_path, files={
+        "pyproject.toml": "[tool.coverage.report]\nfail_under = 85\n",
+        "AGENTS.md": "Keep coverage above 90%.\n"})
+    monkeypatch.chdir(tmp_path)
+    assert main(("doctor", "--offline")) == 0
+    human_with_facts = capsys.readouterr().out
+    assert "Test policy" in human_with_facts
+    assert main(("doctor", "--offline", "--json")) == 0
+    json_with_facts = capsys.readouterr().out
+    monkeypatch.setattr(policy_facts, "collect",
+                        lambda resolution: policy_facts.PolicyReport())
+    assert main(("doctor", "--offline")) == 0
+    human_without_facts = capsys.readouterr().out
+    assert "Test policy" not in human_without_facts
+    assert main(("doctor", "--offline", "--json")) == 0
+    json_without_facts = capsys.readouterr().out
+    assert json_with_facts == json_without_facts
+    assert "Test policy" not in json_with_facts
 
 
 def test_doctor_json_deterministic_on_fixed_fixture(tmp_path, monkeypatch,
@@ -125,6 +148,8 @@ def test_doctor_offline_writes_nothing(tmp_path, monkeypatch, capsys):
         "pyproject.toml": "[tool.coverage.report]\nfail_under = 85\n",
         "AGENTS.md": "Keep coverage above 90%.\n"})
     before = _snapshot(tmp_path)
-    _human_output(monkeypatch, capsys, tmp_path)
+    out = _human_output(monkeypatch, capsys, tmp_path)
+    # T2 code ran inside the measured window: the block is printed.
+    assert "Test policy" in out
     assert _snapshot(tmp_path) == before
     assert not (tmp_path / "recommendations.md").exists()

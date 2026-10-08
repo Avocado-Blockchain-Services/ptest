@@ -237,6 +237,16 @@ def test_pragma_count_and_test_root_exclusion(tmp_path):
     assert project.pragma_complete is True
 
 
+def test_pragma_nested_test_root_excludes_only_its_subtree(tmp_path):
+    _repo(tmp_path, test_roots=("app/tests",))
+    _src(tmp_path, "app/core.py", "x = 1  # pragma: no cover\n")
+    _src(tmp_path, "app/tests/test_a.py", "z = 3  # pragma: no cover\n")
+    _src(tmp_path, "tests2/b.py", "w = 4  # pragma: no cover\n")
+    project = _project(_collect(tmp_path))
+    assert project.pragma_count == 2
+    assert project.pragma_complete is True
+
+
 def test_pragma_skips_vendored_dirs_and_symlinks(tmp_path):
     _repo(tmp_path)
     _src(tmp_path, "src/a.py", "x = 1  # pragma: no cover\n")
@@ -299,7 +309,7 @@ def test_no_vitest_config_no_line(tmp_path):
     assert project.vitest_not_inspected is False
 
 
-# ---- instruction lines: wiring works with or without the barrier ----
+# ---- instruction lines: barrier scanner wiring ----
 
 def _fake_scan(lines):
     def _scan(directory):
@@ -313,18 +323,24 @@ def _fake_scan(lines):
 def test_instruction_scan_wiring(monkeypatch, tmp_path):
     from ptest import policy_facts
     _repo(tmp_path)
-    monkeypatch.setattr(policy_facts, "_SCANNER", _fake_scan(
-        [("AGENTS.md", 12, "Keep coverage above 90%.")]))
+    monkeypatch.setattr(policy_facts, "coverage_instruction_lines",
+                        _fake_scan(
+                            [("AGENTS.md", 12,
+                              "Keep coverage above 90%.")]))
     project = _project(_collect(tmp_path))
     assert [(item.path, item.line, item.text) for item in
             project.instructions.lines] == [
         ("AGENTS.md", 12, "Keep coverage above 90%.")]
 
 
-def test_missing_scanner_degrades_to_note(monkeypatch, tmp_path):
+def test_raising_scanner_degrades_to_note(monkeypatch, tmp_path):
     from ptest import policy_facts
     _repo(tmp_path)
-    monkeypatch.setattr(policy_facts, "_SCANNER", None)
+
+    def _boom(directory):
+        raise OSError("denied")
+
+    monkeypatch.setattr(policy_facts, "coverage_instruction_lines", _boom)
     project = _project(_collect(tmp_path))
     assert project.instructions.lines == ()
     assert any("not inspected" in note for note in project.notes)
@@ -365,6 +381,28 @@ def test_symlink_and_directory_configs_do_not_raise(tmp_path):
     (tmp_path / "tox.ini").mkdir()
     project = _project(_collect(tmp_path))
     assert project.gates == ()
+
+
+def test_percent_in_ini_value_keeps_other_facts(tmp_path):
+    from ptest import policy_render
+    _repo(tmp_path, files={
+        "pytest.ini": "[pytest]\naddopts = --cov-fail-under=90 "
+                      "--log-cli-format=\"%(asctime)s %(message)s\"\n",
+        ".coveragerc": "[report]\nfail_under = 80\n"})
+    _src(tmp_path, "src/a.py", "x = 1  # pragma: no cover\n")
+    report = _collect(tmp_path)
+    project = _project(report)
+    assert _gate_map(project) == {
+        "pytest.ini addopts --cov-fail-under": "90",
+        ".coveragerc [report] fail_under": "80",
+    }
+    assert project.pragma_count == 1
+    # Doctor-facing symptom: the block must show the gates, never
+    # "coverage gate: none found".
+    text = policy_render.render_terminal(report)
+    assert "coverage gate: 90" in text
+    assert "coverage gate: 80" in text
+    assert "none found" not in text
 
 
 def test_bad_shlex_addopts_becomes_note(tmp_path):
