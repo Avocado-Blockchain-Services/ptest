@@ -83,7 +83,7 @@ def test_repository_guide_default_loop_is_changed():
 
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    assert len(guide.splitlines()) <= 100
+    assert len(guide.splitlines()) <= 109
     assert "| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches |" in guide
     assert "| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |" in guide
     assert "| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |" in guide
@@ -92,7 +92,10 @@ def test_repository_guide_default_loop_is_changed():
     lowered = guide.lower()
     assert "no baseline or coverage needed" not in lowered
     assert "baseline" not in lowered
-    assert "coverage" not in lowered
+    head, _, rest = lowered.partition("## writing tests")
+    _, _, tail = rest.partition("## reporting")
+    assert rest and tail
+    assert "coverage" not in head + tail
     assert "--changed" not in guide
     assert "--changed-setup" not in guide
     assert "automatic" not in lowered

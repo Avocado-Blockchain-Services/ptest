@@ -459,6 +459,11 @@ def load_recipe(name: str) -> str:
     return text
 
 
-__all__ = ["CATALOG", "ChecklistEntry", "load_recipe", "TEST_DIR",
-           "TEST_FILE", "SRC_DIR", "PARALLEL_SAFETY_IDS",
+def recipe_names() -> tuple[str, ...]:
+    """Packaged recipe names in a stable order: the `ptest guide <topic>` topics."""
+    return tuple(_RECIPE_FILES)
+
+
+__all__ = ["CATALOG", "ChecklistEntry", "load_recipe", "recipe_names",
+           "TEST_DIR", "TEST_FILE", "SRC_DIR", "PARALLEL_SAFETY_IDS",
            "PARALLEL_ITEM_ID"]

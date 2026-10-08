@@ -82,6 +82,15 @@ never globally flush caches or drop a database by name alone. Avoid shared
 fixed paths, fixed ports, detached children, live network targets, and
 wall-clock sleeps for synchronization.
 
+## Writing tests
+
+Every test names its oracle: a spec clause, a bug report, deliberately pinned behavior, or an invariant.
+Do not write a test whose expected value was read off the implementation.
+A bug fix starts with a failing test that reproduces the bug.
+Never add tests only to raise coverage; keep the project's existing coverage gate as it is.
+Where input crosses a trust boundary, use one table-driven hostile-input test with only the rows that apply
+(empty/oversized, traversal/injection, wrong owner, unauthenticated). Full checklist: `ptest guide tests`.
+
 ## Reporting
 
 `ptest doctor` asks consent, then makes one initial call per model-assessed item and one

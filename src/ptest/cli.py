@@ -2189,11 +2189,16 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         report_input = C.PublicDocument(
             kind="agent-assessment", ptest_version=C.PTEST_VERSION,
             domain=None, data=draft_data, error=None)
+        policy_report, policy_text = _test_policy_outputs(
+            resolution, color=sys.stdout.isatty(),
+            encoding=sys.stdout.encoding)
         report_payload = recommendations.render_recommendations(
             report_input,
             verification_scopes=_recommendation_verification_scopes(
                 workspace, resolution),
-            suite_identities=_recommendation_suite_identities(packets))
+            suite_identities=_recommendation_suite_identities(packets),
+            **({} if policy_report is None
+               else {"test_policy": policy_report}))
         source_proof = [{
             "path": excerpt.path,
             "start_line": excerpt.start_line,
@@ -2228,6 +2233,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 duration_s=time.monotonic() - started,
                 calls=calls + followup_calls,
                 encoding=sys.stdout.encoding))
+            if policy_text:
+                sys.stdout.write(policy_text)
             mention = _fix_mention(resolution)
             if mention is not None:
                 sys.stdout.write(mention + "\n")
@@ -2273,6 +2280,26 @@ def _offline_progress(parsed: ParsedArgs,
     return emit
 
 
+def _test_policy_outputs(resolution: C.ConfigResolution, *,
+                         color: bool = False,
+                         encoding: str | None = None
+                         ) -> tuple[object | None, str]:
+    """Static Test policy facts for doctor: ``(report, terminal text)``.
+
+    Read-only and offline: it sends nothing, writes nothing, and never
+    changes a checklist row, readiness or JSON field. Best effort only:
+    any problem yields ``(None, "")`` so doctor output never breaks.
+    """
+    try:
+        from . import policy_facts, policy_render
+        report = policy_facts.collect(resolution)
+        text = policy_render.render_terminal(
+            report, color=color, encoding=encoding)
+    except Exception:
+        return None, ""
+    return report, text
+
+
 def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
                           domain: C.DomainPaths) -> None:
     started = time.monotonic()
@@ -2294,6 +2321,11 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
             color=sys.stdout.isatty(), repo=resolution.root.name,
             provider="offline", duration_s=time.monotonic() - started,
             calls=0, encoding=sys.stdout.encoding))
+        _policy_report, policy_text = _test_policy_outputs(
+            resolution, color=sys.stdout.isatty(),
+            encoding=sys.stdout.encoding)
+        if policy_text:
+            sys.stdout.write(policy_text)
         mention = _fix_mention(resolution)
         if mention is not None:
             sys.stdout.write(mention + "\n")

@@ -5,6 +5,7 @@ import importlib.resources
 import errno
 import hashlib
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from .contracts import Problem
 from . import files
 
 _GUIDE_PATH = "docs/ptest-agent.md"
+TEST_POLICY_PATH = "docs/ptest-test-policy.md"
 _MARKER_START = "<!-- ptest-agent-rules:start -->"
 _MARKER_END = "<!-- ptest-agent-rules:end -->"
 _AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
@@ -414,6 +416,126 @@ def _managed_state(text: str, name: str) -> bool:
     if text[begin:end] != expected:
         raise _problem("invalid-config", f"agent rules block in {name} is malformed")
     return True
+
+
+# -- coverage-percent instruction lines (read-only) ---------------------------
+#
+# Shared by doctor's Test policy section and the opt-in test policy, which
+# list these lines for the user to edit. ptest never edits user-written lines.
+
+_GATE_SETTING = re.compile(r"(?:--cov-fail-under|fail_under)\s*[=:]?\s*\d",
+                           re.IGNORECASE)
+_COVERAGE_WORD = re.compile(r"coverage", re.IGNORECASE)
+_PERCENT = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d+)?\s?(?:%|percent\b)",
+                      re.IGNORECASE)
+_INSTRUCTION_LINE_CHARS = 160
+_INSTRUCTION_LINE_LIMIT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionLine:
+    """One user-written instruction line that states a coverage percentage.
+
+    ``text`` is the stripped line cut to 160 characters. It is NOT
+    sanitized: every renderer must neutralize control and markup
+    characters before display.
+    """
+
+    path: str
+    line: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionScan:
+    lines: tuple[InstructionLine, ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+    truncated: bool = False
+
+
+def _states_coverage_percent(line: str) -> bool:
+    if _GATE_SETTING.search(line):
+        return True
+    return bool(_COVERAGE_WORD.search(line) and _PERCENT.search(line))
+
+
+def _managed_line_numbers(lines: list[str]) -> frozenset[int]:
+    """1-based line numbers inside paired ptest managed-block markers."""
+    managed: set[int] = set()
+    start: int | None = None
+    for number, line in enumerate(lines, start=1):
+        if _MARKER_START in line:
+            start = number
+        elif _MARKER_END in line and start is not None:
+            managed.update(range(start, number + 1))
+            start = None
+    return frozenset(managed)
+
+
+def coverage_instruction_lines(directory: Path) -> InstructionScan:
+    """Lines in AGENTS.md/CLAUDE.md/GEMINI.md that state a coverage percentage.
+
+    Read-only, bounded, and never raises for file state or content. Lines
+    inside a paired ptest managed block are ignored. A symlink (except the
+    AGENTS.md -> CLAUDE.md alias, whose target is scanned as CLAUDE.md), a
+    non-regular, oversized, unreadable or non-UTF-8 file is listed in
+    ``skipped`` with a plain reason and not read further. At most 20 lines
+    are returned; ``truncated`` marks that more exist.
+    """
+    directory = Path(directory)
+    found: list[InstructionLine] = []
+    skipped: list[tuple[str, str]] = []
+    truncated = False
+    for name in _AGENT_FILES:
+        if truncated:
+            break
+        try:
+            stamp = os.lstat(directory / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            skipped.append((name, "unreadable"))
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            try:
+                alias = os.readlink(directory / name)
+            except OSError:
+                alias = None
+            if not (name == "AGENTS.md" and alias == "CLAUDE.md"):
+                skipped.append((name, "symlink"))
+            continue
+        if not stat.S_ISREG(stamp.st_mode):
+            skipped.append((name, "not a regular file"))
+            continue
+        if stamp.st_size > _MAX_FILE_BYTES:
+            skipped.append((name, "oversized"))
+            continue
+        try:
+            raw = bytes(files.read_regular(directory, name, _MAX_FILE_BYTES + 1))
+        except (C.Problem, OSError, ValueError):
+            skipped.append((name, "unreadable"))
+            continue
+        if len(raw) > _MAX_FILE_BYTES:
+            skipped.append((name, "oversized"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append((name, "not UTF-8 text"))
+            continue
+        lines = [line.rstrip("\r") for line in text.split("\n")]
+        managed = _managed_line_numbers(lines)
+        for number, line in enumerate(lines, start=1):
+            if number in managed or not _states_coverage_percent(line):
+                continue
+            if len(found) >= _INSTRUCTION_LINE_LIMIT:
+                truncated = True
+                break
+            found.append(InstructionLine(
+                path=name, line=number,
+                text=line.strip()[:_INSTRUCTION_LINE_CHARS]))
+    return InstructionScan(lines=tuple(found), skipped=tuple(skipped),
+                           truncated=truncated)
 
 
 def _close_quietly(fd: int | None) -> None:
@@ -816,6 +938,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "874642905132b63140bff23f991399f5f008404463696a4680eb64bacf16af4e",
     # 4fb5935 (0.4.10): guide before dependency-recorded selection rows.
     "fa30a22ce8eb88a1687437fe8f8578c16e81b46ce54af2a955db6b565b8fc062",
+    # bbf1260 (0.5.2): guide before the Writing tests section.
+    "5ac1f26cabd7413c4e68456aae4aa6345c4678d6dca769855463d3e2d196d2d2",
 })
 
 
