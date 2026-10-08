@@ -514,26 +514,98 @@ def test_agents_none_never_prompts_for_policy(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / POLICY_REL).exists()
 
 
-def test_fully_interactive_init_never_prompts_for_policy(
-        tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    _tty(monkeypatch)
-    answers = iter(("all",))
-    inputs = []
+def _strict_inputs(monkeypatch, *replies):
+    """Record every prompt reply; a question beyond the script is an error."""
+    answers = iter(replies)
+    seen = []
 
     def strict_input(*args, **kwargs):
         answer = next(answers)
-        inputs.append(answer)
+        seen.append(answer)
         return answer
 
     monkeypatch.setattr("builtins.input", strict_input)
+    return seen
 
-    assert main(("init", "--runner", "pytest",
-                 "--no-smoke", "--no-doctor")) == 0
+
+_INTERACTIVE_INIT = ("init", "--runner", "pytest", "--no-smoke", "--no-doctor")
+
+
+def test_fully_interactive_init_asks_policy_after_agents_prompt(
+        tmp_path, monkeypatch, capsys):
+    # D8: the question follows the agents prompt on an interactive TTY.
+    monkeypatch.chdir(tmp_path)
+    _tty(monkeypatch)
+    seen = _strict_inputs(monkeypatch, "all", "y")
+
+    assert main(_INTERACTIVE_INIT) == 0
     captured = capsys.readouterr()
 
+    assert seen == ["all", "y"]
+    assert captured.err.index("Install repository-local ptest guidance") \
+        < captured.err.index("Also install the stricter test policy?")
+    assert (tmp_path / POLICY_REL).read_bytes() == agent_rules._test_policy()
+    agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert agent_rules.block_variant(agents, "AGENTS.md") == "policy"
+
+
+def test_fully_interactive_init_policy_defaults_to_no(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _tty(monkeypatch)
+    seen = _strict_inputs(monkeypatch, "all", "")
+
+    assert main(_INTERACTIVE_INIT) == 0
+    captured = capsys.readouterr()
+
+    assert seen == ["all", ""]
+    assert "Also install the stricter test policy?" in captured.err
+    assert not (tmp_path / POLICY_REL).exists()
+
+
+def test_fully_interactive_init_agents_none_skips_policy_question(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _tty(monkeypatch)
+    seen = _strict_inputs(monkeypatch, "none")
+
+    assert main(_INTERACTIVE_INIT) == 0
+    captured = capsys.readouterr()
+
+    assert seen == ["none"]
     assert "stricter test policy" not in captured.err
-    assert inputs == ["all"]
+    assert not (tmp_path / POLICY_REL).exists()
+
+
+@pytest.mark.parametrize("extra", [("--json",), ("--dry-run",),
+                                   ("--no-test-policy",)])
+def test_fully_interactive_init_variants_never_ask_policy(
+        tmp_path, monkeypatch, capsys, extra):
+    monkeypatch.chdir(tmp_path)
+    _tty(monkeypatch)
+    # --json skips the agents prompt too; the others answer it only.
+    seen = _strict_inputs(monkeypatch, "all")
+
+    assert main((*_INTERACTIVE_INIT, *extra)) == 0
+    captured = capsys.readouterr()
+
+    assert len(seen) <= 1
+    assert "stricter test policy" not in captured.err
+    assert not (tmp_path / POLICY_REL).exists()
+
+
+def test_fully_interactive_init_non_tty_never_asks_policy(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    seen = _strict_inputs(monkeypatch)
+
+    assert main(_INTERACTIVE_INIT) == 0
+    captured = capsys.readouterr()
+
+    assert seen == []
+    assert "stricter test policy" not in captured.err
     assert not (tmp_path / POLICY_REL).exists()
 
 

@@ -3155,11 +3155,6 @@ def _init_test_policy(parsed: ParsedArgs, *, agents: tuple[str, ...],
         return False
     if not _interactive_review():
         return False
-    if not parsed.agents_explicit:
-        # A fully interactive init keeps its established question script
-        # (agents, then review): the policy offer follows an explicit
-        # --agents declaration, so existing answer sequences keep working.
-        return False
     if agent_rules.test_policy_installed(root):
         return False
     try:
