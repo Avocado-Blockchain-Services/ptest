@@ -456,10 +456,11 @@ ptest rules --test-policy               # preview only, writes nothing
 ptest rules --apply --test-policy       # install it in an initialized repository
 ```
 
-`ptest init --agents ...` on a terminal asks once, "Also install the stricter
-test policy?" (default No) and lists the exact files it would change; only
-`y` or `yes` accepts. It never asks, and never installs, in CI, with
-a pipe, with `--json`, with `--dry-run`, or with `--agents none`. The two flags
+On a terminal, `ptest init` asks once, right after the agents question (or
+when `--agents ...` is given), "Also install the stricter test policy?"
+(default No) and lists the exact files it would change; only `y` or `yes`
+accepts. It never asks, and never installs, in CI, with a pipe, with
+`--json`, with `--dry-run`, or when no agents are chosen. The two flags
 cannot be combined. `--test-policy` and `rules --apply --test-policy` print
 which files will change before writing anything, and list any line in your
 instruction files that names a coverage percentage; ptest never edits those.
