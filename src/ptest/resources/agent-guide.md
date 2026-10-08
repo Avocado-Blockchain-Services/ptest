@@ -27,10 +27,11 @@ mutation, detached processes, live network targets, and blocking wall-clock slee
 See `ptest guide` recipes: factories, databases, cache, files-ports, processes,
 time-network.
 
-Preserve assertions, test inventory, coverage, and test semantics. During repair,
-run the scoped `ptest` command for the affected behavior. After the repairs are
-integrated, run one `ptest --full` final gate. A text-pattern change alone is not
-proof that isolation works.
+Preserve assertions, test inventory, test semantics and the existing coverage
+gate; never add tests only to raise coverage. During repair,
+run the scoped `ptest` command for the affected behavior. After the repairs
+are integrated, run one `ptest --full` final gate. A text-pattern change alone
+is not proof that isolation works.
 
 When validated test timings are available, under 0.5 seconds is healthy;
 0.5–2 seconds merits inspection, especially for repeated ordinary tests;

@@ -38,7 +38,7 @@ sys.path.insert(0, str(_CHECKOUT / "src"))
 from ptest import agent_rules  # noqa: E402  (current checkout, same bytes init installs)
 
 DEFAULT_SCENARIOS = _CHECKOUT / "evals" / "agent-usage" / "scenarios.toml"
-SCENARIO_IDS = [f"S{i}" for i in range(1, 15)]
+SCENARIO_IDS = [f"S{i}" for i in range(1, 17)]
 
 # Runner-misuse that is wrong in every scenario (scenario-local forbids such
 # as --full or cd where not expected live in scenarios.toml).
@@ -176,7 +176,22 @@ def score_answer(scenarios: dict, sid: str, entry) -> ScenarioResult:
         return ScenarioResult(
             sid, False,
             f"action mentions none of {any_of!r}")
+    for first, then in spec.get("action_first", []):
+        problem = _action_order_problem(action_text, first, then)
+        if problem:
+            return ScenarioResult(sid, False, problem)
     return ScenarioResult(sid, True)
+
+
+def _action_order_problem(action: str, first: str, then: str) -> str:
+    """Empty when `first` appears and does not come after `then`."""
+    head = re.search(first, action, re.IGNORECASE)
+    if head is None:
+        return f"action does not mention {first!r}"
+    tail = re.search(then, action, re.IGNORECASE)
+    if tail is not None and tail.start() < head.start():
+        return f"action mentions {then!r} before {first!r}"
+    return ""
 
 
 def score_answers(scenarios: dict, answers: dict) -> list[ScenarioResult]:

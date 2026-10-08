@@ -1,0 +1,97 @@
+{
+  "_note": "Hand-written reference answers for scorer tests. This is reference data, not a model run.",
+  "S1": {
+    "commands": [
+      "ptest"
+    ],
+    "action": "Run ptest with no arguments to verify the change to billing.py by testing only the changed files."
+  },
+  "S2": {
+    "commands": [
+      "ptest api/tests/test_billing.py"
+    ],
+    "action": "Run ptest with the specific test file path to test only the billing test file."
+  },
+  "S3": {
+    "commands": [
+      "ptest --full"
+    ],
+    "action": "Run the complete integrated test suite with ptest --full to verify the entire change before handing off to the user."
+  },
+  "S4": {
+    "commands": [
+      "none"
+    ],
+    "action": "Wait for the full suite to complete; this is the first run and will record a baseline if it passes on a clean tree."
+  },
+  "S5": {
+    "commands": [
+      "none"
+    ],
+    "action": "Wait for admission; do not start another ptest run since this one is queued and will be admitted shortly."
+  },
+  "S6": {
+    "commands": [
+      "ptest"
+    ],
+    "action": "Rerun ptest to determine if the protocol mismatch was transient; if it repeats, report it as a ptest infrastructure issue."
+  },
+  "S7": {
+    "commands": [
+      "none"
+    ],
+    "action": "Debug and fix the code under test to resolve the two failing tests, then rerun ptest."
+  },
+  "S8": {
+    "commands": [
+      "ptest --full --again"
+    ],
+    "action": "Use --again to force a full rerun since no code changes were made; normally ptest --full skips already-verified inputs."
+  },
+  "S9": {
+    "commands": [
+      "none"
+    ],
+    "action": "Commit your changes and rerun ptest --full on a clean tree to record the baseline; uncommitted changes prevent baseline recording."
+  },
+  "S10": {
+    "commands": [
+      "ptest --full --timeout 900"
+    ],
+    "action": "Increase the execution timeout to 900 seconds and rerun; the test suite exceeds the default 600-second budget."
+  },
+  "S11": {
+    "commands": [
+      "ptest web"
+    ],
+    "action": "Use ptest for the web tests instead of npm test."
+  },
+  "S12": {
+    "commands": [
+      "ptest api/tests/test_billing.py"
+    ],
+    "action": "Run ptest with the full path from the monorepo root to test the specific billing test file."
+  },
+  "S13": {
+    "commands": [
+      "ptest --full api"
+    ],
+    "action": "Run the complete integrated gate for only the api project using ptest --full with the child project name."
+  },
+  "S14": {
+    "commands": [
+      "ptest api"
+    ],
+    "action": "Run the changed api tests only."
+  },
+  "S15": {
+    "commands": [
+      "ptest api/tests/test_billing.py"
+    ],
+    "action": "Write a failing test that reproduces the bug (charge(-5) must raise ValueError), watch it fail, then fix charge() and rerun it."
+  },
+  "S16": {
+    "commands": [],
+    "action": "Keep the 85 gate as a floor: find the untested behavior and test it, or delete dead code, and report the gap if neither fits; do not add assertion-free tests."
+  }
+}

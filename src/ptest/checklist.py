@@ -28,7 +28,12 @@ _RECIPE_FILES = {
     "files-ports": "recipes/files-ports.md",
     "processes": "recipes/processes.md",
     "time-network": "recipes/time-network.md",
+    "tests": "recipes/tests.md",
 }
+
+# Recipes `ptest guide` prints after the catalog although no catalog item
+# references them (they guide writing tests, not repairing a doctor finding).
+GUIDE_RECIPES: tuple[str, ...] = ("tests",)
 
 # Shared routing fragments (regexes searched against excerpt paths).
 TEST_DIR = r"(?i)(?:^|/)(?:tests?|__tests__)(?:/|$)"
