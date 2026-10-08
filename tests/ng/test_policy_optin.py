@@ -53,8 +53,57 @@ def test_policy_resource_matches_design_without_digits():
     assert agent_rules._test_policy() == text.encode("utf-8")
 
 
-def test_previous_test_policy_hash_set_starts_empty():
-    assert agent_rules._PREVIOUS_TEST_POLICY_SHA256S == frozenset()
+def test_previous_test_policy_hash_set_is_well_formed_and_excludes_current():
+    import hashlib
+
+    current = hashlib.sha256(agent_rules._test_policy()).hexdigest()
+    previous = agent_rules._PREVIOUS_TEST_POLICY_SHA256S
+    assert current not in previous
+    assert all(len(item) == 64 and set(item) <= set("0123456789abcdef")
+               for item in previous)
+
+
+def test_every_shipped_test_policy_version_hashes_into_previous_set():
+    """Every committed policy version must upgrade in place, not conflict.
+
+    Walks `git log` for the bundled resource; each historical version is
+    either byte-identical to the current policy or hashed into
+    `_PREVIOUS_TEST_POLICY_SHA256S`. Skips when git history is unavailable.
+    """
+    import hashlib
+    import subprocess
+    from pathlib import Path
+
+    rel = "src/ptest/resources/test-policy.md"
+    anchor = Path(__file__).resolve().parent
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=anchor,
+            capture_output=True, text=True, check=True).stdout.strip()
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--", rel], cwd=toplevel,
+            capture_output=True, text=True, check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("git history for the test policy resource is unavailable")
+    if not commits:
+        pytest.skip("git history for the test policy resource is unavailable")
+    current_hash = hashlib.sha256(agent_rules._test_policy()).hexdigest()
+    assert current_hash not in agent_rules._PREVIOUS_TEST_POLICY_SHA256S
+    allowed = set(agent_rules._PREVIOUS_TEST_POLICY_SHA256S) | {current_hash}
+    missing = []
+    for commit in commits:
+        try:
+            raw = subprocess.run(
+                ["git", "show", f"{commit}:{rel}"], cwd=toplevel,
+                capture_output=True, check=True).stdout
+        except subprocess.CalledProcessError:
+            pytest.skip(f"test policy history is unreadable at {commit}")
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest not in allowed:
+            missing.append(f"{commit[:7]} {digest}")
+    assert not missing, (
+        "shipped test policy versions missing from "
+        "_PREVIOUS_TEST_POLICY_SHA256S: " + ", ".join(missing))
 
 
 def test_base_block_is_byte_identical_to_today():
@@ -107,6 +156,11 @@ def test_block_variant_rejects_anything_else(tmp_path, name):
     with pytest.raises(C.Problem) as error:
         agent_rules.block_variant("# notes\n<!-- ptest-agent-rules:start -->\n", name)
     assert error.value.code == "invalid-config"
+    with pytest.raises(C.Problem) as reversed_error:
+        agent_rules.block_variant(
+            "<!-- ptest-agent-rules:end -->\n<!-- ptest-agent-rules:start -->\n",
+            name)
+    assert reversed_error.value.code == "invalid-config"
     with pytest.raises(C.Problem):
         agent_rules.block_variant(f"# notes\n\n{base}\n{base}", name)
     tampered = policy.replace("ptest-test-policy", "ptest-other-policy")
@@ -777,6 +831,56 @@ def test_rules_apply_test_policy_reports_already_installed(
     assert "will change:" not in captured.out
 
 
+_REVERSED = ("# notes\n<!-- ptest-agent-rules:end -->\n"
+             "<!-- ptest-agent-rules:start -->\n")
+
+
+@pytest.mark.parametrize("argv", [("rules",), ("rules", "--test-policy"),
+                                  ("rules", "--apply"),
+                                  ("rules", "--apply", "--test-policy")])
+def test_rules_reject_reversed_markers_without_traceback(
+        tmp_path, monkeypatch, capsys, argv):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "AGENTS.md"
+    target.write_text(_REVERSED, encoding="utf-8")
+
+    assert main(argv) != 0
+    captured = capsys.readouterr()
+
+    assert "Traceback" not in captured.err + captured.out
+    assert "malformed" in captured.err + captured.out
+    assert target.read_text(encoding="utf-8") == _REVERSED
+    assert not (tmp_path / "docs").exists()
+
+
+def test_apply_rejects_reversed_markers_with_invalid_config(tmp_path):
+    (tmp_path / "AGENTS.md").write_text(_REVERSED, encoding="utf-8")
+    with pytest.raises(C.Problem) as error:
+        agent_rules.apply(tmp_path)
+    assert error.value.code == "invalid-config"
+
+
+def test_rules_apply_test_policy_refreshes_outdated_guide_when_installed(
+        tmp_path, monkeypatch, capsys):
+    import hashlib
+
+    monkeypatch.chdir(tmp_path)
+    agent_rules.apply(tmp_path, test_policy=True)
+    old = b"# old ptest guide\n"
+    (tmp_path / "docs" / "ptest-agent.md").write_bytes(old)
+    monkeypatch.setattr(
+        agent_rules, "_PREVIOUS_GUIDE_SHA256S",
+        agent_rules._PREVIOUS_GUIDE_SHA256S
+        | {hashlib.sha256(old).hexdigest()})
+
+    assert main(("rules", "--apply", "--test-policy")) == 0
+    captured = capsys.readouterr()
+
+    assert "already installed" not in captured.out
+    assert (tmp_path / "docs" / "ptest-agent.md").read_bytes() == (
+        agent_rules._guide())
+
+
 def test_rules_apply_without_flag_converges_recorded_policy(
         tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
@@ -908,12 +1012,7 @@ def test_guide_topic_prints_exactly_the_recipe(
     assert captured.err == ""
 
 
-_HAS_TESTS_RECIPE = "tests" in _recipe_topics()
-
-
-@pytest.mark.skipif(not _HAS_TESTS_RECIPE,
-                    reason="tests recipe arrives with T1")
-def test_guide_tests_topic_waits_for_the_tests_recipe(tmp_path, monkeypatch, capsys):
+def test_guide_tests_topic_prints_the_tests_recipe(tmp_path, monkeypatch, capsys):
     from ptest import checklist
 
     monkeypatch.chdir(tmp_path)
@@ -1054,6 +1153,25 @@ def test_uninstall_removes_previous_hash_policy_file(
     capsys.readouterr()
 
     assert not (root / POLICY_REL).exists()
+
+
+@pytest.mark.parametrize("dry", [True, False])
+def test_uninstall_skips_reversed_markers(
+        case, tmp_path, monkeypatch, capsys, dry):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    agents = root / "AGENTS.md"
+    agents.write_text(_REVERSED, encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--dry-run" if dry else "--yes") == 0
+    captured = capsys.readouterr()
+
+    assert "Traceback" not in captured.err + captured.out
+    assert "unbalanced markers" in captured.out
+    assert agents.read_text(encoding="utf-8") == _REVERSED
 
 
 @pytest.mark.parametrize("kind", ["fifo", "directory"])

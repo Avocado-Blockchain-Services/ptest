@@ -425,9 +425,11 @@ def block_variant(text: str, name: str) -> str | None:
         raise _problem("invalid-config", f"agent rules block in {name} is malformed")
     if not starts:
         return None
-    begin = text.index(_MARKER_START)
-    end = text.index(_MARKER_END, begin) + len(_MARKER_END)
-    section = text[begin:end]
+    begin = text.find(_MARKER_START)
+    end = text.find(_MARKER_END, begin)
+    if begin < 0 or end < 0:
+        raise _problem("invalid-config", f"agent rules block in {name} is malformed")
+    section = text[begin:end + len(_MARKER_END)]
     if section == _block(name).rstrip("\n"):
         return "base"
     if section == _block(name, test_policy=True).rstrip("\n"):

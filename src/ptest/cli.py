@@ -2786,11 +2786,14 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 plan = agent_rules.preview(
                     root, agents=installed, test_policy=True)
                 changes = _test_policy_change_lines(plan.actions)
-                if not changes:
+                pending = [str(action) for action in plan.actions
+                           if not str(action).startswith("already present ")]
+                if not pending:
                     sys.stdout.write("test policy: already installed\n")
                     _print_policy_conflicts(root)
                     return 0
-                sys.stdout.write("will change: " + ", ".join(changes) + "\n")
+                sys.stdout.write("will change: "
+                                 + ", ".join(changes or pending) + "\n")
                 result = agent_rules.apply(
                     root, agents=installed, test_policy=True)
                 sys.stdout.write("applied: " + (", ".join(result.actions)
