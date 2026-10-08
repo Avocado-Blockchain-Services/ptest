@@ -495,3 +495,31 @@ def test_config_none_still_collects_file_facts(tmp_path):
     report = policy_facts.collect(resolution)
     assert [item.project for item in report.projects] == ["."]
     assert _gate_map(_project(report)) != {}
+
+
+def test_symlinked_pytest_ini_is_noted_not_silent(tmp_path):
+    _repo(tmp_path)
+    target = tmp_path / "real.ini"
+    target.write_text("[pytest]\naddopts = --cov-fail-under=90\n",
+                      encoding="utf-8")
+    (tmp_path / "pytest.ini").symlink_to(target)
+    project = _project(_collect(tmp_path))
+    assert project.gates == ()
+    assert any("pytest.ini" in note for note in project.notes)
+
+
+def test_unparseable_pytest_ini_is_noted_not_silent(tmp_path):
+    _repo(tmp_path, files={
+        "pytest.ini": "no section header\naddopts = --cov-fail-under=90\n"})
+    project = _project(_collect(tmp_path))
+    assert project.gates == ()
+    assert any("pytest.ini" in note for note in project.notes)
+
+
+def test_pytest_ini_takes_precedence_over_pyproject_addopts(tmp_path):
+    _repo(tmp_path, files={
+        "pytest.ini": "[pytest]\nminversion = 7\n",
+        "pyproject.toml": "[tool.pytest.ini_options]\n"
+                          "addopts = \"--cov-fail-under=66\"\n"})
+    project = _project(_collect(tmp_path))
+    assert project.gates == ()

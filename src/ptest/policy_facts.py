@@ -198,6 +198,15 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
     """coverage.py gates from pyproject/.coveragerc/setup.cfg/tox.ini (D12)."""
     import tomllib
 
+    # pytest reads exactly one config file and pytest.ini always wins, so
+    # when it exists the addopts of the other files are not in effect.
+    try:
+        pytest_ini_text = _read_text(project_dir, "pytest.ini")
+        pytest_ini_present = pytest_ini_text is not None
+    except _Unreadable as exc:
+        _not_inspected_note(exc.name, notes)
+        pytest_ini_text = None
+        pytest_ini_present = True
     # TOML source first (pyproject), then INI sources in coverage.py order.
     try:
         text = _read_text(project_dir, "pyproject.toml")
@@ -226,8 +235,9 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
             for section in (run, report):
                 omit.extend(_split_omit(section.get("omit")))
             addopts = _toml_table(doc, "tool", "pytest", "ini_options") or {}
-            _gather_addopts(addopts.get("addopts"), "pyproject.toml",
-                            gates, branch_sources, notes)
+            if not pytest_ini_present:
+                _gather_addopts(addopts.get("addopts"), "pyproject.toml",
+                                gates, branch_sources, notes)
     ini_specs = (
         (".coveragerc", "report", "run"),
         ("setup.cfg", "coverage:report", "coverage:run"),
@@ -271,17 +281,25 @@ def _gather_coverage_py(project_dir: Path, notes: list[str],
         ("tox.ini", "pytest"),
     )
     for name, section in addopts_specs:
-        try:
-            text = _read_text(project_dir, name)
-        except _Unreadable:
-            continue  # already noted when read as a coverage source
+        if pytest_ini_present and name != "pytest.ini":
+            continue
+        if name == "pytest.ini":
+            text = pytest_ini_text
+        else:
+            try:
+                text = _read_text(project_dir, name)
+            except _Unreadable:
+                continue  # noted when read as a coverage source
         if text is None:
             continue
         parser = configparser.ConfigParser(interpolation=None)
         try:
             parser.read_string(text)
         except configparser.Error:
-            continue  # already noted when read as a coverage source
+            if name == "pytest.ini":
+                _note(notes, "pytest.ini could not be parsed; its pytest "
+                             "addopts were not inspected")
+            continue  # setup.cfg/tox.ini: noted when read as coverage sources
         if parser.has_section(section):
             _gather_addopts(_ini_value(parser, name, section, "addopts",
                                        notes),
