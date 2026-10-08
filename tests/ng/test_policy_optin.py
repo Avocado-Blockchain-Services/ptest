@@ -3,8 +3,9 @@
 Covers the ``test_policy`` flag on ``agent_rules.preview``/``apply``, the
 ``ptest init --test-policy`` consent prompt, the ``ptest rules --test-policy``
 flows, the ``ptest guide TOPIC`` grammar, and uninstall of both block
-variants. Abuse twins (symlinked policy target, oversized instruction file,
-user-edited policy copy, hand-edited block) live here too.
+variants. Abuse twins (symlinked policy target, non-regular policy target,
+oversized instruction file, user-edited policy copy, hand-edited block)
+live here too.
 """
 from __future__ import annotations
 
@@ -263,6 +264,37 @@ def test_symlinked_policy_target_is_refused_before_any_write(tmp_path):
     assert error.value.code == "unsafe-path"
     assert outside.read_text(encoding="utf-8") == "outside\n"
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_non_regular_policy_target_is_refused_before_any_write(
+        tmp_path, kind):
+    import os
+    import stat
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    target = docs / "ptest-test-policy.md"
+    if kind == "fifo":
+        os.mkfifo(target)
+    else:
+        target.mkdir()
+
+    with pytest.raises(C.Problem) as error:
+        agent_rules.apply(tmp_path, test_policy=True)
+
+    assert error.value.code == "unsafe-path"
+    with pytest.raises(C.Problem) as preview_error:
+        agent_rules.preview(tmp_path, test_policy=True)
+
+    assert preview_error.value.code == "unsafe-path"
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (docs / "ptest-agent.md").exists()
+    stamp = os.lstat(target)
+    if kind == "fifo":
+        assert stat.S_ISFIFO(stamp.st_mode)
+    else:
+        assert stat.S_ISDIR(stamp.st_mode)
 
 
 def test_oversized_instruction_file_is_refused_before_any_write(tmp_path):
@@ -638,6 +670,29 @@ def test_rules_apply_test_policy_reports_will_change_then_applied(
     assert (tmp_path / POLICY_REL).is_file()
 
 
+def test_rules_apply_lists_appended_instruction_file_before_writing(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    agent_rules.apply(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("# Claude notes\n", encoding="utf-8")
+    claude_before = (tmp_path / "CLAUDE.md").read_bytes()
+
+    assert main(("rules", "--apply", "--test-policy")) == 0
+    captured = capsys.readouterr()
+
+    assert captured.out.index("will change:") < captured.out.index("applied:")
+    will_change = captured.out.split("will change:")[1].split("applied:")[0]
+    assert "create docs/ptest-test-policy.md" in will_change
+    assert "add one reference line to AGENTS.md" in will_change
+    assert "append managed reference to CLAUDE.md" in will_change
+    assert "append managed reference to CLAUDE.md" in captured.out.split(
+        "applied:")[1]
+    assert (tmp_path / "CLAUDE.md").read_bytes() != claude_before
+    assert agent_rules.block_variant(
+        (tmp_path / "CLAUDE.md").read_text(encoding="utf-8"),
+        "CLAUDE.md") == "policy"
+
+
 def test_rules_apply_test_policy_reports_already_installed(
         tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
@@ -692,6 +747,43 @@ def test_init_lists_conflicts_for_recorded_policy_without_flag(
 
     assert ("These lines in your instruction files name a coverage percentage;"
             in captured.out)
+
+
+def _init_no_agents(*extra):
+    return ("init", "--runner", "pytest",
+            "--no-smoke", "--no-doctor", *extra)
+
+
+def test_noninteractive_init_with_recorded_policy_keeps_edited_policy(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    agent_rules.apply(tmp_path, agents=("claude",), test_policy=True)
+    target = tmp_path / POLICY_REL
+    target.write_text("# my own stance\n", encoding="utf-8")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert main(_init_no_agents()) == 0
+    captured = capsys.readouterr()
+
+    assert target.read_text(encoding="utf-8") == "# my own stance\n"
+    assert "will change" not in captured.err
+
+
+def test_noninteractive_init_with_recorded_policy_leaves_blocks_alone(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    agent_rules.apply(tmp_path, agents=("claude",), test_policy=True)
+    (tmp_path / "GEMINI.md").write_text("# Gemini notes\n", encoding="utf-8")
+    gemini_before = (tmp_path / "GEMINI.md").read_bytes()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert main(_init_no_agents()) == 0
+    captured = capsys.readouterr()
+
+    assert (tmp_path / "GEMINI.md").read_bytes() == gemini_before
+    assert "will change" not in captured.err
 
 
 def test_rules_without_flag_keeps_base_preview(tmp_path, monkeypatch, capsys):
@@ -887,6 +979,37 @@ def test_uninstall_removes_previous_hash_policy_file(
     capsys.readouterr()
 
     assert not (root / POLICY_REL).exists()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_uninstall_skips_non_regular_policy_target(
+        case, tmp_path, monkeypatch, capsys, kind):
+    import os
+    import stat
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    agent_rules.apply(root, test_policy=True)
+    (root / POLICY_REL).unlink()
+    target = root / POLICY_REL
+    if kind == "fifo":
+        os.mkfifo(target)
+    else:
+        target.mkdir()
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+
+    assert POLICY_REL in out
+    assert "skipped" in out
+    stamp = os.lstat(target)
+    if kind == "fifo":
+        assert stat.S_ISFIFO(stamp.st_mode)
+    else:
+        assert stat.S_ISDIR(stamp.st_mode)
 
 
 def test_uninstall_never_rewrites_a_hand_edited_block(

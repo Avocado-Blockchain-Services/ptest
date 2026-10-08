@@ -305,7 +305,11 @@ def _test_policy_change_lines(actions: object) -> list[str]:
 
     The policy file create/update line comes first, then one grouped
     reference line for in-place block upgrades, then creates of
-    instruction files that are born holding the policy variant.
+    instruction files that are born holding the policy variant, then
+    appends to existing block-less instruction files (which gain the
+    policy variant block under the policy). Every caller passes a plan
+    previewed with the policy in effect, so each listed file is one the
+    apply will write.
     """
     lines = [str(action) for action in tuple(actions or ())
              if action in ("create docs/ptest-test-policy.md",
@@ -319,6 +323,10 @@ def _test_policy_change_lines(actions: object) -> list[str]:
         text = str(action)
         if text.startswith("create ") and text[len("create "):] in (
                 "AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            lines.append(text)
+    for action in tuple(actions or ()):
+        text = str(action)
+        if text.startswith("append managed reference to "):
             lines.append(text)
     return lines
 
@@ -2815,9 +2823,15 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 parsed, agents=agents, root=root)
             recorded = agent_rules.test_policy_installed(root)
             effective = policy_consent or recorded
+            # A recorded policy alone never routes through apply: without
+            # chosen agents or an explicit --test-policy, init without a
+            # prompt is a refresh (which skips a user-edited policy file
+            # and never touches instruction files), exactly like init
+            # without a recorded policy.
+            wants_apply = bool(agents) or policy_consent
             plan = (agent_rules.preview(
                 root, agents=agents, test_policy=policy_consent)
-                if (agents or effective) else None)
+                if wants_apply else None)
             if effective and plan is not None:
                 policy_changes = _test_policy_change_lines(plan.actions)
                 if policy_changes:
@@ -2836,11 +2850,11 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 from_main=parsed.from_main,
             ))
             applied = None
-            if (agents or effective) and not parsed.dry_run:
+            if wants_apply and not parsed.dry_run:
                 applied = agent_rules.apply(
                     root, agents=agents, test_policy=policy_consent)
             elif (not parsed.dry_run and not parsed.agents_explicit
-                    and not effective):
+                    and not wants_apply):
                 # No prompt (an agent, CI, a pipe): still refresh guidance
                 # ptest itself installed earlier, never anything new. It is
                 # best effort: the config is already written, so a refresh
