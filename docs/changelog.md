@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
 - Agents get clearer guidance on writing tests. The installed guide has a new
   "Writing tests" section: name the oracle for every test, start a bug fix
