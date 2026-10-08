@@ -108,7 +108,8 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     statuses = doctor_qualification
-    answers = iter(("codex", "no", "codex", "no"))
+    # Per init run: agents answer, test-policy answer, reviewer-menu answer.
+    answers = iter(("codex", "no", "no", "codex", "no", "no"))
     inputs = []
 
     def input_answer():
@@ -131,6 +132,8 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     assert re.search(r"created +\.ptest\.toml", created.out)
     assert "created:" not in created.out
     assert "Optimization review is disabled" in created.err
+    assert "Also install the stricter test policy?" in created.err
+    assert not (root / "docs" / "ptest-test-policy.md").exists()
     original_config = config.read_bytes()
 
     assert main(("init", "--runner", "pytest")) == 0
@@ -143,8 +146,10 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
         r"guidance +unchanged +docs/ptest-agent\.md, AGENTS\.md, "
         r"ptest skill for codex", existing.out)
     assert "Optimization review is disabled" in existing.err
+    assert "Also install the stricter test policy?" in existing.err
+    assert not (root / "docs" / "ptest-test-policy.md").exists()
     assert config.read_bytes() == original_config
-    assert inputs == ["codex", "no", "codex", "no"]
+    assert inputs == ["codex", "no", "no", "codex", "no", "no"]
     assert launches == []
 
     qualifications_before_no_doctor = len(statuses)
@@ -159,7 +164,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     assert "Run this review once?" not in no_doctor.err
     assert len(statuses) == qualifications_before_no_doctor
     assert guidance_prompts == ["asked"]
-    assert inputs == ["codex", "no", "codex", "no"]
+    assert inputs == ["codex", "no", "no", "codex", "no", "no"]
     assert launches == []
     assert not (root / "recommendations.md").exists()
 

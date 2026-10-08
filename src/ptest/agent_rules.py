@@ -1018,8 +1018,6 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "874642905132b63140bff23f991399f5f008404463696a4680eb64bacf16af4e",
     # 4fb5935 (0.4.10): guide before dependency-recorded selection rows.
     "fa30a22ce8eb88a1687437fe8f8578c16e81b46ce54af2a955db6b565b8fc062",
-    # bbf1260 (0.5.2): guide before the Writing tests section.
-    "5ac1f26cabd7413c4e68456aae4aa6345c4678d6dca769855463d3e2d196d2d2",
 })
 
 
