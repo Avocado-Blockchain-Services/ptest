@@ -2266,7 +2266,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             domain=None, data=draft_data, error=None)
         policy_report, policy_text = _test_policy_outputs(
             resolution, color=sys.stdout.isatty(),
-            encoding=sys.stdout.encoding)
+            encoding=sys.stdout.encoding, scope=parsed.scope)
         report_payload = recommendations.render_recommendations(
             report_input,
             verification_scopes=_recommendation_verification_scopes(
@@ -2357,17 +2357,31 @@ def _offline_progress(parsed: ParsedArgs,
 
 def _test_policy_outputs(resolution: C.ConfigResolution, *,
                          color: bool = False,
-                         encoding: str | None = None
+                         encoding: str | None = None,
+                         scope: str | None = None
                          ) -> tuple[object | None, str]:
     """Static Test policy facts for doctor: ``(report, terminal text)``.
 
     Read-only and offline: it sends nothing, writes nothing, and never
     changes a checklist row, readiness or JSON field. Best effort only:
     any problem yields ``(None, "")`` so doctor output never breaks.
+    ``scope`` (doctor ``--scope``) keeps only the projects it selects and
+    drops the monorepo root instructions, like every other doctor section.
     """
     try:
+        import dataclasses
+
         from . import policy_facts, policy_render
         report = policy_facts.collect(resolution)
+        if scope is not None:
+            chosen = tuple(
+                project for project in report.projects
+                if project.project == "."
+                or scope == project.project
+                or scope.startswith(project.project + "/")
+                or project.project.startswith(scope + "/"))
+            report = dataclasses.replace(
+                report, projects=chosen, root_instructions=None)
         text = policy_render.render_terminal(
             report, color=color, encoding=encoding)
     except Exception:
@@ -2398,7 +2412,7 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
             calls=0, encoding=sys.stdout.encoding))
         _policy_report, policy_text = _test_policy_outputs(
             resolution, color=sys.stdout.isatty(),
-            encoding=sys.stdout.encoding)
+            encoding=sys.stdout.encoding, scope=parsed.scope)
         if policy_text:
             sys.stdout.write(policy_text)
         mention = _fix_mention(resolution)
