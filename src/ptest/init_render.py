@@ -21,6 +21,7 @@ from .project_facts import (
     wrap_atoms,
     wrap_words,
 )
+from .policy_render import CONFLICT_HEADER
 from .render import colors_enabled, paint, terminal_text
 
 _MAX_BODY_LINES = 200
@@ -48,9 +49,6 @@ _SKILL_AGENTS = (
 
 _RESTART_NEW = "Restart your coding agents to load the new ptest skill."
 _RESTART_UPDATED = "Restart your coding agents to load the updated ptest skill."
-
-CONFLICT_HEADER = ("These lines in your instruction files name a coverage "
-                   "percentage; ptest never edits them. Review them yourself:")
 
 
 def conflict_lines(scan: object) -> tuple[str, ...]:

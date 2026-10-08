@@ -1,4 +1,4 @@
-"""Doctor Test policy terminal and Markdown rendering (T2).
+"""Doctor Test policy terminal and Markdown rendering.
 
 Plain-words ``Test policy`` section built from ``policy_facts`` only.
 Every repository-derived string is sanitized at this boundary.
@@ -9,10 +9,10 @@ import unicodedata
 
 from . import render as render_mod
 
-__all__ = ["render_terminal", "render_markdown"]
+__all__ = ["render_terminal", "render_markdown", "CONFLICT_HEADER"]
 
-_CONFLICT_HEADER = ("These lines in your instruction files name a coverage "
-                    "percentage; ptest never edits them. Review them yourself:")
+CONFLICT_HEADER = ("These lines in your instruction files name a coverage "
+                   "percentage; ptest never edits them. Review them yourself:")
 
 _ASCII_FALLBACKS = {
     "\u2014": "--", "\u2013": "-", "\u2026": "...", "\u2022": "*",
@@ -87,9 +87,11 @@ def _project_risks(project) -> list[str]:
         risks.append("Omit patterns hide those files from the number "
                      "completely.")
     if project.pragma_count:
-        risks.append(f"{project.pragma_count} lines are marked "
-                     "`pragma: no cover`; that code never counts against "
-                     "the gate.")
+        count = project.pragma_count
+        subject = "1 line is" if count == 1 else f"{count} lines are"
+        effect = ("that code never counts against the gate." if project.gates
+                  else "that code is left out of any coverage number.")
+        risks.append(f"{subject} marked `pragma: no cover`; {effect}")
     if _instruction_lines(project.instructions):
         risks.append("An instruction that names a coverage percentage "
                      "invites tests written to reach the number instead of "
@@ -125,13 +127,14 @@ def _project_lines(project, *, markdown: bool) -> list[str]:
         count_text = (f"at least {project.pragma_count}"
                       if not project.pragma_complete
                       else str(project.pragma_count))
-        lines.append(f"pragma no cover: {count_text} lines")
+        unit = "line" if count_text == "1" else "lines"
+        lines.append(f"pragma no cover: {count_text} {unit}")
     if project.vitest_not_inspected:
         lines.append("vitest coverage thresholds: not inspected "
                      "(config is code)")
     found = _instruction_lines(project.instructions)
     if found:
-        lines.append(_CONFLICT_HEADER)
+        lines.append(CONFLICT_HEADER)
         for item in found:
             lines.append(f"  {quote(item.path)}:{item.line}: "
                          f"{quote(item.text)}")
@@ -145,12 +148,19 @@ def _project_lines(project, *, markdown: bool) -> list[str]:
 
 
 def _suggestion_lines(report) -> list[str]:
-    lines = [
-        "Keep the existing coverage gate as a floor; do not raise it "
-        "by adding tests.",
-        "Fix a failing gate by testing real behavior or deleting dead "
-        "code, never with assertion-free tests.",
-    ]
+    if any(project.gates for project in report.projects):
+        lines = [
+            "Keep the existing coverage gate as a floor; do not raise it "
+            "by adding tests.",
+            "Fix a failing gate by testing real behavior or deleting dead "
+            "code, never with assertion-free tests.",
+        ]
+    else:
+        lines = [
+            "No coverage gate was found; do not add tests only to reach "
+            "a coverage number.",
+            "Test real behavior; never add assertion-free tests.",
+        ]
     if any(project.gates and not project.branch
            for project in report.projects):
         lines.append("Consider branch coverage: coverage.py `branch = true` "
@@ -205,7 +215,7 @@ def render_terminal(report, *, color: bool = False,
     if (report.root_instructions is not None
             and _instruction_lines(report.root_instructions)):
         out.append("repository root:")
-        out.append(f"  {_CONFLICT_HEADER}")
+        out.append(f"  {CONFLICT_HEADER}")
         for item in _instruction_lines(report.root_instructions):
             out.append(f"    {_clean(item.path)}:{item.line}: "
                        f"{_clean(item.text)}")
@@ -234,7 +244,7 @@ def render_markdown(report) -> str:
                 if head and tail:
                     out.append(f"- {head}: {_wrap_code(tail)}")
                     continue
-            if line == _CONFLICT_HEADER:
+            if line == CONFLICT_HEADER:
                 out.append(line)
                 continue
             out.append(f"- {_wrap_code(line)}" if not line.startswith("  ")
@@ -257,7 +267,7 @@ def render_markdown(report) -> str:
             and _instruction_lines(report.root_instructions)):
         out.append("Repository root:")
         out.append("")
-        out.append(_CONFLICT_HEADER)
+        out.append(CONFLICT_HEADER)
         out.append("")
         for item in _instruction_lines(report.root_instructions):
             out.append(f"- {_md(item.path)}:{item.line}: "

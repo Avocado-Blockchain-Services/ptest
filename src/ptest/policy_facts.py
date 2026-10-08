@@ -1,4 +1,4 @@
-"""Doctor Test policy facts (T2): static per-project coverage configuration facts.
+"""Doctor Test policy facts: static per-project coverage configuration facts.
 
 Read-only and bounded: ``collect`` inspects a bounded set of config files,
 never raises for repository content, spawns no processes, and writes nothing.

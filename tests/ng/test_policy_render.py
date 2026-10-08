@@ -181,3 +181,40 @@ def test_markdown_shape_and_neutralization():
 def test_markdown_empty_report():
     from ptest import policy_render
     assert policy_render.render_markdown(_report(())) == ""
+
+
+# ---- gate-aware wording and plurals ----
+
+def test_pragma_risk_without_gate_never_mentions_a_gate():
+    from ptest import policy_render
+    text = policy_render.render_terminal(
+        _report([_facts(pragma_count=3)]))
+    assert "3 lines are marked `pragma: no cover`" in text
+    assert "against the gate" not in text
+    assert "existing coverage gate" not in text
+
+
+def test_no_gate_suggestions_do_not_claim_an_existing_gate():
+    from ptest import policy_render
+    for render in (policy_render.render_terminal,
+                   policy_render.render_markdown):
+        text = render(_report([_facts(pragma_count=2)]))
+        assert "Keep the existing coverage gate" not in text
+        assert "no coverage gate was found" in text.lower()
+
+
+def test_gate_suggestion_wording_is_unchanged_when_a_gate_exists():
+    from ptest import policy_render
+    text = policy_render.render_terminal(
+        _report([_facts(gates=(_gate(),), pragma_count=2)]))
+    assert "that code never counts against the gate" in text
+    assert "Keep the existing coverage gate as a floor" in text
+
+
+def test_single_pragma_line_is_singular():
+    from ptest import policy_render
+    for facts in (_facts(gates=(_gate(),), pragma_count=1), _facts(pragma_count=1)):
+        text = policy_render.render_terminal(_report([facts]))
+        assert "1 line is marked `pragma: no cover`" in text
+        assert "1 lines" not in text
+        assert "pragma no cover: 1 line\n" in text + "\n"
