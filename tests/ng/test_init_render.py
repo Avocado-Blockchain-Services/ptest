@@ -463,6 +463,38 @@ def test_commit_reminder_wraps_at_narrow_width():
     ]
 
 
+def test_conflict_lines_render_after_warnings():
+    """Policy conflict lines form their own trailing block when present."""
+    from ptest.init_render import CONFLICT_HEADER, conflict_lines
+
+    result = _result()
+    assert "coverage percentage" not in render_init(result, None, width=80)
+    conflicts = (
+        CONFLICT_HEADER,
+        "  AGENTS.md:2: Keep coverage above 90 percent.",
+    )
+    text = render_init(result, None, width=80, conflicts=conflicts)
+    lines = text.splitlines()
+    assert lines[-2:] == list(conflicts)
+    assert CONFLICT_HEADER in text
+
+
+def test_conflict_lines_builder_sanitizes_and_skips_empty():
+    from ptest.init_render import conflict_lines
+    from ptest.agent_rules import InstructionLine, InstructionScan
+
+    assert conflict_lines(InstructionScan()) == ()
+    scan = InstructionScan(lines=(
+        InstructionLine(path="AGENTS.md", line=2,
+                        text="Keep coverage \x1b[31mabove 90%\x07."),
+    ))
+    lines = conflict_lines(scan)
+    assert len(lines) == 2
+    assert lines[1].startswith("  AGENTS.md:2: ")
+    assert "\x1b" not in lines[1] and "\x07" not in lines[1]
+    assert "AGENTS.md:2:" in lines[1]
+
+
 def test_commit_reminder_sanitizes_control_characters():
     """Control characters in commit paths stay escaped on the terminal."""
     nasty = "we\x07ird.md"

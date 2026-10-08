@@ -28,8 +28,8 @@ Inspect and review:
   ptest history                   # committed run summaries; single-project v1 only
   ptest register                  # registration preview
   ptest doctor                    # consented CLI review; use --offline for static-only
-  ptest guide                     # render bundled repair guide text
-  ptest rules                     # preview agent guidance
+  ptest guide [TOPIC]             # render bundled repair guide text or one recipe
+  ptest rules [--apply] [--test-policy]  # preview agent guidance
   ptest uninstall                 # remove what ptest set up (see ptest help uninstall)
   ptest update                    # install the latest release (see ptest help update)
   ptest release <run_id>          # free a stuck run's slots (see ptest help release)
@@ -59,6 +59,7 @@ Syntax:
   ptest init [--runner pytest|vitest|go|cargo]
              [--child NAME --runner KIND]...
              [--agents none|all|claude,codex,opencode,gemini]
+             [--test-policy | --no-test-policy]
              [--dry-run] [--reveal-command] [--json]
              [--from-main]
              [--doctor | --no-doctor]
@@ -88,6 +89,13 @@ Notes:
   Fresh pytest configs enable change selection, so bare ptest runs only
   the tests a change reaches with no coverage or baseline step; existing
   configs are never rewritten (ptest doctor --fix turns selection on).
+  --test-policy also installs the stricter test policy
+  (docs/ptest-test-policy.md plus one reference line in the managed
+  instruction block); --no-test-policy only suppresses the prompt and
+  never removes an installed policy. Without either flag, a TTY init
+  asks once (default No) after the agents question; --json, --dry-run,
+  CI, pipes, and --agents none never prompt. The two flags cannot be
+  combined or repeated.
   In a linked git worktree whose main checkout holds a `.ptest.toml`
   at the same path, init refuses with `config-uncommitted`:
   worktrees only receive committed files, so the fix is to commit the
@@ -157,6 +165,10 @@ Probe syntax (EXECUTES tests and setup; not a static inspection; single-project 
                [--no-setup] [--result-json PATH]
 
 Notes:
+  Doctor also prints a static read-only Test policy section after the grid,
+  naming coverage gates, omit patterns, pragma counts, and conflicting
+  instruction lines for you to review; it sends nothing to any provider,
+  writes nothing, and changes no score or JSON field.
   Offline static inspection prints one progress line per project to stderr on a
   TTY; -q/--quiet suppresses it.
   Without an explicit concrete --reviewer, default review on a TTY lists the
@@ -231,23 +243,29 @@ Notes:
 _GUIDE = """ptest guide: print the bundled local repair guide. Read-only except for --write.
 
 Syntax:
-  ptest guide [--write PATH]
+  ptest guide [TOPIC]
+  ptest guide --write PATH
 
-Text only: guide accepts no --json. --write exports to one exclusive new
-file resolved from the project root; existing files are never overwritten."""
+Text only: guide accepts no --json. TOPIC prints exactly one packaged
+recipe; an unknown TOPIC fails and lists the valid topics. --write
+exports to one exclusive new file resolved from the project root;
+existing files are never overwritten. TOPIC and --write cannot combine."""
 
 _RULES = """ptest rules: preview (default) or install repository-local agent guidance.
 
 Syntax:
-  ptest rules [--apply]
+  ptest rules [--apply] [--test-policy]
 
 Without --apply nothing is written. Rules always works at the repository
 root, wherever you run it. --apply adds references to existing
 instruction files, creating AGENTS.md only if none exist (plus
 docs/ptest-agent.md), and refreshes the ptest skills already installed
 here; it never installs a new per-agent skill (use init --agents) and
-never overwrites one you edited. Failures roll back guidance writes.
-Rules accepts no --json."""
+never overwrites one you edited. --test-policy previews (without
+--apply) or installs the stricter test policy (docs/ptest-test-policy.md
+plus one reference line in the managed instruction block); an installed
+policy is honoured even without the flag. Failures roll back guidance
+writes. Rules accepts no --json."""
 
 _UNINSTALL = """ptest uninstall: remove what ptest set up, keeping your work.
 
@@ -255,12 +273,14 @@ Syntax:
   ptest uninstall [--yes] [--dry-run] [--json] [--self]
 
 Removes the repository `.ptest.toml` files (root and declared monorepo
-children), ptest-managed guidance (docs/ptest-agent.md, the managed block
-in AGENTS.md/CLAUDE.md, managed provider skills), the un-edited
-recommendations.md report, and this checkout's private state (its history,
-setup records, and scheduler rows). Files you edited are kept and reported
-as kept (edited); symlinks, unbalanced marker blocks, and anything outside
-the repository root are never touched and reported as skipped.
+children), ptest-managed guidance (docs/ptest-agent.md,
+docs/ptest-test-policy.md when ptest installed it unchanged, the managed
+block in either variant in AGENTS.md/CLAUDE.md/GEMINI.md, managed
+provider skills), the un-edited recommendations.md report, and this
+checkout's private state (its history, setup records, and scheduler
+rows). Files you edited are kept and reported as kept (edited);
+symlinks, unbalanced marker blocks, and anything outside the repository
+root are never touched and reported as skipped.
 
 The full plan prints first, grouped by action (remove, kept (edited),
 skipped). Skipped entries are informational and exit 0; only refusals

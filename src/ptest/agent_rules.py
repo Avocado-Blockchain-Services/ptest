@@ -5,6 +5,7 @@ import importlib.resources
 import errno
 import hashlib
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from .contracts import Problem
 from . import files
 
 _GUIDE_PATH = "docs/ptest-agent.md"
+TEST_POLICY_PATH = "docs/ptest-test-policy.md"
 _MARKER_START = "<!-- ptest-agent-rules:start -->"
 _MARKER_END = "<!-- ptest-agent-rules:end -->"
 _AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
@@ -379,10 +381,100 @@ def _guide() -> bytes:
         raise _problem("state-unavailable", "bundled repository agent guide is unavailable") from None
 
 
-def _block(name: str) -> str:
+def _test_policy() -> bytes:
+    try:
+        return importlib.resources.files("ptest").joinpath(
+            "resources", "test-policy.md").read_bytes()
+    except OSError:
+        raise _problem("state-unavailable", "bundled test policy is unavailable") from None
+
+
+#: sha256 digests of known previous ``docs/ptest-test-policy.md`` bytes.
+#: Same contract as ``_PREVIOUS_GUIDE_SHA256S``: repositories holding
+#: exactly these bytes get an in-place policy upgrade; any other differing
+#: policy file is a user edit and still raises ``already-exists``. Empty
+#: in this release: the policy ships for the first time here.
+_PREVIOUS_TEST_POLICY_SHA256S: frozenset[str] = frozenset()
+
+
+def _policy_reference(name: str) -> str:
+    if name == "AGENTS.md":
+        return "Before writing or changing tests, read `docs/ptest-test-policy.md`."
+    return "@docs/ptest-test-policy.md"
+
+
+def _block(name: str, *, test_policy: bool = False) -> str:
     reference = ("Before running or changing tests, read `docs/ptest-agent.md`."
                  if name == "AGENTS.md" else "@docs/ptest-agent.md")
-    return f"{_MARKER_START}\n{reference}\n{_MARKER_END}\n"
+    if not test_policy:
+        return f"{_MARKER_START}\n{reference}\n{_MARKER_END}\n"
+    return (f"{_MARKER_START}\n{reference}\n"
+            f"{_policy_reference(name)}\n{_MARKER_END}\n")
+
+
+def block_variant(text: str, name: str) -> str | None:
+    """Classify one instruction file's managed block, if any.
+
+    Returns ``"base"`` for today's block, ``"policy"`` for the block with
+    the test-policy reference line, and ``None`` when the file holds no
+    block. Anything else inside the markers (extra text, a changed policy
+    line, two blocks, unbalanced markers) raises ``invalid-config``.
+    """
+    starts, ends = text.count(_MARKER_START), text.count(_MARKER_END)
+    if starts != ends or starts > 1:
+        raise _problem("invalid-config", f"agent rules block in {name} is malformed")
+    if not starts:
+        return None
+    begin = text.index(_MARKER_START)
+    end = text.index(_MARKER_END, begin) + len(_MARKER_END)
+    section = text[begin:end]
+    if section == _block(name).rstrip("\n"):
+        return "base"
+    if section == _block(name, test_policy=True).rstrip("\n"):
+        return "policy"
+    raise _problem("invalid-config", f"agent rules block in {name} is malformed")
+
+
+def test_policy_installed(root: Path) -> bool:
+    """True when any instruction file holds the policy block variant.
+
+    Read-only and fail-closed: missing files simply do not count, while
+    any problem (symlink, non-regular or unreadable file, malformed
+    block) reports False.
+    """
+    try:
+        return _recorded_policy_variant(Path(root))
+    except Exception:
+        return False
+
+
+def _recorded_policy_variant(root: Path) -> bool:
+    for name in _AGENT_FILES:
+        try:
+            stamp = os.lstat(root / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        if stat.S_ISLNK(stamp.st_mode):
+            try:
+                alias = os.readlink(root / name)
+            except OSError:
+                return False
+            if name == "AGENTS.md" and alias == "CLAUDE.md":
+                continue
+            return False
+        if not stat.S_ISREG(stamp.st_mode):
+            return False
+        if stamp.st_size > _MAX_FILE_BYTES:
+            return False
+        try:
+            text = (root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if block_variant(text, name) == "policy":
+            return True
+    return False
 
 
 def _read_regular(path: Path) -> str | None:
@@ -403,17 +495,127 @@ def _read_regular(path: Path) -> str | None:
 
 
 def _managed_state(text: str, name: str) -> bool:
-    starts, ends = text.count(_MARKER_START), text.count(_MARKER_END)
-    if starts != ends or starts > 1:
-        raise _problem("invalid-config", f"agent rules block in {name} is malformed")
-    if not starts:
-        return False
-    expected = _block(name).rstrip("\n")
-    begin = text.index(_MARKER_START)
-    end = text.index(_MARKER_END, begin) + len(_MARKER_END)
-    if text[begin:end] != expected:
-        raise _problem("invalid-config", f"agent rules block in {name} is malformed")
-    return True
+    return block_variant(text, name) is not None
+
+
+# -- coverage-percent instruction lines (read-only) ---------------------------
+#
+# Shared by doctor's Test policy section and the opt-in test policy, which
+# list these lines for the user to edit. ptest never edits user-written lines.
+
+_GATE_SETTING = re.compile(r"(?:--cov-fail-under|fail_under)\s*[=:]?\s*\d",
+                           re.IGNORECASE)
+_COVERAGE_WORD = re.compile(r"coverage", re.IGNORECASE)
+_PERCENT = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d+)?\s?(?:%|percent\b)",
+                      re.IGNORECASE)
+_INSTRUCTION_LINE_CHARS = 160
+_INSTRUCTION_LINE_LIMIT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionLine:
+    """One user-written instruction line that states a coverage percentage.
+
+    ``text`` is the stripped line cut to 160 characters. It is NOT
+    sanitized: every renderer must neutralize control and markup
+    characters before display.
+    """
+
+    path: str
+    line: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionScan:
+    lines: tuple[InstructionLine, ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+    truncated: bool = False
+
+
+def _states_coverage_percent(line: str) -> bool:
+    if _GATE_SETTING.search(line):
+        return True
+    return bool(_COVERAGE_WORD.search(line) and _PERCENT.search(line))
+
+
+def _managed_line_numbers(lines: list[str]) -> frozenset[int]:
+    """1-based line numbers inside paired ptest managed-block markers."""
+    managed: set[int] = set()
+    start: int | None = None
+    for number, line in enumerate(lines, start=1):
+        if _MARKER_START in line:
+            start = number
+        elif _MARKER_END in line and start is not None:
+            managed.update(range(start, number + 1))
+            start = None
+    return frozenset(managed)
+
+
+def coverage_instruction_lines(directory: Path) -> InstructionScan:
+    """Lines in AGENTS.md/CLAUDE.md/GEMINI.md that state a coverage percentage.
+
+    Read-only, bounded, and never raises for file state or content. Lines
+    inside a paired ptest managed block are ignored. A symlink (except the
+    AGENTS.md -> CLAUDE.md alias, whose target is scanned as CLAUDE.md), a
+    non-regular, oversized, unreadable or non-UTF-8 file is listed in
+    ``skipped`` with a plain reason and not read further. At most 20 lines
+    are returned; ``truncated`` marks that more exist.
+    """
+    directory = Path(directory)
+    found: list[InstructionLine] = []
+    skipped: list[tuple[str, str]] = []
+    truncated = False
+    for name in _AGENT_FILES:
+        if truncated:
+            break
+        try:
+            stamp = os.lstat(directory / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            skipped.append((name, "unreadable"))
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            try:
+                alias = os.readlink(directory / name)
+            except OSError:
+                alias = None
+            if not (name == "AGENTS.md" and alias == "CLAUDE.md"):
+                skipped.append((name, "symlink"))
+            continue
+        if not stat.S_ISREG(stamp.st_mode):
+            skipped.append((name, "not a regular file"))
+            continue
+        if stamp.st_size > _MAX_FILE_BYTES:
+            skipped.append((name, "oversized"))
+            continue
+        try:
+            raw = bytes(files.read_regular(directory, name, _MAX_FILE_BYTES + 1))
+        except (C.Problem, OSError, ValueError):
+            skipped.append((name, "unreadable"))
+            continue
+        if len(raw) > _MAX_FILE_BYTES:
+            skipped.append((name, "oversized"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append((name, "not UTF-8 text"))
+            continue
+        lines = [line.rstrip("\r") for line in text.split("\n")]
+        managed = _managed_line_numbers(lines)
+        for number, line in enumerate(lines, start=1):
+            if number in managed or not _states_coverage_percent(line):
+                continue
+            if len(found) >= _INSTRUCTION_LINE_LIMIT:
+                truncated = True
+                break
+            found.append(InstructionLine(
+                path=name, line=number,
+                text=line.strip()[:_INSTRUCTION_LINE_CHARS]))
+    return InstructionScan(lines=tuple(found), skipped=tuple(skipped),
+                           truncated=truncated)
 
 
 def _close_quietly(fd: int | None) -> None:
@@ -816,6 +1018,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "874642905132b63140bff23f991399f5f008404463696a4680eb64bacf16af4e",
     # 4fb5935 (0.4.10): guide before dependency-recorded selection rows.
     "fa30a22ce8eb88a1687437fe8f8578c16e81b46ce54af2a955db6b565b8fc062",
+    # bbf1260 (0.5.2): guide before the Writing tests section.
+    "5ac1f26cabd7413c4e68456aae4aa6345c4678d6dca769855463d3e2d196d2d2",
 })
 
 
@@ -829,6 +1033,23 @@ def _guide_kind(existing: str | None, guide: bytes) -> str:
     if hashlib.sha256(raw).hexdigest() in _PREVIOUS_GUIDE_SHA256S:
         return "previous"
     raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
+
+
+def _policy_kind(existing: str | None, policy: bytes) -> str:
+    """Classify an installed test policy file: missing, current, or previous.
+
+    A policy file that is neither current nor a known previous version is
+    a user edit and raises ``already-exists`` before any write.
+    """
+    if existing is None:
+        return "missing"
+    raw = existing.encode("utf-8")
+    if raw == policy:
+        return "current"
+    if hashlib.sha256(raw).hexdigest() in _PREVIOUS_TEST_POLICY_SHA256S:
+        return "previous"
+    raise _problem("already-exists",
+                   "docs/ptest-test-policy.md already exists and is not ptest-managed")
 
 
 def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
@@ -865,6 +1086,18 @@ def _refresh_targets(root: Path) -> list[tuple[str, Path, bytes, bytes]]:
     if (raw is not None and raw != guide
             and hashlib.sha256(bytes(raw)).hexdigest() in _PREVIOUS_GUIDE_SHA256S):
         targets.append((_GUIDE_PATH, root / _GUIDE_PATH, bytes(raw), guide))
+    if test_policy_installed(root):
+        policy = _test_policy()
+        try:
+            existing_policy = files.read_regular(
+                root, TEST_POLICY_PATH, _MAX_FILE_BYTES + 1)
+        except (C.Problem, OSError, ValueError):
+            existing_policy = None
+        if (existing_policy is not None and bytes(existing_policy) != policy
+                and hashlib.sha256(bytes(existing_policy)).hexdigest()
+                in _PREVIOUS_TEST_POLICY_SHA256S):
+            targets.append((TEST_POLICY_PATH, root / TEST_POLICY_PATH,
+                            bytes(existing_policy), policy))
     for provider in SUPPORTED_AGENTS:
         try:
             relative, target, existing, kind = _provider_target(root, provider)
@@ -948,7 +1181,9 @@ def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes, str]:
     return root, texts, guide, kind
 
 
-def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
+def preview(root: Path, *, agents: tuple[str, ...] = (),
+            test_policy: bool = False) -> RulesPlan:
+    policy = bool(test_policy) or test_policy_installed(root)
     root, texts, guide, guide_kind = _validated(root)
     providers = tuple(dict.fromkeys(agents))
     for provider in providers:
@@ -965,6 +1200,19 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
     else:
         actions.append(f"already present {_GUIDE_PATH}")
         details.append(_detail(_GUIDE_PATH, "already present"))
+    if policy:
+        policy_bytes = _test_policy()
+        policy_kind = _policy_kind(
+            _read_regular(root / TEST_POLICY_PATH), policy_bytes)
+        if policy_kind == "missing":
+            actions.append(f"create {TEST_POLICY_PATH}")
+            details.append(_detail(TEST_POLICY_PATH, "would create"))
+        elif policy_kind == "previous":
+            actions.append(f"update {TEST_POLICY_PATH}")
+            details.append(_detail(TEST_POLICY_PATH, "would update"))
+        else:
+            actions.append(f"already present {TEST_POLICY_PATH}")
+            details.append(_detail(TEST_POLICY_PATH, "already present"))
     existing = [name for name, text in texts.items() if text is not None]
     targets = existing or ["AGENTS.md"]
     for name in targets:
@@ -972,6 +1220,9 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
         if text is None:
             actions.append(f"create {name}")
             details.append(_detail(name, "would create"))
+        elif policy and block_variant(text, name) == "base":
+            actions.append(f"add test-policy reference to {name}")
+            details.append(_detail(name, "would update"))
         elif not _managed_state(text, name):
             actions.append(f"append managed reference to {name}")
             details.append(_detail(name, "would update"))
@@ -1175,10 +1426,12 @@ def installed_providers(root: Path) -> tuple[str, ...]:
     return tuple(found)
 
 
-def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
+def apply(root: Path, *, agents: tuple[str, ...] = (),
+          test_policy: bool = False) -> RulesResult:
+    policy = bool(test_policy) or test_policy_installed(root)
     root, texts, guide, guide_kind = _validated(root)
     providers = tuple(dict.fromkeys(agents))
-    plan = preview(root, agents=providers)
+    plan = preview(root, agents=providers, test_policy=test_policy)
     pending = [item for item in plan.details if item.action in ("would create", "would update")]
     if not pending:
         return RulesResult(changed=False, actions=plan.actions, details=plan.details)
@@ -1225,13 +1478,43 @@ def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
             observed.append(_detail(_GUIDE_PATH, "updated"))
         else:
             observed.append(_detail(_GUIDE_PATH, "already present"))
+        if policy:
+            policy_bytes = _test_policy()
+            policy_path = root / TEST_POLICY_PATH
+            original_policy = _read_regular(policy_path)
+            policy_kind = _policy_kind(original_policy, policy_bytes)
+            if policy_kind == "missing":
+                create_file(TEST_POLICY_PATH, policy_bytes)
+                observed.append(_detail(TEST_POLICY_PATH, "created"))
+            elif policy_kind == "previous":
+                if (original_policy is None or hashlib.sha256(
+                        original_policy.encode("utf-8")).hexdigest()
+                        not in _PREVIOUS_TEST_POLICY_SHA256S):
+                    raise _problem(
+                        "already-exists",
+                        "docs/ptest-test-policy.md already exists and is not "
+                        "ptest-managed")
+                stamp = os.lstat(policy_path)
+                update_file(policy_path, original_policy,
+                            stat.S_IMODE(stamp.st_mode),
+                            policy_bytes.decode("utf-8"))
+                observed.append(_detail(TEST_POLICY_PATH, "updated"))
+            else:
+                observed.append(_detail(TEST_POLICY_PATH, "already present"))
         existing = [name for name, text in texts.items() if text is not None]
         for name in existing or ["AGENTS.md"]:
             target, text = root / name, texts[name]
-            block = _block(name)
+            block = _block(name, test_policy=policy)
             if text is None:
                 create_file(name, block.encode("utf-8"))
                 observed.append(_detail(name, "created"))
+            elif policy and block_variant(text, name) == "base":
+                stamp = os.lstat(target)
+                begin = text.index(_MARKER_START)
+                end = text.index(_MARKER_END, begin) + len(_MARKER_END)
+                update_file(target, text, stat.S_IMODE(stamp.st_mode),
+                            text[:begin] + block.rstrip("\n") + text[end:])
+                observed.append(_detail(name, "updated"))
             elif not _managed_state(text, name):
                 stamp = os.lstat(target)
                 update_file(target, text, stat.S_IMODE(stamp.st_mode),

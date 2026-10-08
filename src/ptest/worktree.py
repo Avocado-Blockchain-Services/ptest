@@ -16,6 +16,7 @@ CONFIG_NAME = ".ptest.toml"
 # only when they contain the managed marker below.
 AGENT_RULE_FILES: tuple[str, ...] = (
     "docs/ptest-agent.md",
+    "docs/ptest-test-policy.md",
     "AGENTS.md", "CLAUDE.md", "GEMINI.md",
     ".agents/skills/ptest/SKILL.md", ".claude/skills/ptest/SKILL.md",
     ".gemini/skills/ptest/SKILL.md", ".opencode/skills/ptest/SKILL.md",

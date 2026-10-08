@@ -294,7 +294,7 @@ def test_agent_rule_lists_match_agent_rules_module():
 
     assert W.MANAGED_MARKER == rules._MARKER_START
     expected = (
-        (rules._GUIDE_PATH,) + tuple(rules._AGENT_FILES)
+        (rules._GUIDE_PATH, rules.TEST_POLICY_PATH) + tuple(rules._AGENT_FILES)
         + tuple(rules._PROVIDER_SKILLS.values())
     )
     assert set(W.AGENT_RULE_FILES) == set(expected)
@@ -318,6 +318,31 @@ def test_uncommitted_config_files_agent_rules_opt_in(tmp_path):
         "<!-- ptest-agent-rules:start -->\n# managed\n", encoding="utf-8")
     assert W.uncommitted_config_files(main, include_agent_rules=True) == (
         ".ptest.toml", "docs/ptest-agent.md", "AGENTS.md")
+
+
+def test_uncommitted_config_files_reports_the_policy_file(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main)
+    docs = main / "docs"
+    docs.mkdir()
+    (docs / "ptest-test-policy.md").write_text("# stance\n", encoding="utf-8")
+
+    assert W.uncommitted_config_files(main) == (".ptest.toml",)
+    assert W.uncommitted_config_files(main, include_agent_rules=True) == (
+        ".ptest.toml", "docs/ptest-test-policy.md")
+
+
+def test_uncommitted_config_files_recognises_both_block_variants(tmp_path):
+    from ptest import agent_rules as rules
+
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main)
+    for variant in (False, True):
+        (main / "AGENTS.md").write_text(
+            "# notes\n\n" + rules._block("AGENTS.md", test_policy=variant),
+            encoding="utf-8")
+        assert "AGENTS.md" in W.uncommitted_config_files(
+            main, include_agent_rules=True)
 
 
 def test_uncommitted_config_files_without_git_binary_is_empty(
