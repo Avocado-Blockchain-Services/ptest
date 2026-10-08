@@ -2760,8 +2760,9 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if with_policy and not parsed.apply_rules:
                 plan = agent_rules.preview(
                     root, agents=installed, test_policy=True)
-                print("preview: " + (", ".join(plan.actions)
-                                     or "already configured"))
+                sys.stdout.write("preview: " + (", ".join(plan.actions)
+                                                     or "already configured")
+                                         + "\n")
                 _print_policy_conflicts(root)
                 return 0
             if with_policy and parsed.apply_rules:
@@ -2769,14 +2770,15 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     root, agents=installed, test_policy=True)
                 changes = _test_policy_change_lines(plan.actions)
                 if not changes:
-                    print("test policy: already installed")
+                    sys.stdout.write("test policy: already installed\n")
                     _print_policy_conflicts(root)
                     return 0
-                print("will change: " + ", ".join(changes))
+                sys.stdout.write("will change: " + ", ".join(changes) + "\n")
                 result = agent_rules.apply(
                     root, agents=installed, test_policy=True)
-                print("applied: " + (", ".join(result.actions)
-                                     or "already configured"))
+                sys.stdout.write("applied: " + (", ".join(result.actions)
+                                                     or "already configured")
+                                         + "\n")
                 _print_policy_conflicts(root)
                 return 0
             result = (agent_rules.apply(root, agents=installed) if parsed.apply_rules
@@ -2820,11 +2822,12 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 policy_changes = _test_policy_change_lines(plan.actions)
                 if policy_changes:
                     verb = "would change" if parsed.dry_run else "will change"
-                    print(f"ptest: test policy: {verb}: "
-                          + ", ".join(policy_changes), file=sys.stderr)
+                    progress.emit(f"ptest: test policy: {verb}: "
+                                      + ", ".join(policy_changes),
+                                      quiet=parsed.quiet)
                 else:
-                    print("ptest: test policy: already installed",
-                          file=sys.stderr)
+                    progress.emit("ptest: test policy: already installed",
+                                  quiet=parsed.quiet)
             result = config_api.init_project(cwd, C.InitOptions(
                 runner=parsed.runner, dry_run=parsed.dry_run,
                 reveal_command=parsed.reveal_command,
@@ -2871,7 +2874,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 # Machine output stays byte-compatible: no facts, no footer.
                 sys.stdout.buffer.write(_document("init", payload))
                 for line in conflicts:
-                    print(line, file=sys.stderr)
+                    progress.emit(line, quiet=parsed.quiet)
             else:
                 facts = () if parsed.dry_run else _init_facts(cwd)
                 sys.stdout.write(_render_init_text(
@@ -3113,7 +3116,7 @@ def _print_policy_conflicts(root: Path) -> None:
     except Exception:
         return
     for line in init_render.conflict_lines(scan):
-        print(line)
+        sys.stdout.write(line + "\n")
 
 
 def _init_test_policy(parsed: ParsedArgs, *, agents: tuple[str, ...],
@@ -3129,6 +3132,11 @@ def _init_test_policy(parsed: ParsedArgs, *, agents: tuple[str, ...],
         return False
     if not _interactive_review():
         return False
+    if not parsed.agents_explicit:
+        # A fully interactive init keeps its established question script
+        # (agents, then review): the policy offer follows an explicit
+        # --agents declaration, so existing answer sequences keep working.
+        return False
     if agent_rules.test_policy_installed(root):
         return False
     try:
@@ -3138,11 +3146,10 @@ def _init_test_policy(parsed: ParsedArgs, *, agents: tuple[str, ...],
     changes = _test_policy_change_lines(plan.actions)
     if not changes:
         return False
-    print("Also install the stricter test policy? It changes:",
-          file=sys.stderr)
+    progress.emit("Also install the stricter test policy? It changes:")
     for line in changes:
-        print(f"  {line}", file=sys.stderr)
-    print("[y/N]:", file=sys.stderr)
+        progress.emit(f"  {line}")
+    progress.emit("[y/N]:")
     try:
         answer = input().strip().lower()
     except EOFError:

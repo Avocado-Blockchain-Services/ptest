@@ -482,6 +482,29 @@ def test_agents_none_never_prompts_for_policy(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / POLICY_REL).exists()
 
 
+def test_fully_interactive_init_never_prompts_for_policy(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _tty(monkeypatch)
+    answers = iter(("all",))
+    inputs = []
+
+    def strict_input(*args, **kwargs):
+        answer = next(answers)
+        inputs.append(answer)
+        return answer
+
+    monkeypatch.setattr("builtins.input", strict_input)
+
+    assert main(("init", "--runner", "pytest",
+                 "--no-smoke", "--no-doctor")) == 0
+    captured = capsys.readouterr()
+
+    assert "stricter test policy" not in captured.err
+    assert inputs == ["all"]
+    assert not (tmp_path / POLICY_REL).exists()
+
+
 def test_recorded_policy_never_prompts_again(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     agent_rules.apply(tmp_path, agents=("claude",), test_policy=True)
