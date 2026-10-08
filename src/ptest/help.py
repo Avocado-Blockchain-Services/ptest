@@ -93,10 +93,10 @@ Notes:
   (docs/ptest-test-policy.md plus one reference line in the managed
   instruction block); --no-test-policy only suppresses the prompt and
   never removes an installed policy. Without either flag, a TTY init
-  asks once (default No) after the agents question when the agent set
-  came from --agents; a fully interactive run, --json, --dry-run,
-  CI, pipes, and --agents none never prompt. The two flags cannot be
-  combined or repeated.
+  asks once (default No), right after the agents question or when
+  --agents is given. It never prompts with --json, --dry-run, CI, a
+  pipe, --agents none, either flag, or when a policy is already
+  recorded. The two flags cannot be combined or repeated.
   In a linked git worktree whose main checkout holds a `.ptest.toml`
   at the same path, init refuses with `config-uncommitted`:
   worktrees only receive committed files, so the fix is to commit the

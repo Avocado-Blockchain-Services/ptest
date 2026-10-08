@@ -551,3 +551,14 @@ def test_doctor_help_carries_full_legal_disclosure_and_parallel_tier(
         "coverage (--cov) runs in parallel under xdist",
     ):
         assert marker.lower() in lowered, marker
+
+
+def test_init_help_describes_the_test_policy_prompt_accurately(
+        tmp_path, monkeypatch, capsys):
+    _no_execution(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert main(("help", "init")) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "a fully interactive run" not in out
+    assert "right after the agents question" in out
+    assert "already recorded" in out
