@@ -188,7 +188,7 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
     assert "consent-required" in raw_consent_output
     assert observed["cancel"]["status"] == "blocked-unverified"
     assert observed["cancel"]["exit_code"] is None
-    assert evidence["candidate_identity"]["version"] == "0.5.1"
+    assert evidence["candidate_identity"]["version"] == "0.5.2"
     assert evidence["promotable"] is False
 
 

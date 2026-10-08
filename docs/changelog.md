@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.2
+
+- ptest's own repository: full runs record a baseline again. Gitignored
+  build and tool outputs (`graphify-out`, the egg-info, `build`, `dist`,
+  the terraform lock and the Claude scheduler lock) are declared in
+  `[selection] non_input_outputs`, and the config carries the
+  `ptest doctor --fix` selection policy (closed inputs over `src/ptest`
+  and `tests`, full triggers for `pyproject.toml`, `uv.lock` and
+  `tests/ng/conftest.py`).
+- Test fix: the group CPU-sample probe runs in its own process group, so
+  other workers starting processes in pytest's group no longer make the
+  member count flaky.
+
 ## 0.5.1
 
 - A folder or file run that passes no longer marks the whole project as
