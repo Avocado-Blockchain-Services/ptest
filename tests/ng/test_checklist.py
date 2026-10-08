@@ -219,3 +219,17 @@ def test_score_bounds_derive_from_checklist_length():
     child = contracts_api._aa_child_schema()
     assert child["properties"]["rows"]["minItems"] == count
     assert child["properties"]["rows"]["maxItems"] == count
+
+
+def test_tests_recipe_is_a_guide_recipe_without_a_catalog_row():
+    from ptest import checklist
+
+    assert "tests" in checklist.recipe_names()
+    assert checklist.GUIDE_RECIPES == ("tests",)
+    referenced = {entry.recipe for entry in CATALOG if entry.recipe}
+    assert "tests" not in referenced
+    assert all(name in checklist.recipe_names() for name in checklist.GUIDE_RECIPES)
+    # every pre-existing recipe keeps its place ahead of the new one
+    assert checklist.recipe_names()[:6] == (
+        "factories", "databases", "cache", "files-ports", "processes",
+        "time-network")

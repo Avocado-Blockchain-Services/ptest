@@ -1488,6 +1488,8 @@ def render_guide() -> str:
                       f"Verification: {entry.verification}"))
         if entry.recipe is not None:
             lines.extend(("Example:", checklist_api.load_recipe(entry.recipe).rstrip()))
+    for name in checklist_api.GUIDE_RECIPES:
+        lines.extend(("", checklist_api.load_recipe(name).rstrip()))
     return "\n".join(lines) + "\n"
 
 

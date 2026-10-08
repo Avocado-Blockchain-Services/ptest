@@ -605,6 +605,28 @@ def test_doctor_human_output_stays_bounded_with_catalog_and_table():
     assert len(text.encode("utf-8")) <= C.MAX_PROMPT_BYTES
 
 
+def test_render_guide_appends_guide_recipes_after_the_catalog():
+    from ptest import checklist, render
+
+    text = render.render_guide()
+    assert text.count("# Writing tests\n") == 1
+    assert text.index("Doctor assessment checklist") < text.index("TIMING-001")
+    assert text.index("TIMING-001") < text.index("# Writing tests\n")
+    assert text.endswith(checklist.load_recipe("tests").rstrip() + "\n")
+    for entry in checklist.CATALOG:
+        assert f"## {entry.id}" in text
+
+
+def test_render_guide_with_no_guide_recipes_matches_the_catalog_only_output(monkeypatch):
+    from ptest import checklist, render
+
+    with_recipe = render.render_guide()
+    monkeypatch.setattr(checklist, "GUIDE_RECIPES", ())
+    without = render.render_guide()
+    assert "# Writing tests" not in without
+    assert with_recipe.startswith(without.rstrip("\n"))
+
+
 def test_missing_bundled_guide_fails_loudly_without_substitute(tmp_path, monkeypatch):
     from ptest import render
 

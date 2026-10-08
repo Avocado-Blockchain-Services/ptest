@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+- Agents get clearer guidance on writing tests. The installed guide has a new
+  "Writing tests" section: name the oracle for every test, start a bug fix
+  with a failing test that reproduces it, use one table-driven hostile-input
+  test where input crosses a trust boundary, and never add tests only to
+  raise coverage. The existing coverage gate stays as it is. `ptest guide
+  tests` prints the full checklist, and `ptest guide` now includes it.
+  Update the installed copy with `ptest rules --apply`.
+- Opt-in stricter test policy. `ptest init --test-policy` or
+  `ptest rules --apply --test-policy` adds `docs/ptest-test-policy.md` and
+  one reference line to the managed instruction block; `--no-test-policy`
+  skips the question. A terminal init asks once (default No), never in CI, a
+  pipe, `--json` or `--dry-run`. The files that will change are printed
+  first, lines in your instruction files that name a coverage percentage are
+  listed and never edited, and `ptest uninstall` removes an unedited policy
+  file.
+- `ptest doctor` prints a static, read-only Test policy section: the coverage
+  gate you already have, branch or line-only counting, omit patterns,
+  `pragma: no cover` counts and instruction lines that name a coverage
+  percentage. It sends nothing, writes nothing, and changes no score or JSON
+  field; Vitest thresholds are reported as not inspected.
+- Agent eval: two new scenarios (a bug report that must start with a failing
+  test, and a coverage gate that fails by a little), 16 in all, and a scorer
+  rule that checks the order of steps in an answer.
+
 ## 0.5.2
 
 - ptest's own repository: full runs record a baseline again. Gitignored

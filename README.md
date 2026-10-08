@@ -435,8 +435,44 @@ always, adds the ptest reference to instruction files that lack it.
 never instruction files. Neither installs a new skill or touches one you
 edited.
 
+### Writing tests: guidance and the optional stricter policy
+
+The installed guide has a short "Writing tests" section for every agent:
+each test names its oracle (a spec clause, a bug report, deliberately pinned
+behavior, or an invariant), a bug fix starts with a failing test that
+reproduces the bug, input that crosses a trust boundary gets one table-driven
+hostile-input test, and tests are never added only to raise coverage. The
+project's existing coverage gate stays as it is: a floor, not a target.
+`ptest guide tests` prints the full checklist (anti-patterns, the test
+budget, pytest and vitest examples); plain `ptest guide` includes it too.
+
+A stricter stance is opt-in. It adds `docs/ptest-test-policy.md` and one
+reference line to the managed block in `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`:
+
+```sh
+ptest init --test-policy                # install it with init, no prompt
+ptest init --no-test-policy             # skip the question; never removes a policy
+ptest rules --test-policy               # preview only, writes nothing
+ptest rules --apply --test-policy       # install it in an initialized repository
+```
+
+`ptest init --agents ...` on a terminal asks once, "Also install the stricter
+test policy?" (default No) and lists the exact files it would change; only
+`y` or `yes` accepts. It never asks, and never installs, in CI, with
+a pipe, with `--json`, with `--dry-run`, or with `--agents none`. The two flags
+cannot be combined. `--test-policy` and `rules --apply --test-policy` print
+which files will change before writing anything, and list any line in your
+instruction files that names a coverage percentage; ptest never edits those.
+
+Once installed, the policy stays: `rules --apply` keeps it current, and
+`ptest init` without a prompt rewrites an older unedited policy file in place
+but never touches your instruction files. A policy file you edited is never
+overwritten (ptest stops with an error rather than replace it). To opt out,
+run `ptest uninstall`, which removes an unedited policy file and the reference
+line, or edit the block and delete the file by hand.
+
 `scripts/agent_eval.py` checks that models actually follow the guidance: it
-builds a scratch monorepo with the installed guidance, asks 14 scenarios
+builds a scratch monorepo with the installed guidance, asks 16 scenarios
 (`evals/agent-usage/scenarios.toml`) and scores the answers.
 
 ```sh
@@ -464,6 +500,17 @@ CLI account (default models Codex `gpt-6-sol`, Claude `opus`; override with
 bounded verification, and covers only the cited source. Findings are
 hypotheses to verify, not a certificate. `ptest help doctor` has the details.
 
+After the grid, doctor prints a **Test policy** section. It is static and
+read-only: it sends nothing to any provider, writes no config, and changes no
+checklist row, readiness, score or JSON field. It reports, per project, the
+coverage gate you already have (coverage.py and pytest-cov settings, as
+written), whether branch coverage is on, omit patterns, how many lines are
+marked `pragma: no cover`, and instruction-file lines that name a coverage
+percentage, with plain-words risks and a copyable suggestion. Vitest and Vite
+coverage thresholds are reported as not inspected, because those configs are
+code and doctor never runs or opens them. Doctor reports no measured coverage
+rate. The same section is added to `recommendations.md` after an online run.
+
 ---
 
 ## State, privacy, uninstall
@@ -473,7 +520,8 @@ hypotheses to verify, not a certificate. `ptest help doctor` has the details.
   `PTEST_STATE_DIR` outside any repository; use the same value everywhere you
   want shared limits.
 - `ptest uninstall` removes what ptest set up in a repository (`.ptest.toml`
-  files, managed guidance, this checkout's state). Files you edited are kept.
+  files, managed guidance including an unedited test policy file, this
+  checkout's state). Files you edited are kept.
   It prints the plan first; `--dry-run` changes nothing.
 - `ptest uninstall --self` removes the installation.
 
