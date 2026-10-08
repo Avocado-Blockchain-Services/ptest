@@ -108,7 +108,8 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     statuses = doctor_qualification
-    answers = iter(("codex", "no", "codex", "no"))
+    # agents, test-policy (declined), review; twice
+    answers = iter(("codex", "n", "no", "codex", "n", "no"))
     inputs = []
 
     def input_answer():
@@ -144,7 +145,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
         r"ptest skill for codex", existing.out)
     assert "Optimization review is disabled" in existing.err
     assert config.read_bytes() == original_config
-    assert inputs == ["codex", "no", "codex", "no"]
+    assert inputs == ["codex", "n", "no", "codex", "n", "no"]
     assert launches == []
 
     qualifications_before_no_doctor = len(statuses)
@@ -159,7 +160,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     assert "Run this review once?" not in no_doctor.err
     assert len(statuses) == qualifications_before_no_doctor
     assert guidance_prompts == ["asked"]
-    assert inputs == ["codex", "no", "codex", "no"]
+    assert inputs == ["codex", "n", "no", "codex", "n", "no"]
     assert launches == []
     assert not (root / "recommendations.md").exists()
 
