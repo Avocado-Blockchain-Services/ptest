@@ -189,9 +189,25 @@ def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
     assert "ptest --full" in E.commands((result,))
 
 
-def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
-    write_file(tmp_path / "tests" / "conftest.py",
-           "def pytest_runtest_protocol(item, nextitem):\n    return None\n")
+_CONTROLLING_PROTOCOLS = {
+    "returns-a-value": (
+        "def pytest_runtest_protocol(item, nextitem):\n    return True\n"),
+    "wrapper": (
+        "import pytest\n\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_runtest_protocol(item, nextitem):\n"
+        "    return (yield)\n"),
+    "writes-the-item": (
+        "def pytest_runtest_protocol(item, nextitem):\n"
+        "    item.add_marker('x')\n    item.keywords['y'] = 1\n"),
+    "no-parameters": "def pytest_runtest_protocol():\n    return None\n",
+}
+
+
+@pytest.mark.parametrize("source", _CONTROLLING_PROTOCOLS.values(),
+                         ids=_CONTROLLING_PROTOCOLS.keys())
+def test_scoped_refused_conftest_hook_is_not_executable(tmp_path, source):
+    write_file(tmp_path / "tests" / "conftest.py", source)
 
     result = E.check_config(_config(tmp_path), project=".")
 
@@ -217,6 +233,76 @@ def test_reporting_hook_conftest_makes_full_unavailable(tmp_path, hook):
         "parallel: no — xdist is not enabled in your pytest config",
         "full suite: not available — tests/conftest.py defines %s" % hook)
     assert result.full is False
+
+
+# fullon2 shape: per-test timing hooks that only observe. The bridge admits
+# them (_ITEM_OBSERVER_HOOKS), so doctor must not call the project unrunnable.
+_OBSERVER_CONFTEST = """\
+import time
+
+import pytest
+
+_test_info: dict[str, dict] = {}
+_slow_tests: list[tuple] = []
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    worker_id = getattr(item.config, "workerinput", {}).get("workerid", "main")
+    _test_info[item.nodeid] = {"start_time": time.time(), "worker": worker_id}
+    return None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_logreport(report):
+    if report.when == "call" and report.nodeid in _test_info:
+        duration = time.time() - _test_info[report.nodeid]["start_time"]
+        if duration > 5.0:
+            _slow_tests.append((report.nodeid, duration))
+        del _test_info[report.nodeid]
+"""
+
+
+def test_observation_only_conftest_hooks_stay_runnable_with_full(tmp_path):
+    write_file(tmp_path / "tests" / "conftest.py", _OBSERVER_CONFTEST)
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.reason is None
+    assert result.full is True
+    assert result.full_blocked is None
+
+
+def test_observer_hook_mutating_the_report_stays_refused_for_full(tmp_path):
+    write_file(tmp_path / "tests" / "conftest.py",
+               "def pytest_runtest_logreport(report):\n"
+               "    report.outcome = 'passed'\n")
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.full is False
+    assert result.full_blocked == (
+        "tests/conftest.py defines pytest_runtest_logreport")
+
+
+def test_observer_twin_matches_the_bridge_admission():
+    """Doctor's static twin and the bridge's runtime check agree."""
+    import ast
+
+    from ptest.runtime import pytest_bridge as B
+
+    sources = dict(_CONTROLLING_PROTOCOLS, observer=_OBSERVER_CONFTEST)
+    verdicts = {}
+    for name, source in sources.items():
+        tree = ast.parse(source)
+        defs = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "pytest_runtest_protocol"]
+        verdicts[name] = B.observer_hook_definition(defs[0])
+    assert verdicts == {"returns-a-value": False, "wrapper": False,
+                        "writes-the-item": False, "no-parameters": False,
+                        "observer": True}
 
 
 def test_dot_test_root_is_caveat_without_full(tmp_path):

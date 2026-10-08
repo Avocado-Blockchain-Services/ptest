@@ -7,6 +7,7 @@ Twins (each fails before the feature, passes after):
 - rebase (recorded commit not an ancestor) -> fallback to the branch base
 - --base overrides the green record
 - monorepo children are tracked independently
+- a folder or file run that passes leaves changes outside it untested
 """
 from __future__ import annotations
 
@@ -256,6 +257,104 @@ def test_monorepo_mixed_green_nothing_changed_makes_no_reference_claim(
     assert len(calls) == 1
     assert "no changes — nothing to test" in err
     assert "no green run yet" not in err
+
+
+# --- narrowed runs verify only what they ran ---------------------------------
+# fullon2 finding: a green `ptest server/tests/fullon_log/` moved the whole
+# project's point, so an untested fullon_exchange conftest edit then read as
+# "no changes under server/tests/fullon_exchange".
+
+def _two_folder_project(root: Path, monkeypatch) -> None:
+    _pytest_project(root, monkeypatch)
+    for name in ("alpha", "beta"):
+        (root / "src" / f"{name}.py").write_text(
+            "VALUE = 1\n", encoding="utf-8")
+        (root / "tests" / name).mkdir()
+        (root / "tests" / name / f"test_{name}.py").write_text(
+            f"from src.{name} import VALUE\n\n"
+            f"def test_{name}():\n    assert VALUE == 1\n", encoding="utf-8")
+    git_commit_all(root, message="add project")
+    for name in ("alpha", "beta"):
+        (root / "src" / f"{name}.py").write_text(
+            "VALUE = 2\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("narrowed", [
+    ("tests/alpha/",),
+    ("--full", "tests/alpha"),
+    ("tests/alpha/test_alpha.py",),
+])
+def test_narrowed_green_keeps_changes_outside_it_untested(
+        tmp_path, monkeypatch, capsys, narrowed):
+    init_git_repo(tmp_path, branch="main", files={})
+    _two_folder_project(tmp_path, monkeypatch)
+    calls = _capture(monkeypatch, [])
+
+    assert main(narrowed) == 0
+    assert len(calls) == 1
+    assert "tests/beta/test_beta.py" not in calls[0].argv
+    capsys.readouterr()
+
+    assert main(()) == 0
+    assert len(calls) == 2
+    assert "tests/beta/test_beta.py" in calls[1].argv
+    assert "no changes" not in capsys.readouterr().err
+
+
+def test_narrowed_green_then_bare_green_moves_the_point(
+        tmp_path, monkeypatch, capsys):
+    init_git_repo(tmp_path, branch="main", files={})
+    _two_folder_project(tmp_path, monkeypatch)
+    calls = _capture(monkeypatch, [])
+
+    assert main(("tests/alpha/",)) == 0
+    assert main(()) == 0
+    assert len(calls) == 2
+    capsys.readouterr()
+
+    assert main(()) == 0
+    assert len(calls) == 2
+    assert "no changes since last green run" in capsys.readouterr().err
+
+
+def test_monorepo_folder_green_keeps_child_changes_outside_it(
+        tmp_path, monkeypatch, capsys, monorepo):
+    monorepo({"api": {"kind": "command", "launcher": ("true",)},
+              "web": {"kind": "command", "launcher": ("true",)}},
+             parent=tmp_path, name=None)
+    (tmp_path / "api" / "sub").mkdir()
+    (tmp_path / "api" / "sub" / "keep.txt").write_text("k\n", encoding="utf-8")
+    init_git_repo(tmp_path, message="base")
+    monkeypatch.chdir(tmp_path)
+    calls = _capture(monkeypatch, [])
+
+    (tmp_path / "api" / "service.py").write_text("A = 1\n", encoding="utf-8")
+    assert main(("api/sub/",)) == 0
+    assert len(calls) == 1
+    capsys.readouterr()
+
+    assert main(()) == 0
+    assert len(calls) == 2
+    assert "api · no changes" not in capsys.readouterr().err
+
+
+def test_whole_child_folder_green_moves_the_child_point(
+        tmp_path, monkeypatch, capsys, monorepo):
+    monorepo({"api": {"kind": "command", "launcher": ("true",)},
+              "web": {"kind": "command", "launcher": ("true",)}},
+             parent=tmp_path, name=None)
+    init_git_repo(tmp_path, message="base")
+    monkeypatch.chdir(tmp_path)
+    calls = _capture(monkeypatch, [])
+
+    (tmp_path / "api" / "service.py").write_text("A = 1\n", encoding="utf-8")
+    assert main(("api",)) == 0
+    assert len(calls) == 1
+    capsys.readouterr()
+
+    assert main(()) == 0
+    assert len(calls) == 1
+    assert "no changes" in capsys.readouterr().err
 
 
 # --- cache unit contracts -----------------------------------------------------

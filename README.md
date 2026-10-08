@@ -222,7 +222,10 @@ load. The agent guide tells coding agents never to add them on their own.
 
 1. **What changed.** Changes since the last green run of that project
    (its commit plus any uncommitted work); before the first green run,
-   changes since the merge-base with your default branch.
+   changes since the merge-base with your default branch. Only a run that
+   covers the whole project counts as green here (bare `ptest`,
+   `--changed`, `--full`); a passing folder or file run leaves changes
+   outside it to be tested.
 2. **Noise is ignored.** Docs, build output (`build/`, `dist/`,
    `node_modules/`, caches) and non-code files outside source/test areas do
    not trigger tests.

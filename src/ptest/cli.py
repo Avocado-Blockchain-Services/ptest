@@ -3323,12 +3323,16 @@ def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
 
 
 def _note_run(domain: C.DomainPaths, root: Path, project: str,
-              request: C.RunRequest, result) -> None:
+              request: C.RunRequest, result, *, covers_project: bool) -> None:
     """Record the green point on pass, failed test files on failure.
 
-    Cache only: a bare/--changed/scoped/full pass moves the project's
-    verified point, a failure merges its test files into the last-failed
-    set.  Never raises and never affects the run outcome.
+    Cache only: a pass moves the project's verified point only when the
+    run covered every change in the project (bare/--changed, --full, or a
+    folder that is the whole project). A folder or file run verifies only
+    what it ran, so its pass leaves the point where it was; recording it
+    would mark edits outside the folder as tested. A failure merges its
+    test files into the last-failed set.  Never raises and never affects
+    the run outcome.
     """
     try:
         if request.shadow or request.probe is not None:
@@ -3341,6 +3345,8 @@ def _note_run(domain: C.DomainPaths, root: Path, project: str,
             return
         status = getattr(result, "status", None)
         if status is C.Status.PASSED:
+            if not covers_project:
+                return
             lastgreen.record_pass(domain.root, os.fspath(top), project, top)
         elif status is C.Status.FAILED:
             argv = getattr(request, "argv", ()) or ()
@@ -3453,7 +3459,8 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 no_green_run=parsed.base is None), quiet=parsed.quiet)
         return 0
     result = operations.execute(domain, resolution.config, request)
-    _note_run(domain, resolution.root, "", request, result)
+    _note_run(domain, resolution.root, "", request, result,
+              covers_project=True)
     _emit_reasons(result)
     return result.exit_code
 
@@ -3478,6 +3485,7 @@ def _all_under_note(typeds: tuple[str, ...]) -> str:
 def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                          domain: C.DomainPaths, split) -> int:
     """Changed-mode run for folder scopes (plus always-run files)."""
+    whole = all(not item.local for item in split.folders)
     from . import monorepo
 
     target = split.target
@@ -3502,7 +3510,7 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
         result = operations.execute(domain, target.config, request)
         _note_run(domain, resolution.root, target.declaration, request,
-                  result)
+                  result, covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
     if impact.kind == "full":
@@ -3522,7 +3530,7 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                                           next_hint=True, reference=reference)
         result = operations.execute(domain, target.config, request)
         _note_run(domain, resolution.root, target.declaration, request,
-                  result)
+                  result, covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
     if impact.kind == "selected":
@@ -3547,7 +3555,8 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
             tuple(getattr(impact, "deselect", ()) or ()),
             tuple(selected), tuple(always)))
     result = operations.execute(domain, target.config, request)
-    _note_run(domain, resolution.root, target.declaration, request, result)
+    _note_run(domain, resolution.root, target.declaration, request, result,
+              covers_project=whole)
     _emit_reasons(result)
     return result.exit_code
 
@@ -3556,6 +3565,7 @@ def _run_full_folder_monorepo(parsed: ParsedArgs,
                               resolution: C.ConfigResolution,
                               domain: C.DomainPaths, split) -> int:
     """``ptest --full <folder>``: every test under the folders, no gate."""
+    whole = all(not item.local for item in split.folders)
     from . import monorepo
 
     argv: list[str] = []
@@ -3570,7 +3580,7 @@ def _run_full_folder_monorepo(parsed: ParsedArgs,
         next_hint=True)
     result = operations.execute(domain, split.target.config, request)
     _note_run(domain, resolution.root, split.target.declaration, request,
-              result)
+              result, covers_project=whole)
     _emit_reasons(result)
     return result.exit_code
 
@@ -3579,6 +3589,7 @@ def _run_folder_standalone(parsed: ParsedArgs,
                            resolution: C.ConfigResolution,
                            domain: C.DomainPaths, files, folders) -> int:
     """Changed-mode run for standalone folder scopes (plus files)."""
+    whole = all(not local for _, local in folders)
     assert resolution.config is not None
     impact_api, top, base, repo_changed = _impact_base_and_changed(
         parsed, resolution.root)
@@ -3598,7 +3609,8 @@ def _run_folder_standalone(parsed: ParsedArgs,
                 f" → vitest --changed {render.terminal_text(base.label)}")
         request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
         result = operations.execute(domain, resolution.config, request)
-        _note_run(domain, resolution.root, "", request, result)
+        _note_run(domain, resolution.root, "", request, result,
+                  covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
     if impact.kind == "full":
@@ -3612,7 +3624,8 @@ def _run_folder_standalone(parsed: ParsedArgs,
             request = _impact_run_request(parsed, impact, base,
                                           next_hint=True, reference=reference)
         result = operations.execute(domain, resolution.config, request)
-        _note_run(domain, resolution.root, "", request, result)
+        _note_run(domain, resolution.root, "", request, result,
+                  covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
     if impact.kind == "selected":
@@ -3637,7 +3650,8 @@ def _run_folder_standalone(parsed: ParsedArgs,
             tuple(getattr(impact, "deselect", ()) or ()),
             tuple(selected), tuple(always)))
     result = operations.execute(domain, resolution.config, request)
-    _note_run(domain, resolution.root, "", request, result)
+    _note_run(domain, resolution.root, "", request, result,
+              covers_project=whole)
     _emit_reasons(result)
     return result.exit_code
 
@@ -3646,6 +3660,7 @@ def _run_full_folder_standalone(parsed: ParsedArgs,
                                 resolution: C.ConfigResolution,
                                 domain: C.DomainPaths, folders) -> int:
     """``ptest --full <folder>`` outside a monorepo: everything there."""
+    whole = all(not local for _, local in folders)
     assert resolution.config is not None
     argv = tuple(local for _, local in folders)
     typeds = tuple(typed for typed, _ in folders)
@@ -3653,7 +3668,8 @@ def _run_full_folder_standalone(parsed: ParsedArgs,
                                   note=_all_under_note(typeds),
                                   next_hint=True)
     result = operations.execute(domain, resolution.config, request)
-    _note_run(domain, resolution.root, "", request, result)
+    _note_run(domain, resolution.root, "", request, result,
+              covers_project=whole)
     _emit_reasons(result)
     return result.exit_code
 
@@ -3810,7 +3826,7 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
             narrowed = True
         result = operations.execute(domain, child.config, request)
         _note_run(domain, resolution.root, child.declaration, request,
-                  result)
+                  result, covers_project=True)
         _emit_reasons(result)
         if getattr(result, "signal", None) == signal.SIGINT:
             cancelled = True
@@ -3921,7 +3937,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # A skipped child ran nothing: it records no
                         # green point.
                         _note_run(domain, resolution.root,
-                                  child.declaration, request, result)
+                                  child.declaration, request, result,
+                                  covers_project=True)
                     _emit_reasons(result)
                     if getattr(result, "signal", None) == signal.SIGINT:
                         cancelled.append(True)
@@ -3983,7 +4000,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = operations.execute(
                 domain, split.target.config, scoped_request)
             _note_run(domain, resolution.root, split.target.declaration,
-                      scoped_request, result)
+                      scoped_request, result,
+                      covers_project=False)
             _emit_reasons(result)
             return result.exit_code
         if resolution.config is None:
@@ -4045,7 +4063,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             again=parsed.again,
         )
         result = operations.execute(domain, resolution.config, request)
-        _note_run(domain, resolution.root, "", request, result)
+        _note_run(domain, resolution.root, "", request, result,
+                  covers_project=(request.mode is C.Mode.FULL
+                                  and not request.argv))
         _emit_reasons(result)
         return result.exit_code
     except _UnknownCommand as problem:

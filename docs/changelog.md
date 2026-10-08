@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.1
+
+- A folder or file run that passes no longer marks the whole project as
+  tested. `ptest <folder>`, `ptest --full <folder>` and `ptest <file>` used
+  to move the project's last-green point, so an untested edit elsewhere in
+  the project read as "no changes" on the next bare `ptest` (seen in a
+  monorepo child: a green `server/tests/fullon_log/` hid an edit to the
+  `fullon_exchange` conftest). Only runs that cover every change in the
+  project move the point: bare `ptest`, `--changed`, `--full`, or a folder
+  that is the whole project. Failures from any run still join the
+  last-failed set.
+- `ptest doctor` no longer calls a project unrunnable for conftest
+  `pytest_runtest_protocol` / `pytest_runtest_logreport` /
+  `pytest_collectreport` hooks that only observe (time or log tests and
+  return nothing). The pytest bridge already admitted them; doctor now
+  applies the bridge's own scan to the source. Hooks that return a value,
+  wrap the call, or write to `item`/`report` stay refused.
+
 ## 0.5.0
 
 - Dependency-recorded test selection for pytest projects. Once a project

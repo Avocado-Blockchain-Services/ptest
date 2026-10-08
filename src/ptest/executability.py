@@ -5,12 +5,14 @@ code. Reads are bounded and never follow symlinks.
 """
 from __future__ import annotations
 
+import ast
 import configparser
 import os
 import re
 import shlex
 import stat
 import tomllib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from .review_context import (
 )
 from .runtime.pytest_bridge import (
     COVERAGE_SUPPORTED,
+    observer_hook_definition,
     XDIST_SUPPORTED,
     coverage_pair_supported,
     xdist_supported,
@@ -850,13 +853,39 @@ def _defined_hooks(root: Path, rel: str) -> list[str]:
     return hooks
 
 
+def _observer_hooks(root: Path, rel: str) -> frozenset[str]:
+    """Hooks the bridge admits as plain per-test observers in one conftest.
+
+    A name counts only when it has exactly one top-level definition and
+    that definition passes the bridge's own observer scan; anything that
+    cannot be read or parsed admits nothing.
+    """
+    raw = _read(root, rel)
+    if raw is None:
+        return frozenset()
+    try:
+        tree = ast.parse(raw.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError, ValueError, MemoryError):
+        return frozenset()
+    defs = Counter(node.name for node in tree.body
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    return frozenset(
+        node.name for node in tree.body
+        if defs.get(getattr(node, "name", None)) == 1
+        and observer_hook_definition(node))
+
+
 def _scan_conftest_hooks(root: Path, test_roots: tuple[str, ...]) -> list[tuple[str, str]]:
-    """(conftest path, hook) pairs in file order for refused hooks."""
+    """(conftest path, hook) pairs in file order for refused hooks.
+
+    Observation-only per-test hooks are left out: the bridge admits them.
+    """
     pairs: list[tuple[str, str]] = []
     for rel in _conftest_paths(root, test_roots):
-        for hook in _defined_hooks(root, rel):
-            if hook in _SCOPED_REFUSED_HOOKS or hook in _FULL_REFUSED_HOOKS:
-                pairs.append((rel, hook))
+        hooks = [hook for hook in _defined_hooks(root, rel)
+                 if hook in _SCOPED_REFUSED_HOOKS or hook in _FULL_REFUSED_HOOKS]
+        observers = _observer_hooks(root, rel) if hooks else frozenset()
+        pairs.extend((rel, hook) for hook in hooks if hook not in observers)
     return pairs
 
 

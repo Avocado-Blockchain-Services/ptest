@@ -1547,6 +1547,11 @@ def _returns_only_none(function: Any) -> bool:
         tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
     except (OSError, TypeError, SyntaxError, ValueError, MemoryError):
         return False
+    return _node_returns_only_none(tree)
+
+
+def _node_returns_only_none(tree: Any) -> bool:
+    """``_returns_only_none`` over an already parsed definition."""
     for node in ast.walk(tree):
         if isinstance(node, (ast.Yield, ast.YieldFrom, ast.Await)):
             return False
@@ -1585,6 +1590,11 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
             break
     if target is None:
         return False
+    return _node_observation_only(target, params)
+
+
+def _node_observation_only(target: Any, params: tuple[str, ...]) -> bool:
+    """``_is_observation_only`` over an already parsed hook definition."""
     for decorator in target.decorator_list:
         if _dotted_name(decorator).split(".")[-1:] != ["hookimpl"]:
             return False
@@ -1681,6 +1691,31 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
                         and _tainted_root(func.value, tainted):
                     return False
     return True
+
+
+def observer_hook_definition(node: Any) -> bool:
+    """Static twin of ``_item_observer`` for one conftest ``def``.
+
+    Doctor predicts runnability from source without importing the project,
+    so it applies the same scan to the parsed definition: an observer hook
+    name, no ``wrapper``/``hookwrapper`` hookimpl, at least one parameter,
+    observation-only body, and only ``None`` returns. Fail-closed like the
+    runtime check.
+    """
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+            or node.name not in _ITEM_OBSERVER_HOOKS:
+        return False
+    for decorator in node.decorator_list:
+        for keyword in getattr(decorator, "keywords", ()):
+            if keyword.arg in ("wrapper", "hookwrapper") and not (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False):
+                return False
+    arguments = node.args
+    params = tuple(arg.arg for arg in (*arguments.posonlyargs, *arguments.args,
+                                       *arguments.kwonlyargs))
+    return bool(params) and _node_observation_only(node, params) \
+        and _node_returns_only_none(node)
 
 
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
