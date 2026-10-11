@@ -29,6 +29,7 @@ from . import contracts as C
 from . import (config as config_api, executability, files, history, leases, monorepo, platform,
                progress, render, reports, scheduler, selection, source,
                stack_dumps)
+from .adapters import pytest as pytest_adapter
 from .adapters import vitest as vitest_adapter
 from . import verified
 from . import vitest_full
@@ -466,9 +467,31 @@ def _advanced_plan(config: C.Config, request: C.RunRequest,
     return selection.choose_plan(config, snapshot, history_view, request)
 
 
+def _coverage_config(config: C.Config, request: C.RunRequest) -> C.Config:
+    """``config`` with this run's coverage request applied (private copy).
+
+    ``--cov`` turns on [runner] coverage_args for one pytest run; a project
+    that declares none is left as configured (spec C10).
+    """
+    if (request.coverage and config.runner.kind is C.RunnerKind.PYTEST
+            and config.runner.coverage_args):
+        return replace(config, runner=replace(config.runner,
+                                              coverage_requested=True))
+    return config
+
+
+def _requested_coverage_proof(config: C.Config,
+                              request: C.RunRequest) -> str | None:
+    """The coverage proof a ``--cov`` request needs from a reused green."""
+    if not request.coverage:
+        return None
+    return pytest_adapter.coverage_proof(_coverage_config(config, request))
+
+
 def _effective_config(config: C.Config, request: C.RunRequest,
                       plan: C.Plan, grant: C.Grant) -> C.Config:
-    runner = replace(config.runner, workers=grant.slots)
+    runner = replace(_coverage_config(config, request).runner,
+                     workers=grant.slots)
     if plan.execution == "scoped":
         runner = replace(runner, args=runner.args + tuple(request.argv))
     if (request.verbose
@@ -1893,6 +1916,8 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 domain, checkout, run_id=grant.run_id, nonce=grant.nonce,
                 attempt_id=attempt_id, runner=config.runner.kind,
                 execution_mode=plan.execution, effective_profile="advanced",
+                coverage_expected=pytest_adapter.measures_coverage(
+                    config, plan.execution),
             )
             prepared = replace(
                 prepared, report_path=binding.path,
@@ -2347,6 +2372,16 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
     instead: the selected subset size, or the full-suite reason in words.
     """
     project = render.terminal_text(checkout.root.name)
+    measured = pytest_adapter.measures_coverage(
+        _coverage_config(config, request), plan.execution)
+    if request.coverage and not measured:
+        child = _monorepo_child(config)
+        progress.emit(progress.format_coverage_unavailable(
+            child=None if child is None else render.terminal_text(child.declaration),
+            runner=config.runner.kind.value,
+            config_path=(".ptest.toml" if child is None
+                         else render.terminal_text(f"{child.declaration}/.ptest.toml")),
+            color=sys.stderr.isatty()), quiet=request.quiet)
     if request.setup_only:
         progress.emit(progress.format_setup_run_start(
             project, tuple(config.runner.launcher),
@@ -2404,8 +2439,8 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
     scope = progress.fit_text(scope, fixed=fixed) if scope else scope
     progress.emit(progress.format_start(
         project=project, runner=runner, workers=workers,
-        scope=scope, full=full, color=sys.stderr.isatty()),
-        quiet=request.quiet)
+        scope=scope, full=full, color=sys.stderr.isatty(),
+        coverage=measured), quiet=request.quiet)
     if request.verbose:
         progress.emit(
             f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
@@ -2456,7 +2491,8 @@ def _baseline_note(*, plan: C.Plan, advanced: bool,
 
 
 def _emit_end(request: C.RunRequest, result: C.RunResult,
-              run_mono: float, *, baseline_note: str | None = None) -> None:
+              run_mono: float, *, baseline_note: str | None = None,
+              coverage_declared: bool = False) -> None:
     """One end line with ptest's own verdict, bridge counts, and duration."""
     if request.verbose:
         line = progress.format_timing(result.timings,
@@ -2474,8 +2510,13 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
               if getattr(result, "signal", None) == signal.SIGINT
               else result.status)
     next_hint = (progress.next_step(
-        status, request.mode is C.Mode.SCOPED)
+        status, request.mode is C.Mode.SCOPED, coverage=coverage_declared)
         if request.next_hint else None)
+    if (next_hint is None and coverage_declared and not request.coverage
+            and request.mode is C.Mode.FULL and status is C.Status.PASSED):
+        # A plain green gate on a project that measures coverage at handoff:
+        # the coverage gate is still owed (spec C11).
+        next_hint = progress.NEXT_FULL_COV
     hint = (next_hint is None
             and status in (C.Status.FAILED, C.Status.INCOMPLETE,
                            C.Status.NOT_RUN)
@@ -2620,6 +2661,14 @@ def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
             return None
     except Exception:
         return None
+    proof = _requested_coverage_proof(config, request)
+    if proof is not None and not any(
+            record.checkout_id == checkout.checkout_id
+            and record.input_digest == baseline.input_digest
+            and record.coverage == proof
+            for record in verified.find(domain, checkout.project_id)):
+        # --full --cov: this tree passed, but not with this coverage (C9).
+        return None
     if child is not None:
         # Last: it costs Git calls, and None (unreadable) means run.
         if monorepo.shared_dependency_changes(
@@ -2737,10 +2786,12 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
             current_runtime = vitest_full.runtime_identity(config)
             if current_runtime is None:
                 return None
+        proof = _requested_coverage_proof(config, request)
         records = [record for record in verified.find(domain, checkout.project_id)
                    if (native_vitest or record.checkout_id != checkout.checkout_id)
                    and record.scope == scope and record.policy_digest == policy
-                   and (not native_vitest or record.runtime_identity == current_runtime)]
+                   and (not native_vitest or record.runtime_identity == current_runtime)
+                   and (proof is None or record.coverage == proof)]
         if not records:
             return None
         first_identity = current_runtime if native_vitest else records[0].runtime_identity
@@ -2986,18 +3037,21 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
         sequence = history.next_sequence(domain, checkout)
     except BaseException:
         sequence = 0
+    coverage = pytest_adapter.coverage_proof(_coverage_config(config, request))
     lease = {"version": 1, "digest": digest, "run_id": run_id,
              "pid": os.getpid(), "started_at": _iso_now(),
-             "sequence": sequence}
+             "sequence": sequence, "coverage": coverage}
     if history.claim_full_lease(domain, checkout, lease):
         return ("run", None, True)
     try:
         live = history.read_full_lease(domain, checkout)
     except BaseException:
         live = None
-    if live is None or live.get("digest") != digest:
-        # Different inputs (or an unreadable lease): normal scheduler
-        # queueing, without holding a lease for another fingerprint.
+    if (live is None or live.get("digest") != digest
+            or live.get("coverage") != coverage):
+        # Different inputs or coverage mode (or an unreadable lease):
+        # normal scheduler queueing, without holding a lease for another
+        # fingerprint. A --cov run never joins a plain one, nor the reverse.
         return ("run", None, False)
     if not _pid_alive(live["pid"]):
         history.release_full_lease(domain, checkout, live["run_id"])
@@ -3186,12 +3240,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
     # Scoped caller arguments join the runner args before admission (the
     # adapter binds them into the same native argv), so the tier sees the
     # same effective args the adapter will: a caller -n 0 serializes.
-    tier_config = config
+    # A --cov request joins too: its coverage options decide whether the
+    # pytest-cov pair must qualify for the parallel tier.
+    tier_config = _coverage_config(config, request)
     if plan.execution == "scoped" and request.argv:
         tier_config = replace(
-            config, runner=replace(
-                config.runner,
-                args=tuple(config.runner.args) + tuple(request.argv)))
+            tier_config, runner=replace(
+                tier_config.runner,
+                args=tuple(tier_config.runner.args) + tuple(request.argv)))
     if (request.verbose
             and config.runner.kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST)):
         # The forwarded -v joins the same effective args the adapter binds.
@@ -3274,7 +3330,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         _emit_end(request, result, run_mono,
                   baseline_note=_baseline_note(
                       plan=plan, advanced=advanced, result=result,
-                      color=sys.stderr.isatty()))
+                      color=sys.stderr.isatty()),
+                  coverage_declared=bool(config.runner.coverage_args))
         return result
 
     signals = _Signals()
@@ -3484,6 +3541,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     execution_mode=plan.execution,
                     effective_profile=(C.ExecutionTier.ADVANCED.value
                                        if advanced else C.ExecutionTier.BASIC_SERIAL.value),
+                    coverage_expected=pytest_adapter.measures_coverage(
+                        effective, plan.execution),
                 )
             except BaseException:
                 scheduler.cancel_pending(domain, ticket, owner)
@@ -3551,7 +3610,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     limitations=gate_snapshot.limitations)
             if plan.execution == "full" and (advanced or vitest_candidate):
                 verification_token = verified.begin_full(
-                    domain, checkout.project_id, gate_snapshot.digest)
+                    domain, checkout.project_id, gate_snapshot.digest,
+                    coverage=pytest_adapter.coverage_proof(effective))
             if (native_runner and plan.execution == "full"
                     and (input_before.digest is None
                          or gate_snapshot.digest is None)):

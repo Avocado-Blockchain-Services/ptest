@@ -1782,6 +1782,16 @@ def _plugin_disable_hint(module: str) -> str:
     return ""
 
 
+def _coverage_family(module: str) -> bool:
+    """True for pytest-cov's own modules (plugin, engine, embed)."""
+    return module == "pytest_cov" or module.startswith("pytest_cov.")
+
+
+def _coverage_option(name: str) -> bool:
+    """True for pytest-cov's effective options (``cov_*``, ``no_cov*``)."""
+    return name.startswith("cov_") or name == "cov" or name.startswith("no_cov")
+
+
 def _coverage_plugin(loaded: Any) -> Any | None:
     """The registered pytest-cov plugin, or None when absent.
 
@@ -3211,6 +3221,11 @@ class AdvancedPlugin(OwnedPlugin):
                 plugin_type = type(plugin)
                 stable_module = (f"{plugin_type.__module__}."
                                  f"{plugin_type.__qualname__}")
+            if _coverage_family(stable_module):
+                # Coverage on request: whether pytest-cov measured this run
+                # must not change the runtime identity that lets a baseline
+                # authorise a later selected run (spec C7).
+                continue
             plugin_facts.append((stable_name, stable_module,
                                  str(getattr(plugin, "__version__", ""))))
         self._plugin_facts = tuple(sorted(plugin_facts))
@@ -3225,6 +3240,8 @@ class AdvancedPlugin(OwnedPlugin):
                     if implementation.plugin is self:
                         continue
                     module = str(getattr(implementation.function, "__module__", ""))
+                    if _coverage_family(module):
+                        continue
                     hooks.append((hook_name, module,
                                   str(getattr(implementation.function, "__name__", ""))))
         self._hook_facts = tuple(sorted(set(hooks)))
@@ -3239,6 +3256,7 @@ class AdvancedPlugin(OwnedPlugin):
         self._effective_options = {
             str(key): repr(value) for key, value in vars(option).items()
             if key not in dynamic and key not in identity_exempt
+            and not _coverage_option(str(key))
         } if option is not None else {}
 
     def finalize_evidence(self) -> None:
@@ -3731,7 +3749,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                 binding is None or binding[1].get("effective_profile") != "advanced"):
             _fail("advanced pytest profile requires an authenticated report binding",
                   "unsupported-capability")
-        if profile == "advanced":
+        if profile == "advanced" and os.environ.get("PTEST_PYTEST_COVERAGE") == "1":
+            # Coverage is on request (0.6): the pytest-cov/coverage pair is
+            # required only when ptest's own argv turns coverage on.
             _coverage_tuple()
         if workers >= 2:
             # Parallel pre-flight, before pytest.main: qualify the xdist

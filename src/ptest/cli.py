@@ -42,7 +42,7 @@ _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
 _EXECUTION_BOOL = frozenset({"--changed", "--full", "--again", "--no-setup", "--shadow",
-                             "-v", "--verbose", "-q", "--quiet"})
+                             "--cov", "-v", "--verbose", "-q", "--quiet"})
 _REVIEW_TOTAL_TIMEOUT_S = 1800
 _REVIEW_CONFIG_MAX_BYTES = 256 * 1024
 # Keep collection preflight aligned with the writer's child/file proof bound.
@@ -71,6 +71,7 @@ class ParsedArgs:
     changed: bool = False
     full: bool = False
     again: bool = False
+    coverage: bool = False
     json: bool = False
     reveal_command: bool = False
     dry_run: bool = False
@@ -200,6 +201,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     changed = command == "changed"
     full = False
     again = False
+    coverage = False
     workers = None
     base = None
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
@@ -232,6 +234,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
                 if again:
                     raise _problem("invalid-config", "option cannot be repeated")
                 again = True
+            elif token == "--cov":
+                if coverage:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                coverage = True
             elif token == "--no-setup":
                 no_setup = True
             elif token in ("-v", "--verbose"):
@@ -279,12 +285,15 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
         mode = C.Mode.SCOPED
     if shadow and mode is not C.Mode.AUTOMATIC:
         raise _problem("invalid-config", "shadow execution requires automatic mode")
+    if shadow and coverage:
+        raise _problem("invalid-config", "--cov cannot be combined with --shadow")
     return ParsedArgs(
         command=command, mode=mode, runner_argv=tail,
         base=base, workers=workers, queue_timeout_s=queue_timeout,
         timeout_s=timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
-        changed=changed, full=full, again=again, verbose=verbose, quiet=quiet,
+        changed=changed, full=full, again=again, coverage=coverage,
+        verbose=verbose, quiet=quiet,
     )
 
 
@@ -3356,7 +3365,7 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
         changed_note=_impact_note(impact, base.label, reference=reference),
-        next_hint=next_hint, deselect=deselect)
+        next_hint=next_hint, deselect=deselect, coverage=parsed.coverage)
 
 
 def _consult_reference(parsed: ParsedArgs, domain: C.DomainPaths, top,
@@ -3553,7 +3562,7 @@ def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
         changed_note=note, display_argv=display, next_hint=next_hint,
-        deselect=tuple(deselect))
+        deselect=tuple(deselect), coverage=parsed.coverage)
 
 
 def _note_run(domain: C.DomainPaths, root: Path, project: str,
@@ -3989,7 +3998,8 @@ def _run_monorepo_automatic(parsed: ParsedArgs, children,
                 result_path=parsed.result_path,
                 fixture_domain=parsed.fixture_domain,
                 probe=parsed.probe,
-                verbose=parsed.verbose, quiet=parsed.quiet),
+                verbose=parsed.verbose, quiet=parsed.quiet,
+                coverage=parsed.coverage),
         )
         _emit_reasons(result)
         if getattr(result, "signal", None) == signal.SIGINT:
@@ -4158,7 +4168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         result_path=parsed.result_path,
                         fixture_domain=parsed.fixture_domain,
                         verbose=parsed.verbose, quiet=parsed.quiet,
-                        again=parsed.again)
+                        again=parsed.again, coverage=parsed.coverage)
 
                 cancelled: list[bool] = []
 
@@ -4230,7 +4240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 shadow=parsed.shadow, result_path=parsed.result_path,
                 fixture_domain=parsed.fixture_domain,
                 verbose=parsed.verbose, quiet=parsed.quiet,
-                display_argv=parsed.runner_argv)
+                display_argv=parsed.runner_argv, coverage=parsed.coverage)
             result = operations.execute(
                 domain, split.target.config, scoped_request)
             _note_run(domain, resolution.root, split.target.declaration,
@@ -4295,6 +4305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verbose=parsed.verbose,
             quiet=parsed.quiet,
             again=parsed.again,
+            coverage=parsed.coverage,
         )
         result = operations.execute(domain, resolution.config, request)
         _note_run(domain, resolution.root, "", request, result,

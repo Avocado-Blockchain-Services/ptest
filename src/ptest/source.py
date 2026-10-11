@@ -36,6 +36,12 @@ _MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_GIT_BYTES = 32 * 1024 * 1024
 _TIMEOUT_S = 10.0
 _IDENTITY_PROTOCOL = "ptest-source-v2"
+# Compatibility alone moved to v3 in 0.6 (coverage on request): the pytest
+# runtime identity stopped counting pytest-cov facts, so a stored 0.5
+# baseline must fail compatibility at planning time (one full run) rather
+# than fail the post-run identity check (exit 70). Content digests are
+# unchanged, so verified-tree reuse of plain full runs survives the upgrade.
+_COMPATIBILITY_PROTOCOL = "ptest-compat-v3"
 # A rebase is in progress while rebase-merge/ or rebase-apply/ exists, as
 # `git status` decides; REBASE_HEAD alone can outlive a finished rebase.
 _OPERATIONS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
@@ -1010,7 +1016,8 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         elif not isinstance(runtime_identity, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_identity):
             limitations = (_reason("unknown-input", "verified native runtime identity is unavailable"),)
         else:
-            compatibility = _mac(key, [_IDENTITY_PROTOCOL, runtime_identity, external,
+            compatibility = _mac(key, [_IDENTITY_PROTOCOL, _COMPATIBILITY_PROTOCOL,
+                runtime_identity, external,
                 _compatibility_runner(config), repr(config.setup), repr(config.selection), sys.version, sys.executable,
                 sys.implementation.name, sys.implementation.cache_tag, platform.system(), platform.machine()])
         scan.remaining()

@@ -27,7 +27,7 @@ from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.5.3"
+PTEST_VERSION = "0.6.0"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2
@@ -443,6 +443,12 @@ class RunnerConfig:
     timeout_s: float | None = field(default=None, repr=False)
     full_timeout_s: float | None = field(default=None, repr=False)
     stall_timeout_s: float | None = field(default=None, repr=False)
+    # Coverage on request: the declared options reach argv only when one run
+    # asks for them (``coverage_requested``, set on ptest's private effective
+    # copy). Neither enters the repr, which feeds the compatibility
+    # fingerprint, so a run with coverage and one without stay comparable.
+    coverage_args: tuple = field(default=(), repr=False)
+    coverage_requested: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         kind = _check_enum("runner.kind", self.kind, RunnerKind)
@@ -468,6 +474,12 @@ class RunnerConfig:
             if 0 < stall < MIN_STALL_TIMEOUT_S:
                 raise ValueError("runner.stall_timeout_s must be 0 or 10-86400")
             object.__setattr__(self, "stall_timeout_s", stall)
+        object.__setattr__(self, "coverage_args", _check_argv_tokens(
+            "runner.coverage_args", self.coverage_args, allow_empty=True))
+        if self.coverage_args and kind is not RunnerKind.PYTEST:
+            raise ValueError("runner.coverage_args is supported for pytest only")
+        object.__setattr__(self, "coverage_requested", _check_bool(
+            "runner.coverage_requested", self.coverage_requested))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1141,6 +1153,9 @@ class RunRequest:
     again: bool = False
     changed_note: str | None = None
     next_hint: bool = False
+    # ``--cov``: add the project's [runner] coverage_args to this run.
+    # Never persisted; reuse proofs record what argv actually measured.
+    coverage: bool = False
     # Recorded, unselected node ids inside the scoped argv files; the bridge
     # deselects exactly these (unknown ids always run). Never persisted.
     deselect: tuple = ()
@@ -1173,6 +1188,7 @@ class RunRequest:
             object.__setattr__(self, "timeout_s", _check_float(
                 "request.timeout_s", self.timeout_s, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
         object.__setattr__(self, "again", _check_bool("request.again", self.again))
+        object.__setattr__(self, "coverage", _check_bool("request.coverage", self.coverage))
         if self.changed_note is not None:
             _check_str("request.changed_note", self.changed_note)
         object.__setattr__(self, "next_hint",

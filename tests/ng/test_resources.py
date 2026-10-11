@@ -18,7 +18,7 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
     assert "reuse expensive server/schema/template setup per run or worker" in guide
     assert "fresh lightweight SQLite database or mutable instance per test/use" in guide
     assert "never use global flush" in guide
-    assert guide.index("scoped `ptest` command") < guide.index("one `ptest --full` final gate")
+    assert guide.index("scoped `ptest` command") < guide.index("one `ptest --full --cov` final gate")
     assert "static doctor currently has no validated per-test history timing\ninput" in guide
     assert "under 0.5 seconds is healthy" in guide
     assert "Exactly 2 seconds starts optimization" in guide

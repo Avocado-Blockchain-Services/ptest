@@ -105,7 +105,7 @@ def test_agent_guide_keeps_the_coverage_gate_and_never_pads_coverage():
     assert "test semantics and the existing coverage gate" in flat
     assert "never add tests only to raise coverage" in flat
     assert "test inventory, coverage," not in flat
-    assert flat.index("scoped `ptest` command") < flat.index("one `ptest --full` final gate")
+    assert flat.index("scoped `ptest` command") < flat.index("one `ptest --full --cov` final gate")
 
 
 # -- barrier guide (verified, not edited) ------------------------------------
@@ -180,7 +180,10 @@ def test_changelog_newest_section_directly_under_title_documents_the_feature():
     assert lines[0] == "# Changelog"
     assert lines[1] == ""
     assert re.fullmatch(r"## (Unreleased|\d+\.\d+\.\d+)", lines[2]), lines[2]
-    body = " ".join("\n".join(lines[3:]).split("\n## ", 1)[0].split())
+    # The release that shipped the feature (0.5.3) documents it; later
+    # releases add their own sections above it.
+    text = "\n".join(lines)
+    body = " ".join(text.split("\n## 0.5.3\n", 1)[1].split("\n## ", 1)[0].split())
     for needle in ("ptest guide tests", "--test-policy", "Test policy",
                    "coverage gate"):
         assert needle in body, needle

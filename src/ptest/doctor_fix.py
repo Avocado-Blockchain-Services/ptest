@@ -33,6 +33,7 @@ from . import contracts as C
 from . import executability as executability_api
 from . import files
 from . import config as config_api
+from .adapters import pytest as pytest_adapter
 
 _PHASE = "doctor-fix"
 _CONFIG_LIMIT = 256 * 1024
@@ -919,6 +920,33 @@ def plan_project(root: Path, declaration: str,
             changes.append(FieldChange("runner", "args", fresh_args))
             current_args = fresh_args
 
+    # Coverage on request (0.6): --cov in args/full_args measures every
+    # run, iteration included. Move it to coverage_args, which a run adds
+    # only with --cov. A config that already declares coverage_args is the
+    # user's own split and stays as written.
+    coverage_tokens: tuple = ()
+    if (kind is C.RunnerKind.PYTEST and isinstance(runner, dict)
+            and "coverage_args" not in runner):
+        current_full = (tuple(item for item in runner["full_args"]
+                              if isinstance(item, str))
+                        if isinstance(runner.get("full_args"), list) else ())
+        moved_args, kept_args = pytest_adapter.split_coverage_tokens(current_args)
+        moved_full, kept_full = pytest_adapter.split_coverage_tokens(current_full)
+        moved = moved_args + moved_full
+        if moved and pytest_adapter.coverage_tokens_valid(moved):
+            if moved_args:
+                fresh = [change for change in changes
+                         if (change.table, change.key) != ("runner", "args")]
+                changes[:] = fresh
+                changes.append(FieldChange("runner", "args", kept_args))
+                current_args = kept_args
+            if moved_full:
+                changes.append(FieldChange("runner", "full_args", kept_full))
+            changes.append(FieldChange("runner", "coverage_args", moved))
+            coverage_tokens = moved
+    elif kind is C.RunnerKind.PYTEST and isinstance(runner, dict):
+        coverage_tokens = tuple(config.runner.coverage_args)
+
     if kind is C.RunnerKind.PYTEST and isinstance(runner, dict):
         # Older generators wrote ``tests`` whenever that directory existed,
         # so a full run silently skipped test files pytest itself collects
@@ -949,7 +977,8 @@ def plan_project(root: Path, declaration: str,
             fresh = None
         if fresh is not None and fresh.setup is not None:
             fixed_argv = _setup_extras_fix(
-                project_dir, kind, current_argv, tuple(current_args))
+                project_dir, kind, current_argv,
+                tuple(current_args) + coverage_tokens)
             if fixed_argv is not None:
                 changes.append(FieldChange("setup", "argv", fixed_argv))
 
@@ -971,7 +1000,7 @@ def plan_project(root: Path, declaration: str,
                 "selection", "non_input_outputs",
                 have_outputs + ("node_modules",)))
     if (kind is C.RunnerKind.PYTEST
-            and not _has_cov(current_args)
+            and not _has_cov(tuple(current_args) + coverage_tokens)
             and isinstance(selection, dict)
             and selection.get("enabled") is False
             and all(_selection_key_is_default(selection, key)
@@ -985,7 +1014,7 @@ def plan_project(root: Path, declaration: str,
         # user chose `false` deliberately, so it stays.
         changes.append(FieldChange("selection", "enabled", True))
     if (kind is C.RunnerKind.PYTEST
-            and _has_cov(current_args)
+            and _has_cov(tuple(current_args) + coverage_tokens)
             and (not isinstance(selection, dict)
                  or _selection_needs_close(selection))):
         # The enablement itself flips false (or missing) to true; every

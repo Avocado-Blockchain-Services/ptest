@@ -634,6 +634,10 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
     dist = declared if declared not in (None, "no") else "load"
     workers, auto = _worker_selection(tokens)
     runner_args = tuple(config.runner.args) + tuple(config.runner.full_args)
+    if config.runner.coverage_requested:
+        # Coverage on request: only a run that adds coverage_args needs the
+        # qualified pytest-cov pair to stay parallel.
+        runner_args += tuple(config.runner.coverage_args)
     if _has_remote_xdist(tokens):
         return ParallelRequest(
             active, workers, auto, dist,

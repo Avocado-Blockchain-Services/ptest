@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0
+
+- Coverage is on request. Coverage options now live in `[runner]
+  coverage_args` and reach pytest only when a run asks with `--cov`, so the
+  edit loop (`ptest`, `ptest <path>`) and plain `ptest --full` no longer pay
+  for coverage. Run the handoff gate as `ptest --full --cov`. `coverage_args`
+  accepts pytest-cov options only (`--cov`, `--cov-report`, `--cov-config`,
+  `--cov-branch`, `--cov-fail-under`, `--cov-context`); anything else is a
+  config error.
+- Declaring coverage no longer measures it. The advanced profile (baselines,
+  verified reuse, recorded selection) is still chosen by declaring coverage,
+  now in `coverage_args` too, so every project keeps its tier. Runs without
+  `--cov` stay on that profile, and pytest-cov is required only by runs
+  that measure coverage. Doctor's selection advice now names `coverage_args`.
+- `ptest doctor --fix` moves `--cov` options from `args`/`full_args` to
+  `coverage_args`. After upgrading, ptest says once when a config would
+  change ("can improve this config … run ptest doctor --fix"). A config that
+  keeps `--cov` in `args` still measures coverage on every run, as before.
+- Reuse respects coverage. `ptest --full --cov` counts as already verified,
+  verified elsewhere, an unchanged monorepo child, or a joinable running run
+  only when that green measured the same coverage on the same inputs; a plain
+  `--full` can reuse either. A project with coverage configured ends a plain
+  green with `· next: ptest --full --cov before handoff`. `--cov` on a project
+  with nothing to add prints `coverage not configured` and runs anyway.
+- One-time cost after upgrading: the first changed run on a pytest project
+  runs its full suite once, because stored baselines from 0.5 are no longer
+  compatible (the runtime identity stopped counting coverage).
+- Agent guidance: the handoff row is `ptest --full --cov`, and `--cov` is
+  never passed while iterating. Update installed copies with `ptest rules
+  --apply`.
+
 ## 0.5.3
 
 - Agents get clearer guidance on writing tests. The installed guide has a new

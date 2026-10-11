@@ -17,7 +17,7 @@ import json
 import os
 import re
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from . import contracts as C
@@ -44,13 +44,20 @@ class Record:
     checkout_id: str
     root: str
     created_at: str
+    # Coverage proof (0.6): digest of the coverage this green measured, or
+    # None. Optional on read, so 0.5 records stay valid plain greens; 0.5
+    # ignores the extra key and may drop it on rewrite (proof lost, never
+    # forged).
+    coverage: str | None = None
 
 
 def _valid(value: object) -> Record | None:
     if not isinstance(value, dict):
         return None
     try:
-        record = Record(**{field: value[field] for field in Record.__slots__})
+        record = Record(**{field: value[field] for field in Record.__slots__
+                           if field != "coverage"},
+                        coverage=value.get("coverage"))
     except (KeyError, TypeError):
         return None
     strings = (record.head, record.compatibility, record.scope, record.root,
@@ -68,6 +75,10 @@ def _valid(value: object) -> Record | None:
     if record.runtime_identity is not None and (
             not isinstance(record.runtime_identity, str)
             or not _HEX64.fullmatch(record.runtime_identity)):
+        return None
+    if record.coverage is not None and (
+            not isinstance(record.coverage, str)
+            or not _HEX64.fullmatch(record.coverage)):
         return None
     return record
 
@@ -121,6 +132,8 @@ class PublicationToken:
     input_digest: str
     incarnation: str
     generation: int
+    # The coverage proof of the run that holds this token (in memory only).
+    coverage: str | None = None
 
 
 def _ordering(directory: Path) -> tuple[str, int] | None:
@@ -136,7 +149,8 @@ def _ordering(directory: Path) -> tuple[str, int] | None:
 
 
 def begin_full(domain: C.DomainPaths, project_id: str,
-               input_digest: str) -> PublicationToken | None:
+               input_digest: str, *,
+               coverage: str | None = None) -> PublicationToken | None:
     """Capture publication authority before execution, never at green publication."""
     try:
         if not isinstance(input_digest, str) or not _HEX64.fullmatch(input_digest):
@@ -159,7 +173,11 @@ def begin_full(domain: C.DomainPaths, project_id: str,
             if ordering is None:
                 ordering = (secrets.token_hex(16), 0)
                 _write(directory, records, ordering)
-            return PublicationToken(project_id, input_digest, *ordering)
+            if coverage is not None and (
+                    not isinstance(coverage, str) or not _HEX64.fullmatch(coverage)):
+                coverage = None
+            return PublicationToken(project_id, input_digest, *ordering,
+                                    coverage=coverage)
     except Exception:
         return None
 
@@ -211,6 +229,15 @@ def record_green(domain: C.DomainPaths, project_id: str, record: Record,
                     or token.input_digest != record.input_digest
                     or ordering != (token.incarnation, token.generation)):
                 return
+            if record.coverage is None:
+                # A plain green on a tree that already passed with coverage
+                # keeps that proof: same inputs, the coverage gate still holds.
+                for item in current:
+                    if ((item.input_digest, item.scope, item.compatibility)
+                            == (record.input_digest, record.scope, record.compatibility)
+                            and item.coverage is not None):
+                        record = replace(record, coverage=item.coverage)
+                        break
             kept = [item for item in current
                     if (item.input_digest, item.scope) != (record.input_digest, record.scope)]
             _write(directory, [record, *kept][:MAX_RECORDS])

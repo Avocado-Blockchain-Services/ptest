@@ -120,6 +120,9 @@ class NativeReportBinding:
     report_directory: Path
     report_name: str
     checkout_root: Path | None = None
+    # Whether this attempt's ptest-owned argv measures coverage. Only the
+    # executor sets it; a report can never declare itself exempt.
+    coverage_expected: bool = False
     _created_identity: tuple[int, int] | None = field(
         default=None, init=False, repr=False, compare=False,
     )
@@ -132,6 +135,8 @@ class NativeReportBinding:
             raise TypeError("report binding has an unsupported protocol")
         object.__setattr__(self, "run_id", _check_hex(self.run_id, _RUN_ID_RE))
         object.__setattr__(self, "nonce", _check_hex(self.nonce, _NONCE_RE))
+        if not isinstance(self.coverage_expected, bool):
+            raise TypeError("report binding coverage expectation must be boolean")
         if not isinstance(self.attempt_id, str) or _ATTEMPT_RE.fullmatch(self.attempt_id) is None:
             raise TypeError("report binding has an invalid attempt")
         object.__setattr__(self, "runner", _check_name(self.runner, _RUNNERS))
@@ -355,8 +360,10 @@ class NativeAttemptReport:
             seen_prefixes.add(prefix)
         if not self.workers:
             raise ValueError("advanced attempt report has no worker identities")
-        if not isinstance(self.coverage_complete, bool) or not self.coverage_complete:
-            raise ValueError("advanced attempt report lacks complete coverage evidence")
+        # Completeness is required only when the binding expects coverage
+        # (``_decode_attempt``); a run without coverage has nothing to prove.
+        if not isinstance(self.coverage_complete, bool):
+            raise ValueError("advanced attempt report coverage evidence is malformed")
         if not isinstance(self.reporters_complete, bool) or not self.reporters_complete:
             raise ValueError("advanced attempt report lacks complete reporter evidence")
 
@@ -406,6 +413,7 @@ def allocate_report(
     runner: str | C.RunnerKind,
     execution_mode: str,
     effective_profile: str,
+    coverage_expected: bool = False,
 ) -> NativeReportBinding:
     """Reserve a private, absent report pathname for one admitted attempt."""
     if not isinstance(domain, C.DomainPaths) or not isinstance(checkout, C.CheckoutIdentity):
@@ -426,6 +434,7 @@ def allocate_report(
         report_directory=domain.root / "checkouts" / checkout.checkout_id / "reports",
         report_name=candidate_name,
         checkout_root=checkout.root,
+        coverage_expected=coverage_expected,
     )
     try:
         F.validate_private_dir(domain.root)
@@ -451,6 +460,7 @@ def allocate_report(
                 report_directory=reports,
                 report_name=name,
                 checkout_root=checkout.root,
+                coverage_expected=candidate.coverage_expected,
             )
         except C.Problem as exc:
             raise _problem(exc.code, "native report target is unsafe") from None
@@ -628,6 +638,10 @@ def _decode_attempt(binding: NativeReportBinding, raw: bytes) -> NativeAttemptRe
             or not isinstance(coverage["complete"], bool)
             or not isinstance(reporters, dict) or set(reporters) != {"complete"}
             or not isinstance(reporters["complete"], bool)):
+        _reject()
+    if binding.coverage_expected and not coverage["complete"]:
+        # The executor asked pytest-cov to measure this attempt: missing or
+        # partial worker data fails closed, exactly as before 0.6.
         _reject()
     try:
         return NativeAttemptReport(

@@ -188,7 +188,7 @@ def test_local_repair_guide_has_no_repo_internal_workflow():
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
     assert "run the scoped `ptest` command" in guide
-    assert "run one `ptest --full` final gate" in guide
+    assert "run one `ptest --full --cov` final gate" in guide
 
 
 def test_provider_skill_unsafe_parent_is_rejected_before_any_rules_write(tmp_path):

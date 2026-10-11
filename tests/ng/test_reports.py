@@ -436,7 +436,6 @@ def test_consume_attempt_report_does_not_trust_bridge_source_validity(case):
     lambda value: value["runtime_facts"].update(version="9.1.0"),
     lambda value: value.pop("runtime_facts"),
     lambda value: value.update(workers=[]),
-    lambda value: value.update(coverage={"complete": False}),
     lambda value: value.update(reporters={"complete": False}),
     lambda value: value.update(workers=[{"worker_id": "w064",
                                         "resource_prefix": "pt_" + RUN_ID + "_a001_w064"}]),
@@ -458,6 +457,60 @@ def test_consume_attempt_report_refuses_incomplete_or_ambiguous_evidence(case, m
     _write(binding, value)
     with pytest.raises(C.Problem, match="report-invalid"):
         consume_attempt_report(binding)
+    cleanup_report(binding)
+
+
+def _allocate_expecting_coverage(case):
+    domain = case.domain()
+    checkout = _checkout(case, domain)
+    return allocate_report(
+        domain, checkout, run_id=RUN_ID, nonce=NONCE, attempt_id="a001",
+        runner="pytest", execution_mode="scoped", effective_profile="advanced",
+        coverage_expected=True)
+
+
+@pytest.mark.parametrize("coverage", [
+    {"complete": False},
+    # A report cannot declare itself exempt: the expectation is the
+    # executor's binding, and any extra key is a malformed report.
+    {"complete": False, "expected": False},
+    {"complete": True, "expected": False},
+])
+def test_consume_attempt_report_requires_complete_coverage_when_bound(case, coverage):
+    """Spec C6: an attempt whose ptest-owned argv measures coverage must
+    prove complete coverage; missing or partial data fails closed."""
+    binding = _allocate_expecting_coverage(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    _write(binding, _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}],
+        coverage=coverage))
+    with pytest.raises(C.Problem, match="report-invalid"):
+        consume_attempt_report(binding)
+    cleanup_report(binding)
+
+
+def test_consume_attempt_report_without_coverage_needs_no_coverage_proof(case):
+    """Spec C5/C6: coverage is on request; an attempt that did not measure
+    coverage is complete advanced evidence without coverage data."""
+    _, _, binding = _allocate(case)
+    assert binding.coverage_expected is False
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    _write(binding, _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}],
+        coverage={"complete": False}))
+    evidence = consume_attempt_report(binding)
+    assert evidence.inventory is not None and evidence.inventory.complete
+    cleanup_report(binding)
+
+
+def test_consume_attempt_report_bound_coverage_complete_is_accepted(case):
+    """Spec C6: complete coverage evidence satisfies a coverage binding."""
+    binding = _allocate_expecting_coverage(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    _write(binding, _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}]))
+    evidence = consume_attempt_report(binding)
+    assert evidence.result.status is C.Status.PASSED
     cleanup_report(binding)
 
 

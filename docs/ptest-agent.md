@@ -12,9 +12,9 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 | Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |
 | One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |
 | All tests under one folder | `ptest --full <folder>` |
-| Before handoff or merge | bring the base branch in first, then `ptest --full`; fix and rerun until green |
+| Before handoff or merge | bring the base branch in first, then `ptest --full --cov` (adds the project's coverage and its gate; never pass `--cov` while iterating); fix and rerun until green |
 
-A scoped or changed green, dynamic or static, is iteration only; only `ptest --full`
+A scoped or changed green, dynamic or static, is iteration only; only `ptest --full --cov`
 completes the change. Rerun it only after a change (`--again` forces one). Fast-forward
 the green tip and never rerun for the merge (`already verified … in <checkout>`). Keep notes
 and reports outside the repo, or in declared gitignored outputs. Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal.
@@ -38,7 +38,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 | `changed: <path> → no tests affected: R tests reach these changes and already passed on this code` / `no changes vs <label> — nothing to test` | the change reaches no new tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
 | `no changes under <folder> — nothing to test` | the change reaches no tests under that folder (exit 0) | Nothing; `ptest --full <folder>` runs everything there. |
 | `<project> · no changes` | that child is untouched (one line per untouched child) | Nothing. |
-| `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Keep iterating with `ptest`; run `ptest --full` once only when you are done. |
+| `· next: ptest --full before handoff` / `· next: ptest --full --cov before handoff` / `coverage not configured …` | the integrated gate (with coverage, when the project declares it) is still needed / `--cov` had nothing to add there, so the run went ahead without it | Keep iterating with `ptest`; run the named command once only when you are done / nothing. |
 | `ptest: selection audit: N failing tests would not have been selected — they now run whenever a change statically reaches them` | a full run pinned failing tests to static reach | Nothing. |
 | `waiting for N slots …` / `waiting: <reason>` | queued behind other runs; the reason names the real blocker | Wait; do not start another run. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |

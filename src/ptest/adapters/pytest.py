@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
 import re
 
@@ -27,6 +28,55 @@ _FULL_REDIRECT_OPTIONS = {
     "--pyargs", "-o", "--override-ini", "--basetemp",
 }
 
+# Coverage on request: the closed set of pytest-cov options ``[runner]
+# coverage_args`` may hold. Value-taking options need one following value;
+# ``--cov`` takes an optional one. Nothing else (no narrowing, plugin,
+# parallel or redirect control, no ``--no-cov``) can ride in on this key.
+_COVERAGE_VALUE_OPTIONS = frozenset({
+    "--cov-report", "--cov-config", "--cov-fail-under", "--cov-context"})
+_COVERAGE_FLAG_OPTIONS = frozenset({"--cov-branch"})
+
+
+def coverage_tokens_valid(tokens: tuple[str, ...]) -> bool:
+    """True when ``tokens`` are only allowlisted pytest-cov options.
+
+    At least one ``--cov``/``--cov=`` is required: without it pytest-cov
+    measures nothing and the request would be an empty promise.
+    """
+    measured = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not isinstance(token, str) or not token:
+            return False
+        option, eq, value = token.partition("=")
+        if option == "--cov":
+            measured = True
+            if eq:
+                if not value or value.startswith(("-", "@")):
+                    return False
+            elif (index + 1 < len(tokens) and tokens[index + 1]
+                    and not tokens[index + 1].startswith("-")):
+                if tokens[index + 1].startswith("@") or "::" in tokens[index + 1]:
+                    return False
+                index += 1
+        elif option in _COVERAGE_VALUE_OPTIONS:
+            if eq:
+                if not value or value.startswith(("-", "@")):
+                    return False
+            else:
+                if (index + 1 >= len(tokens) or not tokens[index + 1]
+                        or tokens[index + 1].startswith(("-", "@"))):
+                    return False
+                index += 1
+        elif option in _COVERAGE_FLAG_OPTIONS and not eq:
+            pass
+        else:
+            return False
+        index += 1
+    return measured
+
+
 # This is the closed, in-product admission catalog.  It deliberately names a
 # configuration class rather than trusting a repository-provided profile name:
 # a pytest tuple is admissible only when the declared command carries the
@@ -45,17 +95,20 @@ def _qualified_profile_catalog(config: C.Config) -> dict[str, str] | None:
         reject_unowned_controls(controls, full=False)
     except C.Problem:
         return None
-    # Coverage and a named terminal reporter are part of the frozen SELECT
-    # tuple.  Their actual plugin/version and measured files remain bridge
-    # evidence; these strings only select the closed declaration.
+    # The advanced tier is still chosen by declaring coverage, now in args,
+    # full_args or coverage_args, so every existing project keeps its tier
+    # (doctor --fix copies tokens verbatim). Declaring no longer measures:
+    # whether one run measures coverage, and whether its evidence must be
+    # complete, follows that run's ptest-owned argv (``measures_coverage``).
+    declared = controls + tuple(config.runner.coverage_args)
     has_coverage = any(token == "--cov" or token.startswith("--cov=")
-                       for token in controls)
+                       for token in declared)
     has_reporter = any(token == "--cov-report" or token.startswith("--cov-report=")
-                       for token in controls)
+                       for token in declared)
     if not (has_coverage and has_reporter):
         return None
     return {"source": "catalog", "runner": C.RunnerKind.PYTEST.value,
-            "profile": _QUALIFIED_PROFILE, "coverage_policy": "pytest-cov",
+            "profile": _QUALIFIED_PROFILE, "coverage_policy": "on-request",
             "reporter_policy": "terminal"}
 
 
@@ -95,7 +148,7 @@ def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | No
             or qualified_profile.get("runner") != C.RunnerKind.PYTEST.value
             or qualified_profile.get("profile") != _QUALIFIED_PROFILE
             or (qualified_profile.get("source") == "catalog" and
-                (qualified_profile.get("coverage_policy") != "pytest-cov"
+                (qualified_profile.get("coverage_policy") != "on-request"
                  or qualified_profile.get("reporter_policy") != "terminal"))
             or (qualified_profile.get("source") != "catalog" and
                 (not re.fullmatch(r"[0-9a-f]{64}", qualified_profile.get("runtime_identity", ""))
@@ -210,6 +263,83 @@ def _parallel_suffix(config: C.Config, slots: int) -> tuple[str, ...]:
         raise _problem("admission-invalid",
                        "pytest parallel execution requires a qualified xdist request")
     return ("-n", str(slots))
+
+
+def requested_coverage(config: C.Config) -> tuple[str, ...]:
+    """The declared coverage options when this run asked for them, else ()."""
+    runner = config.runner
+    if runner.kind is not C.RunnerKind.PYTEST or not runner.coverage_requested:
+        return ()
+    return tuple(runner.coverage_args)
+
+
+def measures_coverage(config: C.Config, plan_execution: str) -> bool:
+    """True when this run's ptest-owned argv turns pytest-cov on.
+
+    Literal ``args`` always count; ``full_args`` only on a full plan;
+    ``coverage_args`` only when requested. A project's own addopts are not
+    ptest-owned and never make coverage evidence mandatory.
+    """
+    tokens = tuple(config.runner.args) + requested_coverage(config)
+    if plan_execution == "full":
+        tokens += tuple(config.runner.full_args)
+    return any(token == "--cov" or token.startswith("--cov=") for token in tokens)
+
+
+def split_coverage_tokens(tokens: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(allowlisted coverage options, everything else) from literal argv.
+
+    Used by ``doctor --fix`` to move coverage out of ``args``/``full_args``
+    into ``coverage_args``. Values bind the way pytest's parser binds them
+    (``--cov`` takes one optional non-dash value); anything outside the
+    allowlist, including ``--no-cov``, stays where it was.
+    """
+    moved: list[str] = []
+    kept: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        option, eq, _value = token.partition("=")
+        if option == "--cov":
+            moved.append(token)
+            if (not eq and index + 1 < len(tokens) and tokens[index + 1]
+                    and not tokens[index + 1].startswith(("-", "@"))
+                    and "::" not in tokens[index + 1]):
+                moved.append(tokens[index + 1])
+                index += 1
+        elif option in _COVERAGE_VALUE_OPTIONS:
+            if eq:
+                moved.append(token)
+            elif (index + 1 < len(tokens) and tokens[index + 1]
+                    and not tokens[index + 1].startswith(("-", "@"))):
+                moved.extend((token, tokens[index + 1]))
+                index += 1
+            else:
+                kept.append(token)
+        elif option in _COVERAGE_FLAG_OPTIONS and not eq:
+            moved.append(token)
+        else:
+            kept.append(token)
+        index += 1
+    return tuple(moved), tuple(kept)
+
+
+def coverage_proof(config: C.Config) -> str | None:
+    """Digest of the coverage a full run of ``config`` measures, else None.
+
+    It binds a green full gate to the exact coverage-bearing controls
+    (literal args, full_args and requested coverage_args), so a
+    ``--full --cov`` request reuses only a green that measured the same
+    coverage on the same inputs (spec C9).
+    """
+    if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
+        return None
+    if not measures_coverage(config, "full"):
+        return None
+    payload = json.dumps([list(config.runner.args), list(config.runner.full_args),
+                          list(requested_coverage(config))],
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _coverage_gate_suffix(args: tuple[str, ...]) -> tuple[str, ...]:
@@ -349,7 +479,7 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         _validate_full_roots(config.runner.test_roots)
 
     require_python_launcher(config.runner.launcher)
-    native = tuple(config.runner.args)
+    native = tuple(config.runner.args) + requested_coverage(config)
     coverage_gate = (_coverage_gate_suffix(native)
                      if plan.execution == "scoped" else ())
     native += coverage_gate
@@ -438,13 +568,14 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
     if plan.execution == "full":
         _validate_full_roots(config.runner.test_roots)
     require_python_launcher(config.runner.launcher)
-    coverage_gate = (_coverage_gate_suffix(tuple(config.runner.args))
+    leading = tuple(config.runner.args) + requested_coverage(config)
+    coverage_gate = (_coverage_gate_suffix(leading)
                      if plan.execution in {"scoped", "selected"} else ())
-    controls = (tuple(config.runner.args) + coverage_gate
+    controls = (leading + coverage_gate
                 + tuple(config.runner.full_args))
     controls += tuple(config.runner.test_roots if plan.execution == "full" else plan.files)
     reject_unowned_controls(controls, full=plan.execution == "full")
-    native = tuple(config.runner.args) + coverage_gate
+    native = leading + coverage_gate
     generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
     if coverage_gate:
         generated += ("coverage.fail-under=0",)
@@ -481,6 +612,8 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
             list(config.runner.launcher) + list(config.runner.args),
             list(config.runner.launcher) + list(config.runner.full_args)
             + list(config.runner.test_roots)])),
+        ("PTEST_PYTEST_COVERAGE",
+         "1" if measures_coverage(config, plan.execution) else "0"),
     ]
     if expected_runtime_identity is not None:
         if not re.fullmatch(r"[0-9a-f]{64}", expected_runtime_identity):

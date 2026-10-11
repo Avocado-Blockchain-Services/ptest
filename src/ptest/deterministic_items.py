@@ -177,8 +177,10 @@ def _select_fix(config: C.Config, cfg: str, *,
                 parallel_active: bool = False) -> str:
     """Concrete fix naming the closed-inputs policy (and coverage first).
 
-    A parallel project takes the same coverage profile as a serial one:
-    there is no serial tradeoff to state.
+    The advanced tier is chosen by declaring coverage. Since 0.6 that is
+    ``[runner] coverage_args``, which measures only runs that pass --cov, so
+    the fix costs nothing per run. A parallel project takes the same
+    profile as a serial one: there is no serial tradeoff to state.
     """
     from .adapters import pytest as pytest_adapter
 
@@ -190,13 +192,16 @@ def _select_fix(config: C.Config, cfg: str, *,
            f"full_triggers in {cfg}.")
     if config.runner.kind is C.RunnerKind.PYTEST:
         if parallel_active:
-            fix += (" Test selection needs the coverage profile: add --cov "
-                    f"and --cov-report to runner args and a [selection] "
-                    f"policy in {cfg}. Run a parallel full baseline once "
-                    "to unlock parallel selection.")
+            fix += (" Test selection needs the coverage profile: declare "
+                    "[runner] coverage_args with --cov and --cov-report and a "
+                    f"[selection] policy in {cfg}; coverage is then measured "
+                    "only on runs that ask for it. Run a parallel full baseline "
+                    "once to unlock parallel selection.")
         elif not qualified:
             fix += (" For pytest without the coverage catalog profile, first "
-                    "add --cov and --cov-report to runner args.")
+                    "declare [runner] coverage_args with --cov and "
+                    "--cov-report; coverage is then measured only on runs "
+                    "that ask for it.")
     return fix
 
 

@@ -194,7 +194,8 @@ Notes:
 
   --fix diffs each `.ptest.toml` against the config ptest would write
   today plus deterministic fixes (stale `-n 0`, setup extras/groups,
-  a `[selection]` draft under coverage) and applies the diff directly:
+  a `[selection]` draft under coverage, and `--cov` options moved from
+  [runner] args/full_args to coverage_args) and applies the diff directly:
   the --fix flag itself is the consent, and --dry-run shows a short
   per-key summary only (`-v` shows the full diff). Writes are atomic,
   never follow

@@ -88,14 +88,21 @@ def test_repository_guide_default_loop_is_changed():
     assert "| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |" in guide
     assert "| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |" in guide
     assert "| All tests under one folder | `ptest --full <folder>` |" in guide
-    assert "| Before handoff or merge | bring the base branch in first, then `ptest --full`; fix and rerun until green |" in guide
+    assert ("| Before handoff or merge | bring the base branch in first, then "
+            "`ptest --full --cov` (adds the project's coverage and its gate; never "
+            "pass `--cov` while iterating); fix and rerun until green |") in guide
     lowered = guide.lower()
     assert "no baseline or coverage needed" not in lowered
     assert "baseline" not in lowered
     head, _, rest = lowered.partition("## writing tests")
     _, _, tail = rest.partition("## reporting")
     assert rest and tail
-    assert "coverage" not in head + tail
+    # 0.6: coverage is a handoff-gate concept (`--cov`, coverage_args), but
+    # the loop never claims selection or iteration needs coverage.
+    for claim in ("coverage needed", "needs coverage", "coverage profile",
+                  "coverage run", "coverage step"):
+        assert claim not in head + tail, claim
+    assert "never pass `--cov` while iterating" in head
     assert "--changed" not in guide
     assert "--changed-setup" not in guide
     assert "automatic" not in lowered
@@ -111,7 +118,7 @@ def test_skill_template_defaults_to_changed():
     assert "| `ptest <folder>` | changed tests under that folder |" in text
     assert "| `ptest <file>` | that file, always |" in text
     assert "| `ptest --full <folder>` | all tests under that folder |" in text
-    assert "| `ptest --full` | integrated gate, once before handoff |" in text
+    assert "| `ptest --full --cov` | integrated gate, once before handoff |" in text
     assert "docs/ptest-agent.md" in text
 
 
@@ -166,4 +173,4 @@ def test_getting_started_shows_changed():
               / "README.md").read_text(encoding="utf-8")
     assert "`ptest` runs the tests your change reaches" in readme
     assert "changes since the last green run" in readme
-    assert "`ptest --full` once before handoff" in readme
+    assert "`ptest --full --cov` once before handoff" in readme

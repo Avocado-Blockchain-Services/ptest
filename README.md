@@ -117,7 +117,7 @@ ptest --full        # once, before you hand the change off
 Bare `ptest` runs the tests your change reaches:
 changes since the last green run (or, before the first green run, since your
 branch left the default branch). No baseline or coverage step is needed.
-Run `ptest --full` once before handoff.
+Run `ptest --full --cov` once before handoff.
 
 Before merging, bring the base branch into your branch, run `ptest --full`,
 fix and rerun until it is green, then fast-forward the base branch. For pytest
@@ -171,10 +171,33 @@ Always run ptest from the repository root.
 | The changed tests under one folder only | `ptest api/tests` |
 | One file or one test — always runs it | `ptest api/tests/test_billing.py` · `ptest api/tests/test_billing.py::test_tax` |
 | Every test under one folder | `ptest --full api/tests` |
-| The integrated gate, once before handoff | `ptest --full` |
+| The integrated gate, once before handoff | `ptest --full --cov` |
 
 Any path routes to the nearest `.ptest.toml`, so every sub-project works the
 same way: `ptest web/src`, `ptest --full launchpad`, `ptest server/tests/unit`.
+
+### Coverage on request
+
+Coverage costs time on every run it measures (two to three times the test
+time on a pytest suite with xdist), so ptest measures it only when asked.
+Put the pytest-cov options in `.ptest.toml`:
+
+```toml
+[runner]
+coverage_args = ["--cov", "--cov-report", "term"]
+```
+
+`--cov` adds them to one run, with the project's `fail_under` gate on a full
+run: `ptest --full --cov` is the handoff gate. `ptest` and `ptest <path>`
+never measure coverage unless you pass `--cov`; a partial run with `--cov`
+reports coverage but never applies the whole-suite gate. Only pytest-cov
+options are accepted there (`--cov`, `--cov-report`, `--cov-config`,
+`--cov-branch`, `--cov-fail-under`, `--cov-context`). `ptest doctor --fix`
+moves `--cov` options out of `args`/`full_args` for you; options left in
+`args` still measure every run. A green `--full` without coverage never
+stands in for `--full --cov`. Declaring coverage (in `args` or
+`coverage_args`) is still what puts a pytest project on the profile with
+baselines and recorded selection; only measuring it became optional.
 
 ### Examples
 
@@ -337,7 +360,8 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | `waiting for N slots …` / `waiting: <reason>` | queued behind other ptest runs (the reason names what holds it); it starts by itself |
 | `setup: uv sync --locked (first run)` | declared setup is running |
 | `passed · N tests` / `failed · …` | the verdict |
-| `next: ptest --full before handoff` | a changed-mode green; the gate is still to do |
+| `next: ptest --full before handoff` / `next: ptest --full --cov before handoff` | the gate is still to do (with coverage when the project declares `coverage_args`) |
+| `coverage not configured — add [runner] coverage_args to …` | `--cov` had nothing to add there; the run went ahead without coverage |
 | `incomplete (exit 70)` + reason | ptest could not prove the result; rerun once, report if it repeats |
 | `post-test-stall: tests finished but runner processes stayed idle …` | tests finished, processes hung in teardown/shutdown (exit 70); stack dumps printed above — rerun once alone, report a repeat with the dump; lasting change: `[runner] stall_timeout` in `.ptest.toml` (default 120, `0` disables, `0` or `10..86400`, no CLI flag) |
 
@@ -395,7 +419,8 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 ## pytest plugin compatibility
 
 Supported: pytest 8.x and 9.x, pytest-xdist 3.5 or newer 3.x (parallel runs),
-pytest-cov 5 to 7 with coverage 7 (parallel coverage).
+pytest-cov 5 to 7 with coverage 7 (parallel coverage, needed only for runs
+that measure coverage).
 
 Installed pytest plugins run as normal (pytest-django, hypothesis,
 pytest-asyncio, pytest-benchmark, pytest-codspeed, schemathesis, ...): they

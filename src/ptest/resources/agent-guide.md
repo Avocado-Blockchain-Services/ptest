@@ -30,7 +30,7 @@ time-network.
 Preserve assertions, test inventory, test semantics and the existing coverage
 gate; never add tests only to raise coverage. During repair,
 run the scoped `ptest` command for the affected behavior. After the repairs
-are integrated, run one `ptest --full` final gate. A text-pattern change alone
+are integrated, run one `ptest --full --cov` final gate. A text-pattern change alone
 is not proof that isolation works.
 
 When validated test timings are available, under 0.5 seconds is healthy;
@@ -60,4 +60,6 @@ Dependency-recorded selection narrows a changed run to the tests whose recorded
 dependencies changed (`… (dynamic · …)`); without usable records the static fallback
 (`… (static: <reason> · …)`) selects by imports instead, and a full run prints a
 `ptest: selection audit: …` line when it pins misses to static reach. A changed green,
-dynamic or static, is iteration only; the `ptest --full` final gate still applies.
+dynamic or static, is iteration only; the `ptest --full --cov` final gate still applies.
+`--cov` adds the project's coverage (`[runner] coverage_args`) and its gate to that one
+run; iteration runs never measure coverage.

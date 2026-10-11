@@ -51,10 +51,16 @@ C4. **Partial runs.** The existing rule holds with coverage from either source: 
 the run's argv measures coverage and the plan is scoped or selected, ptest appends
 `--cov-fail-under=0` unless a fail-under is set explicitly.
 
-C5. **Qualification without coverage.** The pytest advanced profile, automatic
-selection, parallel identity and baselines no longer need `--cov`, `--cov-report`,
-pytest-cov or coverage. The pytest-cov/coverage version pair is checked only when the
-run measures coverage.
+C5. **Declaring is not measuring.** The advanced tier (baselines, history, verified
+reuse, parallel identity, automatic selection) is still chosen by declaring coverage:
+`--cov` plus `--cov-report` across `args`, `full_args` and `coverage_args`, as before.
+So every existing project keeps its tier, and `doctor --fix` copies tokens verbatim.
+Whether a run actually measures coverage follows that run's argv alone. The
+pytest-cov/coverage version pair is checked only when the run measures coverage. A
+run with `--cov` and one without resolve to the same tier. Decoupling the tier from
+coverage entirely is a follow-up. It would move projects without coverage onto the
+stricter advanced bridge, which needs git source identity and refuses some conftest
+hooks.
 
 C6. **Evidence.** Complete coverage evidence (controller data plus every worker's
 contribution) is required exactly when the run's ptest-owned argv measures coverage
@@ -89,20 +95,23 @@ same rule `verified.json` follows. Older ptest versions ignore the extra key; if
 older version rewrites the file and drops it, the next `--full --cov` reruns.
 
 C10. **Monorepo and other runners.** `--cov` applies to every pytest child with
-`coverage_args`. A child without them runs normally and prints
-`<child> · coverage not configured`. A Vitest, Go or Cargo child prints
-`<child> · coverage not supported for <runner>` (Vitest coverage is out of scope).
-When nothing measures coverage, the run still happens, prints
-`ptest: coverage not configured — add [runner] coverage_args to <cfg>`, and its exit
-status is unaffected. That keeps the generic rule `ptest --full --cov` safe in every
-repository.
+`coverage_args`. Each project with nothing to add prints one line and runs
+anyway, with its exit status unaffected:
+`ptest: [<child> ·] coverage not configured — add [runner] coverage_args to <cfg>`
+for pytest, or `coverage not supported for <runner>` for Vitest, Go, Cargo and command
+runners (Vitest coverage is out of scope). That keeps the generic rule
+`ptest --full --cov` safe in every repository.
 
-C11. **Narration and doctor.** A run with coverage shows `· coverage` in its start
-line. On a project with `coverage_args`, a green changed-mode run or a green `--full`
-without `--cov` ends with `· next: ptest --full --cov before handoff`. Doctor no longer
-asks for `--cov` to enable selection. It reports `--cov*` tokens in `args` or
-`full_args` as coverage on every run, and `doctor --fix` moves them to
-`coverage_args`. Dependency drafting treats `coverage_args` like `args`.
+C11. **Narration and doctor.** A run whose argv measures coverage shows `· coverage`
+in its start line. On a project with `coverage_args`, a green changed-mode run, and a
+green `--full` without `--cov`, end with `· next: ptest --full --cov before handoff`.
+Doctor no longer asks for `--cov` to enable selection. `doctor --fix` moves allowlisted
+`--cov*` tokens from `args`/`full_args` into `coverage_args`, unless the config already
+declares `coverage_args`. Other tokens, including `--no-cov*`, stay where they are.
+That plan also drives the existing once-per-version notice ("ptest 0.6.0 can improve
+this config … run ptest doctor --fix"), so every affected project hears about it after
+upgrading. No new checklist item is needed. Dependency drafting treats
+`coverage_args` like `args`.
 
 C12. **Guides and skill.** The loop table's handoff row becomes
 `ptest --full --cov`. The text says `--cov` adds the project's coverage and its gate,

@@ -290,6 +290,34 @@ def _pre_five_command_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_coverage_provider_text(provider: str) -> bytes:
+    """Exact skill bytes before coverage on request (0.6).
+
+    The handoff row named plain ``ptest --full``; it is recognized as
+    previous managed content so it upgrades in place.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches.\n"
+        "| Command | Runs |\n"
+        "|---|---|\n"
+        "| `ptest` | changed tests, whole repo |\n"
+        "| `ptest <folder>` | changed tests under that folder |\n"
+        "| `ptest <file>` | that file, always |\n"
+        "| `ptest --full <folder>` | all tests under that folder |\n"
+        "| `ptest --full` | integrated gate, once before handoff |\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus the five-command table.
 
@@ -314,8 +342,8 @@ def _provider_text(provider: str) -> bytes:
         "| `ptest <folder>` | changed tests under that folder |\n"
         "| `ptest <file>` | that file, always |\n"
         "| `ptest --full <folder>` | all tests under that folder |\n"
-        "| `ptest --full` | integrated gate, once before handoff |\n"
-        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "| `ptest --full --cov` | integrated gate, once before handoff |\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change.\n"
         "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
 
@@ -368,7 +396,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_graph_provider_text(provider),
                    _pre_green_provider_text(provider),
                    _pre_loop_hint_provider_text(provider),
-                   _pre_five_command_provider_text(provider)):
+                   _pre_five_command_provider_text(provider),
+                   _pre_coverage_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -939,6 +968,8 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 0.5.3: guide before coverage on request (handoff was plain --full).
+    "9e29563062005a253578552c5551f40cad940bf7a53e1bd7f1240870aaa9dc32",
     # 732d811: guide shipped before native Vitest full-result reuse.
     "6480e8baa993129c6aeee79a9612af2503af117a08ee3e9af203a20361d73511",
     # 93940f4: guide as shipped on main before the G1 cleanup.
@@ -1066,6 +1097,7 @@ def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
         _pre_green_provider_text(provider),
         _pre_loop_hint_provider_text(provider),
         _pre_five_command_provider_text(provider),
+        _pre_coverage_provider_text(provider),
     )
 
 

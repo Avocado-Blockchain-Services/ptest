@@ -196,10 +196,13 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
+    # 0.6: the same fix also moves the coverage options to coverage_args
+    # (measured only with --cov), so args ends up empty.
     assert main(("doctor", "--fix", "--dry-run")) == 0
     out = capsys.readouterr().out
     assert "DRAFT" in out
-    assert ('.ptest.toml: runner.args = '
+    assert '.ptest.toml: runner.args = []' in out
+    assert ('.ptest.toml: runner.coverage_args = '
             '["--cov", "pkg", "--cov-report", "term"]') in out
     assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' not in out
     assert "serial" not in out.lower()
@@ -207,13 +210,14 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert main(("doctor", "--fix", "--dry-run", "-v")) == 0
     verbose_out = capsys.readouterr().out
     assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' in verbose_out
-    assert '+args = ["--cov", "pkg", "--cov-report", "term"]' in verbose_out
+    assert '+args = []' in verbose_out
+    assert '+coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in verbose_out
 
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert '"-n", "0"' not in raw
-    assert '"--cov"' in raw
+    assert 'coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in raw
 
 
 def test_fix_leaves_default_dev_group_out_of_setup_argv(

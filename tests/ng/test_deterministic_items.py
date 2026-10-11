@@ -264,7 +264,9 @@ def test_select_fix_orders_coverage_profile_when_parallel_active(tmp_path):
         _resolution(tmp_path, _parallel_config(tmp_path)), packet)
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
-    assert "add --cov" in answer.finding_change
+    # 0.6: the coverage profile is declared in coverage_args, which measures
+    # only runs that pass --cov (spec C5/C11).
+    assert "declare [runner] coverage_args" in answer.finding_change
     assert "--cov-report" in answer.finding_change
     assert "[selection]" in answer.finding_change
     assert "parallel full baseline once" in answer.finding_change

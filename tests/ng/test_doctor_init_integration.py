@@ -347,7 +347,7 @@ def test_doctor_select_fix_orders_coverage_profile_on_parallel_project(
                  "--allow-model-review")) == 0
 
     flat = " ".join(capsys.readouterr().out.split())
-    assert "add --cov" in flat
+    assert "declare [runner] coverage_args" in flat
     assert "[selection]" in flat
     assert "runs serially under ptest" not in flat
 

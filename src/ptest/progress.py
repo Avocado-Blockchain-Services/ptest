@@ -93,12 +93,29 @@ def _project(text: str, *, color: bool = False) -> str:
 
 
 def format_start(*, project: str, runner: str, workers: int,
-                 scope: str, full: bool, color: bool = False) -> str:
+                 scope: str, full: bool, color: bool = False,
+                 coverage: bool = False) -> str:
     head = f"{_prefix(color=color)} {_project(project, color=color)} · {runner}"
     if full:
-        return f"{head} · full suite"
-    dimmed_scope = render.paint(scope, "dim", color=color) if scope else scope
-    return f"{head} · {C.plural(workers, 'worker')} · {dimmed_scope}"
+        line = f"{head} · full suite"
+    else:
+        dimmed_scope = render.paint(scope, "dim", color=color) if scope else scope
+        line = f"{head} · {C.plural(workers, 'worker')} · {dimmed_scope}"
+    return f"{line} · coverage" if coverage else line
+
+
+def format_coverage_unavailable(*, child: str | None, runner: str,
+                                config_path: str, color: bool = False) -> str:
+    """``--cov`` asked for coverage this project does not measure (C10).
+
+    The run still happens without coverage and its exit status is
+    unaffected, so the generic handoff rule stays safe in every repository.
+    """
+    who = f" {_project(child, color=color)} ·" if child else ""
+    if runner != C.RunnerKind.PYTEST.value:
+        return f"{_prefix(color=color)}{who} coverage not supported for {runner}"
+    return (f"{_prefix(color=color)}{who} coverage not configured — "
+            f"add [runner] coverage_args to {config_path}")
 
 
 def format_waiting(*, needed: int, free: int | None, limit: int | None,
@@ -171,16 +188,24 @@ def format_no_changes(declaration: str, *, color: bool = False) -> str:
 
 #: End-line hint after a narrowed pass: the graph is a subset, not the gate.
 NEXT_FULL = "next: ptest --full before handoff"
+#: The same hint for a project that declares [runner] coverage_args: its
+#: handoff gate measures coverage (spec C11).
+NEXT_FULL_COV = "next: ptest --full --cov before handoff"
 #: End-line hint after any changed-mode failure.
 NEXT_FIX = "fix the code under test, then rerun ptest"
 
 
-def next_step(status: C.Status, narrowed: bool) -> str | None:
-    """One next-step hint for a changed-mode end line, or None."""
+def next_step(status: C.Status, narrowed: bool, *,
+              coverage: bool = False) -> str | None:
+    """One next-step hint for a changed-mode end line, or None.
+
+    ``coverage``: the project declares coverage_args, so the handoff gate
+    is ``ptest --full --cov``.
+    """
     if status is C.Status.FAILED:
         return NEXT_FIX
     if narrowed and status in (C.Status.PASSED, C.Status.NO_TESTS_NEEDED):
-        return NEXT_FULL
+        return NEXT_FULL_COV if coverage else NEXT_FULL
     return None
 
 

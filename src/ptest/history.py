@@ -380,8 +380,17 @@ def _valid_full_lease(value: object) -> dict | None:
         return None
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
         return None
+    # Optional coverage proof (0.6); absent in 0.5 leases, which read as a
+    # plain run. 0.5 drops the key, so it can only join, never be joined
+    # by, a --cov request.
+    coverage = value.get("coverage")
+    if coverage is not None and (
+            not isinstance(coverage, str) or len(coverage) != 64
+            or any(char not in "0123456789abcdef" for char in coverage)):
+        return None
     return {"version": 1, "digest": digest, "run_id": run_id, "pid": pid,
-            "started_at": started_at, "sequence": sequence}
+            "started_at": started_at, "sequence": sequence,
+            "coverage": coverage}
 
 
 def read_full_lease(domain: C.DomainPaths,
@@ -2666,7 +2675,9 @@ def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                 runtime_identity=baseline.runtime_identity,
                 scope=checkout_scope(checkout.root),
                 checkout_id=checkout.checkout_id, root=str(checkout.root),
-                created_at=baseline.created_at), token=verification_token)
+                created_at=baseline.created_at,
+                coverage=getattr(verification_token, "coverage", None)),
+                token=verification_token)
         elif vitest_full.reusable_full_result(result) and isinstance(verification_token, verified.PublicationToken):
             before = result.input_before
             verified.record_green(domain, checkout.project_id, verified.Record(
