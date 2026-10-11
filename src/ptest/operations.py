@@ -328,7 +328,8 @@ def _project_root(config: C.Config) -> Path:
 
 def _summary(config: C.Config, plan: C.Plan, request: C.RunRequest,
              workers: int) -> C.CommandSummary:
-    args = tuple(config.runner.launcher) + tuple(config.runner.args)
+    args = (tuple(config.runner.launcher) + tuple(config.runner.args)
+            + pytest_adapter.requested_coverage(_coverage_config(config, request)))
     if plan.execution == "full":
         args += tuple(config.runner.full_args)
         if config.runner.kind is C.RunnerKind.PYTEST:

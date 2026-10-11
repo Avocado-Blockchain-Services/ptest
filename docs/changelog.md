@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+- Fix: `ptest --cov` on a project that declares coverage only in
+  `[runner] coverage_args` could end `incomplete` (exit 70,
+  changed-during-run), because the `.coverage` data file the run wrote
+  counted as a source change. Declared `coverage_args` now make coverage
+  data files tool byproducts, as `--cov` in `args` always did.
+- `ptest doctor`'s Test policy section reads a `--cov-fail-under` gate in
+  `coverage_args`, and a `--cov` run's command summary lists the coverage
+  options it added.
+
 ## 0.6.0
 
 - Coverage is on request. Coverage options now live in `[runner]

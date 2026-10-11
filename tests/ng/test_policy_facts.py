@@ -112,6 +112,19 @@ def test_runner_args_gate_forms(tmp_path, argv, expected):
         "[runner] args --cov-fail-under": expected}
 
 
+def test_runner_coverage_args_gate(tmp_path):
+    """0.6: a gate declared in [runner] coverage_args is the project's gate
+    too (it applies to every ptest --full --cov run)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_ptest_toml(tmp_path, kind="pytest", launcher=("pytest",), args=[],
+                     full_args=[], test_roots=("tests",), workers=1,
+                     project_id=PID,
+                     runner_extra='coverage_args = ["--cov", "--cov-fail-under=90"]')
+    project = _project(_collect(tmp_path))
+    assert _gate_map(project) == {
+        "[runner] coverage_args --cov-fail-under": "90"}
+
+
 def test_runner_full_args_gate(tmp_path):
     _repo(tmp_path, full_args=["--cov-fail-under=77"])
     project = _project(_collect(tmp_path))

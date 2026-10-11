@@ -604,7 +604,10 @@ def _pytest_coverage_enabled(config: C.Config) -> bool:
     """
     if config.runner.kind is not C.RunnerKind.PYTEST:
         return False
-    controls = tuple(config.runner.args) + tuple(config.runner.full_args)
+    # Declared coverage_args count whether or not this run asked for them:
+    # a --cov run writes the data file, and a plain run never reads it.
+    controls = (tuple(config.runner.args) + tuple(config.runner.full_args)
+                + tuple(config.runner.coverage_args))
     return any(token == "--cov" or token.startswith("--cov=")
                for token in controls)
 

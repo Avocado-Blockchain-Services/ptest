@@ -1254,3 +1254,29 @@ def test_nested_node_modules_stays_input_for_tracked_and_pytest(case):
     assert after.digest is not None
     assert after.digest != before.digest
     assert _NESTED_VITE_OUTPUT in {item.path for item in after.files}
+
+
+@pytest.mark.parametrize("requested", [True, False])
+def test_coverage_args_data_files_are_byproducts(case, requested):
+    """Bug (0.6.0, persea api): with coverage declared only in
+    [runner] coverage_args, a `ptest --cov` run rewrote `.coverage` and the
+    snapshot counted it as a source change (changed-during-run, exit 70).
+    A declared coverage_args makes the data file a tool byproduct, the same
+    as --cov in args (spec 2026-10-11 C3/C13)."""
+    from dataclasses import replace as _replace
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    config = _replace(config, runner=_replace(
+        config.runner, args=(), coverage_args=("--cov=src", "--cov-report=term"),
+        coverage_requested=requested))
+    (root / ".gitignore").write_text(".coverage\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    before = snapshot(domain, config, None, None)
+    assert before.digest is not None and before.clean
+    (root / ".coverage").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None)
+    assert after.digest == before.digest
+    assert ".coverage" not in {item.path for item in after.files}

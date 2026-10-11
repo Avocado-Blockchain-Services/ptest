@@ -356,7 +356,9 @@ def _gather_runner_args(runner: Any, gates: list[CoverageGate],
                         branch_sources: list[str], notes: list[str]) -> None:
     for label, tokens in (("[runner] args", getattr(runner, "args", ())),
                           ("[runner] full_args",
-                           getattr(runner, "full_args", ()))):
+                           getattr(runner, "full_args", ())),
+                          ("[runner] coverage_args",
+                           getattr(runner, "coverage_args", ()))):
         try:
             token_list = [str(item) for item in tokens]
         except TypeError:
