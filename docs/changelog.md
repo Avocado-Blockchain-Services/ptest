@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.5
+
+- A run in the full mode no longer ends `incomplete (exit 70)` because the
+  checkout's history file is an empty leftover with the wrong permissions
+  (a zero-byte `history.sqlite3`, mode 0644, made by some other program;
+  136 checkouts on one machine had one). The full mode is the first to open
+  that file, so `reuse = true` exposed it: muse-msp passed all 48 tests and
+  recorded nothing. A writer now moves such a file aside
+  (`history.sqlite3.empty-0644.<time>`) and starts a fresh private store; a
+  reader treats it as "no history yet" and moves nothing. A store with
+  content, a link or a hard-linked file is still refused.
+- A writer now refuses a history store that is not private (mode 0600), as
+  every reader already did; before, it appended to a world-readable store.
+- When history cannot be saved, the end line says why (for example
+  `path …/history.sqlite3 must be mode 0600`), not only "advanced attempt
+  history could not be committed".
+
 ## 0.6.4
 
 - Gitignored tool output no longer blocks the full mode's baseline:

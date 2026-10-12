@@ -15,6 +15,7 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import time
 import urllib.parse
 from contextlib import contextmanager
@@ -796,6 +797,25 @@ def _open_store_read_only(
         raise
 
 
+def _empty_leftover(path: Path) -> os.stat_result | None:
+    """A zero-byte, non-private store file: a leftover another program made
+    (``sqlite3.connect`` on a missing path creates an empty 0644 file).
+
+    It holds no history, so treating it as absent loses nothing. A link, a
+    hard-linked or foreign-owned file, or one with content is not a
+    leftover and meets the normal fail-closed checks.
+    """
+    try:
+        stamp = os.lstat(path)
+    except OSError:
+        return None
+    if (stat.S_ISREG(stamp.st_mode) and stamp.st_size == 0
+            and stamp.st_nlink == 1 and stamp.st_uid == os.getuid()
+            and stat.S_IMODE(stamp.st_mode) != 0o600):
+        return stamp
+    return None
+
+
 def _open_store(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity, *, create: bool,
 ) -> sqlite3.Connection | None:
@@ -803,6 +823,19 @@ def _open_store(
     if directory is None:
         return None
     path = directory / _STORE_NAME
+    leftover = _empty_leftover(path)
+    if leftover is not None:
+        if not create:
+            # Readers never move anything; there is simply no history yet.
+            return None
+        # Writers hold the writer lock: keep the leftover beside the store
+        # under a dated name and start a fresh private one.
+        aside = (f"{_STORE_NAME}.empty-{stat.S_IMODE(leftover.st_mode):04o}."
+                 f"{time.strftime('%Y%m%d%H%M%S', time.gmtime())}")
+        try:
+            os.rename(path, directory / aside)
+        except FileNotFoundError:
+            pass
     if not create:
         try:
             validate_private_file(path)
@@ -826,6 +859,9 @@ def _open_store(
             existed = True
         except FileNotFoundError:
             existed = False
+        if existed:
+            # The same privacy check every reader applies.
+            validate_private_file(path)
         try:
             connection = open_database(
                 directory, _STORE_NAME, max_bytes=HISTORY_MAX_BYTES,

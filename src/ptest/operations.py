@@ -4155,11 +4155,15 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     baseline_published=publication.baseline_published,
                     reasons=_unique_reasons(result.reasons + publication.reasons),
                 )
-            except (C.Problem, OSError):
+            except (C.Problem, OSError) as exc:
+                # Name the cause (a store with the wrong mode names its
+                # path): "rerun once alone" cannot fix a state problem.
+                detail = f": {exc.message}" if isinstance(exc, C.Problem) else ""
                 result = _incomplete(
                     result,
                     _reason("coordinator-unavailable",
-                            "advanced attempt history could not be committed"),
+                            "advanced attempt history could not be committed"
+                            + detail),
                 )
 
         def finalize(exported: C.RunResult) -> None:
