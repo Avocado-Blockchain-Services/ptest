@@ -196,8 +196,28 @@ options are accepted there (`--cov`, `--cov-report`, `--cov-config`,
 moves `--cov` options out of `args`/`full_args` for you; options left in
 `args` still measure every run. A green `--full` without coverage never
 stands in for `--full --cov`. Declaring coverage (in `args` or
-`coverage_args`) is still what puts a pytest project on the profile with
-baselines and recorded selection; only measuring it became optional.
+`coverage_args`) puts a pytest project in the full mode; only measuring it
+became optional.
+
+### Reuse without coverage
+
+In the full mode a clean `ptest --full` records a baseline, so a repeat on the
+same code says `already verified` in seconds, an unchanged monorepo child is
+skipped, and a fast-forward merge of a green tip is not rerun. A pytest project
+that declares no coverage gets the same with one line:
+
+```toml
+[runner]
+reuse = true
+```
+
+The full mode is stricter than the normal one: it refuses conftest code that
+changes which tests run or how the exit status is decided, and it counts
+gitignored files as test inputs until they are listed in `[selection]
+non_input_outputs` or `ignored_inputs`. If it refuses a project, the end line
+says `fix the cause above or remove reuse = true from .ptest.toml`. ptest 0.6.2
+and older reject the key, so everyone running the repository needs 0.6.3 or
+newer. `ptest doctor` suggests it; `doctor --fix` never sets it.
 
 ### Examples
 
@@ -301,6 +321,7 @@ test_roots = ["tests"]          # what --full runs: pytest testpaths, or every f
 workers = 1
 lifecycle = "cooperative-process-group"
 # stall_timeout = 120  # pytest: end a run whose tests finished but whose processes stay idle; 0 disables
+# reuse = true         # pytest: full mode without coverage, so a repeat --full can say "already verified"
 
 [setup]                         # runs first when required paths are missing or the lockfile changed
 argv = ["uv", "sync", "--locked"]

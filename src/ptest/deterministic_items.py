@@ -192,16 +192,16 @@ def _select_fix(config: C.Config, cfg: str, *,
            f"full_triggers in {cfg}.")
     if config.runner.kind is C.RunnerKind.PYTEST:
         if parallel_active:
-            fix += (" Test selection needs the coverage profile: declare "
-                    "[runner] coverage_args with --cov and --cov-report and a "
-                    f"[selection] policy in {cfg}; coverage is then measured "
-                    "only on runs that ask for it. Run a parallel full baseline "
-                    "once to unlock parallel selection.")
+            fix += (" Test selection needs the full mode: set [runner] "
+                    "reuse = true, or declare [runner] coverage_args with --cov "
+                    "and --cov-report (measured only on runs that ask for "
+                    f"it), and a [selection] policy in {cfg}. Run a parallel "
+                    "full baseline once to unlock parallel selection.")
         elif not qualified:
-            fix += (" For pytest without the coverage catalog profile, first "
-                    "declare [runner] coverage_args with --cov and "
-                    "--cov-report; coverage is then measured only on runs "
-                    "that ask for it.")
+            fix += (" For pytest outside the full mode, first set [runner] "
+                    "reuse = true, or declare [runner] coverage_args with "
+                    "--cov and --cov-report (measured only on runs that ask "
+                    "for it).")
     return fix
 
 

@@ -105,7 +105,9 @@ def _qualified_profile_catalog(config: C.Config) -> dict[str, str] | None:
                        for token in declared)
     has_reporter = any(token == "--cov-report" or token.startswith("--cov-report=")
                        for token in declared)
-    if not (has_coverage and has_reporter):
+    # ``[runner] reuse = true`` is the other way in, for a project that
+    # declares no coverage (spec 2026-10-12, R2).
+    if not ((has_coverage and has_reporter) or config.runner.reuse):
         return None
     return {"source": "catalog", "runner": C.RunnerKind.PYTEST.value,
             "profile": _QUALIFIED_PROFILE, "coverage_policy": "on-request",

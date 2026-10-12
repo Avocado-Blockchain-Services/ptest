@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.3
+
+- New `[runner] reuse = true` (pytest): puts a project that declares no
+  coverage in the full mode, so a clean `ptest --full` records a baseline and
+  a repeat on the same code says "already verified" in seconds; an unchanged
+  monorepo child is skipped and a fast-forward merge of a green tip is not
+  rerun. Before, only declaring coverage did that. Nothing changes for a
+  config without the key. The full mode is stricter: if it refuses a project,
+  the end line says `fix the cause above or remove reuse = true from
+  <config>`. ptest 0.6.2 and older reject the key. `ptest doctor` suggests
+  it; `doctor --fix` never sets it. Spec: `docs/specs/2026-10-12-reuse-opt-in.md`.
+
 ## 0.6.2
 
 - Faster runs on projects with a long history: a run read its history

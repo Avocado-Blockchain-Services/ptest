@@ -104,6 +104,12 @@ def format_start(*, project: str, runner: str, workers: int,
     return f"{line} · coverage" if coverage else line
 
 
+def reuse_refused_step(config_path: str) -> str:
+    """End-line step for a project in the full mode only through ``reuse``
+    whose run the bridge refused (spec 2026-10-12, R6): never "rerun"."""
+    return f"fix the cause above or remove reuse = true from {config_path}"
+
+
 def format_coverage_unavailable(*, child: str | None, runner: str,
                                 config_path: str, color: bool = False) -> str:
     """``--cov`` asked for coverage this project does not measure (C10).

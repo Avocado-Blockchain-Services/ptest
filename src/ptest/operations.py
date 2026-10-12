@@ -2380,8 +2380,7 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
         progress.emit(progress.format_coverage_unavailable(
             child=None if child is None else render.terminal_text(child.declaration),
             runner=config.runner.kind.value,
-            config_path=(".ptest.toml" if child is None
-                         else render.terminal_text(f"{child.declaration}/.ptest.toml")),
+            config_path=_config_label(config),
             color=sys.stderr.isatty()), quiet=request.quiet)
     if request.setup_only:
         progress.emit(progress.format_setup_run_start(
@@ -2491,9 +2490,34 @@ def _baseline_note(*, plan: C.Plan, advanced: bool,
     return progress.format_baseline_note(result, color=color)
 
 
+# A refusal before collection leaves no terminal report; one after it is
+# recorded as a refusal. Either way the bridge printed why on stderr.
+_BRIDGE_REFUSED = ("pytest bridge refused test execution",
+                   "native terminal report was unavailable")
+
+
+def _reuse_only(config: C.Config) -> bool:
+    """True when ``reuse`` is the only reason this project runs in the full
+    mode: removing it would bring the normal mode back."""
+    if not config.runner.reuse:
+        return False
+    try:
+        return pytest_adapter.qualified_profile(
+            replace(config, runner=replace(config.runner, reuse=False))) is None
+    except (TypeError, ValueError):
+        return False
+
+
+def _config_label(config: C.Config) -> str:
+    child = _monorepo_child(config)
+    return (".ptest.toml" if child is None
+            else render.terminal_text(f"{child.declaration}/.ptest.toml"))
+
+
 def _emit_end(request: C.RunRequest, result: C.RunResult,
               run_mono: float, *, baseline_note: str | None = None,
-              coverage_declared: bool = False) -> None:
+              coverage_declared: bool = False,
+              reuse_config: str | None = None) -> None:
     """One end line with ptest's own verdict, bridge counts, and duration."""
     if request.verbose:
         line = progress.format_timing(result.timings,
@@ -2518,6 +2542,12 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         # A plain green gate on a project that measures coverage at handoff:
         # the coverage gate is still owed (spec C11).
         next_hint = progress.NEXT_FULL_COV
+    if (reuse_config is not None and status is C.Status.INCOMPLETE
+            and any(reason.message.startswith(_BRIDGE_REFUSED)
+                    for reason in result.reasons + result.limitations)):
+        # In the full mode only through `reuse`: the guide's "rerun once"
+        # would loop, so name both ways out (spec 2026-10-12, R6).
+        next_hint = progress.reuse_refused_step(reuse_config)
     hint = (next_hint is None
             and status in (C.Status.FAILED, C.Status.INCOMPLETE,
                            C.Status.NOT_RUN)
@@ -3332,7 +3362,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
                   baseline_note=_baseline_note(
                       plan=plan, advanced=advanced, result=result,
                       color=sys.stderr.isatty()),
-                  coverage_declared=bool(config.runner.coverage_args))
+                  coverage_declared=bool(config.runner.coverage_args),
+                  reuse_config=(_config_label(config)
+                                if _reuse_only(config) else None))
         return result
 
     signals = _Signals()

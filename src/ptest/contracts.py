@@ -27,7 +27,7 @@ from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.6.2"
+PTEST_VERSION = "0.6.3"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2
@@ -452,6 +452,10 @@ class RunnerConfig:
     # fingerprint, so a run with coverage and one without stay comparable.
     coverage_args: tuple = field(default=(), repr=False)
     coverage_requested: bool = field(default=False, repr=False)
+    # ``[runner] reuse``: enter the full mode without declaring coverage. It
+    # only admits; what counts as proof is unchanged, so it stays out of the
+    # compatibility fingerprint like ``coverage_args``.
+    reuse: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         kind = _check_enum("runner.kind", self.kind, RunnerKind)
@@ -481,6 +485,9 @@ class RunnerConfig:
             "runner.coverage_args", self.coverage_args, allow_empty=True))
         if self.coverage_args and kind is not RunnerKind.PYTEST:
             raise ValueError("runner.coverage_args is supported for pytest only")
+        _check_bool("runner.reuse", self.reuse)
+        if self.reuse and kind is not RunnerKind.PYTEST:
+            raise ValueError("runner.reuse is supported for pytest only")
         object.__setattr__(self, "coverage_requested", _check_bool(
             "runner.coverage_requested", self.coverage_requested))
 

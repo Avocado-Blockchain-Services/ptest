@@ -373,7 +373,7 @@ def _runner(data: object, root: Path) -> C.RunnerConfig:
     table = _table(data)
     _keys(table, {"kind", "launcher", "args", "full_args", "coverage_args",
                   "test_roots", "workers", "lifecycle", "timeout",
-                  "full_timeout", "stall_timeout"},
+                  "full_timeout", "stall_timeout", "reuse"},
           required={"kind", "launcher"})
     kind_value = table["kind"]
     if not isinstance(kind_value, str):
@@ -390,6 +390,9 @@ def _runner(data: object, root: Path) -> C.RunnerConfig:
                           or not _pytest_adapter.coverage_tokens_valid(coverage_args)):
         _fail()
     _command_bound(launcher + args + full_args + coverage_args)
+    reuse = table.get("reuse", False)
+    if not isinstance(reuse, bool) or (reuse and kind is not C.RunnerKind.PYTEST):
+        _fail()
     roots_value = table.get("test_roots", [])
     roots = _path_sequence(
         roots_value, root,
@@ -412,6 +415,7 @@ def _runner(data: object, root: Path) -> C.RunnerConfig:
             test_roots=roots, workers=workers, lifecycle=lifecycle,
             timeout_s=timeout, full_timeout_s=full_timeout,
             stall_timeout_s=stall_timeout, coverage_args=coverage_args,
+            reuse=reuse,
         )
     except (TypeError, ValueError):
         _fail()
@@ -1184,6 +1188,7 @@ def _serialize_fresh(config: C.Config) -> bytes:
         f"full_args = {_toml_array(runner.full_args)}",
         *([f"coverage_args = {_toml_array(runner.coverage_args)}"]
           if runner.coverage_args else []),
+        *(["reuse = true"] if runner.reuse else []),
         f"test_roots = {_toml_array(runner.test_roots)}",
         f"workers = {runner.workers}",
         f"lifecycle = {_toml_string(runner.lifecycle)}",

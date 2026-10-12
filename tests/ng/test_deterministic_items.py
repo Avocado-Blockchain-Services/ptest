@@ -268,6 +268,8 @@ def test_select_fix_orders_coverage_profile_when_parallel_active(tmp_path):
     # only runs that pass --cov (spec C5/C11).
     assert "declare [runner] coverage_args" in answer.finding_change
     assert "--cov-report" in answer.finding_change
+    # Spec 2026-10-12 R7: the coverage-free way in is named too.
+    assert "reuse = true" in answer.finding_change
     assert "[selection]" in answer.finding_change
     assert "parallel full baseline once" in answer.finding_change
     assert "unlock parallel selection" in answer.finding_change
@@ -283,6 +285,7 @@ def test_select_fix_keeps_cov_guidance_when_not_parallel(tmp_path):
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
     assert "--cov" in answer.finding_change
+    assert "reuse = true" in answer.finding_change  # spec 2026-10-12 R7
 
 
 def test_select_fix_orders_selection_policy_when_parallel_active_and_qualified(
