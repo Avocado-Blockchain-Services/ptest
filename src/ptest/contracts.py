@@ -27,7 +27,7 @@ from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.6.1"
+PTEST_VERSION = "0.6.2"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2
@@ -307,9 +307,12 @@ def _check_path(name: str, value: object) -> Path:
     raise TypeError(f"{name} must be a nonempty path")
 
 
+_HEX_LOWER_RE = re.compile(r"[0-9a-f]*")
+
+
 def _check_hex(name: str, value: object, length: int) -> str:
     _check_str(name, value)
-    if len(value) != length or any(c not in HEX_LOWER for c in value):
+    if len(value) != length or _HEX_LOWER_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be {length} lowercase hex characters")
     return value
 

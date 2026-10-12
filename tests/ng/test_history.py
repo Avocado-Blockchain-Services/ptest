@@ -1802,6 +1802,99 @@ def test_corrupt_private_history_evidence_disables_selection(case):
     assert (path.parent / "history-disabled.json").exists()
 
 
+def _two_runs(case, domain, checkout):
+    """A clean full baseline (run 1) and a later failed scoped run (run 2)."""
+    baseline = _snapshot(case)
+    first = _result(case, 1, before=baseline, after=baseline, checkout=checkout)
+    H.publish_outcome(domain, checkout, first,
+                      case.inventory(("tests/test_a.py",), outcome="passed"))
+    later = _snapshot(case, digest="33" * 32)
+    second = _result(case, 2, status="failed", mode=C.Mode.SCOPED,
+                     before=later, after=later, checkout=checkout,
+                     full_gate_eligible=False)
+    H.publish_outcome(domain, checkout, second,
+                      case.inventory(("tests/test_a.py",), outcome="failed"))
+    return first, second
+
+
+def _decodes_of(monkeypatch, path, run_id):
+    """Count decodes of one stored run's private snapshot text."""
+    connection = sqlite3.connect(path)
+    try:
+        text = connection.execute(
+            "SELECT input_after FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
+    finally:
+        connection.close()
+    calls = []
+    real = H._decode_json
+    def spy(value):
+        if value == text:
+            calls.append(value)
+        return real(value)
+    monkeypatch.setattr(H, "_decode_json", spy)
+    return calls
+
+
+def test_repeat_read_does_not_revalidate_an_unchanged_run_row(case, monkeypatch):
+    """Invariant (0.6.2 overhead fix): one run read history five times and
+    re-validated every retained snapshot each time (~2.3 s per read on a
+    real project). An unchanged stored row is validated once per process."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, second = _two_runs(case, domain, checkout)
+    calls = _decodes_of(monkeypatch, _store_path(domain, checkout), second.run_id)
+    monkeypatch.setattr(H, "_VALIDATED_RUN_ROWS", set())  # a fresh process
+
+    H.read_history(domain, checkout)
+    first_read = len(calls)
+    H.read_history(domain, checkout)
+    H.read_history(domain, checkout)
+
+    assert first_read > 0
+    assert len(calls) == first_read
+
+
+def test_row_corrupted_after_a_read_is_still_detected(case):
+    """Negative twin: skipping re-validation must never hide a row another
+    writer changed after this process validated it."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, second = _two_runs(case, domain, checkout)
+    assert H.read_history(domain, checkout).baseline is not None
+    path = _store_path(domain, checkout)
+    connection = sqlite3.connect(path)
+    try:
+        private = json.loads(connection.execute(
+            "SELECT input_after FROM runs WHERE run_id = ?", (second.run_id,),
+        ).fetchone()[0])
+        private["baseline_head"] = 7
+        connection.execute("UPDATE runs SET input_after = ? WHERE run_id = ?",
+                           (json.dumps(private), second.run_id))
+        connection.commit()
+    finally:
+        connection.close()
+
+    view = H.read_history(domain, checkout)
+
+    assert view.baseline is None
+    assert any(reason.code == "coordinator-corrupt" for reason in view.limitations)
+
+
+def test_run_published_after_a_read_is_seen_by_the_next_read(case):
+    """Freshness: a later writer's new baseline is visible to the next read
+    in the same process."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    first, _ = _two_runs(case, domain, checkout)
+    assert H.read_history(domain, checkout).baseline.run_id == first.run_id
+    newer = _snapshot(case, digest="44" * 32)
+    third = _result(case, 3, before=newer, after=newer, checkout=checkout)
+    H.publish_outcome(domain, checkout, third,
+                      case.inventory(("tests/test_a.py",), outcome="passed"))
+
+    assert H.read_history(domain, checkout).baseline.run_id == third.run_id
+
+
 def test_corrupt_baseline_reference_disables_selection_without_repairing_store(case):
     domain = case.domain()
     checkout = case.checkout(domain)

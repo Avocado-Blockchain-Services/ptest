@@ -1237,58 +1237,94 @@ def _summary_rows(connection: sqlite3.Connection, limit: int | None) -> tuple[di
     return tuple(_validated_summary(_decode_json(row[0])) for row in rows)
 
 
+# Digests of run rows this process already validated. Validation is a pure
+# function of the row's bytes, so an identical row needs no second parse; a
+# row another writer added or changed has new bytes and is validated again.
+# Every read still queries the store, so nothing here can hide a write.
+_VALIDATED_RUN_ROWS: set[bytes] = set()
+_VALIDATED_RUN_ROWS_MAX = 8192
+
+
+def _run_row_digest(row: tuple) -> bytes:
+    digest = hashlib.blake2b(digest_size=32)
+    for value in row:
+        if value is None:
+            digest.update(b"n")
+        elif isinstance(value, str):
+            data = value.encode("utf-8", "surrogatepass")
+            digest.update(b"s%d:" % len(data))
+            digest.update(data)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            digest.update(b"i%d;" % value)
+        else:
+            # Any other storage class is never valid; keep it unmemoised.
+            return b""
+    return digest.digest()
+
+
 def _validate_private_runs(connection: sqlite3.Connection) -> None:
     rows = connection.execute(
         "SELECT run_id, sequence, finished_at, summary, input_before, input_after, "
         "policy_digest, source_digest, compatibility, mode, status, inventory FROM runs"
     ).fetchall()
     for row in rows:
-        run_id, sequence, finished_at, summary_text = row[:4]
-        if (
-            not isinstance(run_id, str)
-            or not isinstance(sequence, int)
-            or isinstance(sequence, bool)
-            or sequence < 0
-            or not isinstance(finished_at, str)
-            or not isinstance(summary_text, str)
-        ):
-            raise _HistoryStateError("coordinator-corrupt")
-        summary = _validated_summary(_decode_json(summary_text))
-        if (
-            summary.get("run_id") != run_id
-            or summary.get("finished_at") != finished_at
-            or summary.get("mode") != row[9]
-            or summary.get("status") != row[10]
-        ):
-            raise _HistoryStateError("coordinator-corrupt")
-        snapshots = []
-        for private_snapshot in row[4:6]:
-            if private_snapshot is None:
-                snapshots.append(None)
-            else:
-                if not isinstance(private_snapshot, str):
-                    raise _HistoryStateError("coordinator-corrupt")
-                snapshots.append(_snapshot_from_dict(_decode_json(private_snapshot)))
-        for digest in (row[6], row[7]):
-            if digest is not None and (
-                not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None
-            ):
-                raise _HistoryStateError("coordinator-corrupt")
-        if row[8] is not None and not isinstance(row[8], str):
-            raise _HistoryStateError("coordinator-corrupt")
-        if row[11] is not None:
-            if not isinstance(row[11], str):
-                raise _HistoryStateError("coordinator-corrupt")
-            inventory = _inventory_from_dict(_decode_json(row[11]))
+        key = _run_row_digest(row)
+        if key and key in _VALIDATED_RUN_ROWS:
+            continue
+        _validate_private_run(row)
+        if key:
+            if len(_VALIDATED_RUN_ROWS) >= _VALIDATED_RUN_ROWS_MAX:
+                _VALIDATED_RUN_ROWS.clear()
+            _VALIDATED_RUN_ROWS.add(key)
+
+
+def _validate_private_run(row: tuple) -> None:
+    run_id, sequence, finished_at, summary_text = row[:4]
+    if (
+        not isinstance(run_id, str)
+        or not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 0
+        or not isinstance(finished_at, str)
+        or not isinstance(summary_text, str)
+    ):
+        raise _HistoryStateError("coordinator-corrupt")
+    summary = _validated_summary(_decode_json(summary_text))
+    if (
+        summary.get("run_id") != run_id
+        or summary.get("finished_at") != finished_at
+        or summary.get("mode") != row[9]
+        or summary.get("status") != row[10]
+    ):
+        raise _HistoryStateError("coordinator-corrupt")
+    snapshots = []
+    for private_snapshot in row[4:6]:
+        if private_snapshot is None:
+            snapshots.append(None)
         else:
-            inventory = None
-        expected_digest, expected_compatibility = _snapshots_identity(
-            snapshots[0], snapshots[1], summary,
-        )
-        if row[7] != expected_digest or row[8] != expected_compatibility:
+            if not isinstance(private_snapshot, str):
+                raise _HistoryStateError("coordinator-corrupt")
+            snapshots.append(_snapshot_from_dict(_decode_json(private_snapshot)))
+    for digest in (row[6], row[7]):
+        if digest is not None and (
+            not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None
+        ):
             raise _HistoryStateError("coordinator-corrupt")
-        if inventory is not None and len({item.id for item in inventory.tests}) != len(inventory.tests):
+    if row[8] is not None and not isinstance(row[8], str):
+        raise _HistoryStateError("coordinator-corrupt")
+    if row[11] is not None:
+        if not isinstance(row[11], str):
             raise _HistoryStateError("coordinator-corrupt")
+        inventory = _inventory_from_dict(_decode_json(row[11]))
+    else:
+        inventory = None
+    expected_digest, expected_compatibility = _snapshots_identity(
+        snapshots[0], snapshots[1], summary,
+    )
+    if row[7] != expected_digest or row[8] != expected_compatibility:
+        raise _HistoryStateError("coordinator-corrupt")
+    if inventory is not None and len({item.id for item in inventory.tests}) != len(inventory.tests):
+        raise _HistoryStateError("coordinator-corrupt")
 
 
 def _validate_baseline(

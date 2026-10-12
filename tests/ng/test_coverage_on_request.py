@@ -499,6 +499,64 @@ def test_fix_leaves_a_declared_coverage_split_alone(tmp_path, monkeypatch, capsy
     assert (after.args, after.coverage_args) == (before.args, before.coverage_args)
 
 
+def _hand_written(root: Path, args_toml: str) -> None:
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{"ab" * 16}"\n'
+        "\n"
+        "[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["uv", "run", "--locked", "--no-sync", "python"]\n'
+        f"{args_toml}\n"
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "# workers = 4\n"
+        "\n"
+        "[selection]\n"
+        "enabled = false\n"
+        'full_triggers = ["conftest.py"]\n',
+        encoding="utf-8")
+
+
+def test_fix_writes_coverage_args_among_the_runner_settings(
+        tmp_path, monkeypatch, capsys):
+    """C11, pinned layout: the moved key joins the [runner] settings, not
+    the blank line and trailing comment that separate the next table (0.6.1
+    wrote it just above `[selection]`)."""
+    root = _write_pytest_project(tmp_path / "layout")
+    _hand_written(root, 'args = ["--cov=pkg", "--cov-report=term"]')
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    lines = (root / ".ptest.toml").read_text(encoding="utf-8").splitlines()
+    roots = lines.index('test_roots = ["tests"]')
+    assert lines[roots + 1:roots + 5] == [
+        'coverage_args = ["--cov=pkg", "--cov-report=term"]',
+        "# workers = 4", "", "[selection]"]
+    assert _fixed(root).runner.coverage_args == ("--cov=pkg", "--cov-report=term")
+
+
+def test_fix_moves_cov_out_of_a_multiline_args_array(tmp_path, monkeypatch, capsys):
+    """C11: an args array written over several lines is migrated, and its
+    continuation lines do not survive the rewrite (0.6.1 replaced only the
+    first line, so the patch did not parse and doctor refused)."""
+    root = _write_pytest_project(tmp_path / "multiline")
+    _hand_written(root, 'args = [\n    "-x",  # stop early\n    "--cov=pkg",\n'
+                        '    "--cov-report=term",\n]')
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    text = (root / ".ptest.toml").read_text(encoding="utf-8")
+    runner = _fixed(root).runner
+    assert runner.args == ("-x",)
+    assert runner.coverage_args == ("--cov=pkg", "--cov-report=term")
+    assert "--cov=pkg" not in text.split("coverage_args", 1)[0]
+
+
 def test_fix_without_cov_adds_no_coverage_args(tmp_path, monkeypatch, capsys):
     """C11 negative: doctor never invents coverage for a project without it."""
     root = _write_pytest_project(tmp_path / "plain")

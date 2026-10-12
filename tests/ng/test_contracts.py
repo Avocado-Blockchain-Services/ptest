@@ -17,7 +17,7 @@ WRONG_NONCE = "cd" * 32
 
 
 def test_bootstrap_smoke():
-    assert C.PTEST_VERSION == "0.6.1"
+    assert C.PTEST_VERSION == "0.6.2"
     assert C.SCHEMA_VERSION == 1
     assert C.MAX_PROMPT_BYTES == 65536
     assert C.ExecutionTier("advanced") is C.ExecutionTier.ADVANCED
@@ -339,7 +339,7 @@ def test_nine_public_documents_parse():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
-        assert doc.ptest_version == "0.6.1"
+        assert doc.ptest_version == "0.6.2"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
     full = C.decode_public_document(
@@ -2482,3 +2482,21 @@ def test_run_request_deselect_over_limit_rejected():
             mode=C.Mode.SCOPED,
             deselect=tuple(f"tests/test_{i}.py::test_x" for i in range(
                 C.SELECTION_DESELECT_MAX_IDS + 1)))
+
+
+@pytest.mark.parametrize("digest", [
+    "",                       # empty
+    "a" * 63,                 # short
+    "a" * 65,                 # long
+    "A" * 64,                 # uppercase
+    "a" * 63 + "\n",          # trailing newline a `$` anchor would accept
+    "a" * 63 + "g",           # not hex
+    "a" * 63 + "٣",      # Arabic-Indic digit three (a Unicode digit)
+    "a" * 63 + "１",      # fullwidth digit one
+])
+def test_fingerprint_digest_is_exactly_lowercase_ascii_hex(digest):
+    """Invariant: a stored digest is 64 lowercase ASCII hex characters; the
+    faster check (0.6.2) rejects every spelling the per-character one did."""
+    with pytest.raises(ValueError):
+        C.FileFingerprint(path="a.py", digest=digest, mode=0o644, size=1)
+    assert C.FileFingerprint(path="a.py", digest="0f" * 32, mode=0o644, size=1)

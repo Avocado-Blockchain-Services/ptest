@@ -1597,7 +1597,8 @@ def _process_gone(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
             return handle.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Reaped between open and read: the read fails with ESRCH.
         return True
 
 

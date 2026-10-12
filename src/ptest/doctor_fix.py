@@ -1064,6 +1064,22 @@ def _table_name(header: str) -> str:
     return name
 
 
+def _value_end(lines: list[str], start: int, end: int) -> int:
+    """Return the index after the last line of the value keyed at ``start``.
+
+    The value ends at the first line that completes a parseable TOML
+    assignment; an unparseable value keeps its single line, and the final
+    whole-file parse then refuses the patch.
+    """
+    for stop in range(start + 1, end + 1):
+        try:
+            tomllib.loads("".join(lines[start:stop]))
+        except tomllib.TOMLDecodeError:
+            continue
+        return stop
+    return start + 1
+
+
 def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
     """Splice managed ``key = value`` lines into the existing text."""
     lines = raw.decode("utf-8").splitlines(keepends=True)
@@ -1084,6 +1100,7 @@ def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
     pending = {table: list(items) for table, items in by_table.items()}
     edits: dict[int, str] = {}
     inserts: dict[int, list[str]] = {}
+    spanned: set[int] = set()
 
     for table, items in pending.items():
         start = next((index for index, name in headers if name == table),
@@ -1094,14 +1111,27 @@ def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
                    len(lines))
         remaining = list(items)
         for index in range(start + 1, end):
+            if index in spanned:
+                continue
             for change in list(remaining):
                 if re.match(_KEY_RE_TEMPLATE % re.escape(change.key),
                             lines[index]):
                     edits[index] = change.rendered() + "\n"
+                    # A value written over several lines is replaced whole.
+                    spanned.update(range(index + 1,
+                                         _value_end(lines, index, end)))
                     remaining.remove(change)
                     break
         if remaining:
-            inserts.setdefault(end, []).extend(
+            # New keys join the table's own settings: after its last
+            # setting line, ahead of the trailing comments and blank lines
+            # that lead into the next table.
+            anchor = start + 1
+            for index in range(start + 1, end):
+                text = lines[index].strip()
+                if text and not text.startswith("#"):
+                    anchor = index + 1
+            inserts.setdefault(anchor, []).extend(
                 change.rendered() + "\n" for change in remaining)
 
     # Missing tables are appended at EOF in first-change order.
@@ -1122,7 +1152,8 @@ def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
     for index, line in enumerate(lines):
         if index in inserts:
             result.extend(inserts[index])
-        result.append(edits.get(index, line))
+        if index not in spanned:
+            result.append(edits.get(index, line))
     if len(lines) in inserts:
         result.extend(inserts[len(lines)])
     return "".join(result).encode("utf-8")

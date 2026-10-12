@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+- Faster runs on projects with a long history: a run read its history
+  five times and re-validated every stored snapshot each time (about 2.3 s
+  per read on a 2,600-file project). A stored run is now validated once
+  per process; every read still queries the store, so a row another run
+  added or changed is validated again. Digest checks are also faster.
+- `ptest doctor --fix` writes a new key (such as `coverage_args`) among
+  the table's own settings instead of after the blank line and comments
+  that lead into the next table, and replaces a value written over
+  several lines whole: an `args` array spanning lines is now migrated
+  instead of refused as "cannot be patched safely".
+- Test suite: a process-exit check no longer fails when the process is
+  reaped between opening and reading its `/proc` entry.
+
 ## 0.6.1
 
 - Fix: `ptest --cov` on a project that declares coverage only in
