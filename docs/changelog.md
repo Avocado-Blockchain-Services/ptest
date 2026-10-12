@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.6
+
+- `ptest doctor --fix` no longer declares a whole directory when ptest's
+  own byproducts live in it too. In fullon2's integrations it drafted
+  `launchpad/__pycache__` for one stale `.pyc` (its test was deleted),
+  which would have made the current bytecode beside it a fingerprinted
+  input; it now drafts only the stale file.
+- `ptest doctor --fix` says when it could not check a project's gitignored
+  files (for example `input fingerprint byte limit exceeded` for a large
+  `.next` build directory) instead of drafting nothing silently.
+
 ## 0.6.5
 
 - A run in the full mode no longer ends `incomplete (exit 70)` because the

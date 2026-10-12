@@ -252,7 +252,7 @@ def test_fix_drafts_outputs_and_inputs_from_gitignored_files(tmp_path):
     }
     notes = _notes(plan)
     assert "not declared: linked is a symlink" in notes
-    assert "not declared: .env, .env.local — tests may read it" in notes
+    assert "not declared: .env, .env.local — tests may read them" in notes
     assert "ptest --full --again" in notes
 
 
@@ -273,6 +273,33 @@ def test_fix_never_drafts_an_entry_that_would_invalidate_the_policy(tmp_path):
     plan = _plan(root)
     assert _selection_changes(plan) == {}
     assert "gen" in _notes(plan)
+
+
+def test_fix_never_declares_a_directory_that_also_holds_ptest_byproducts(tmp_path):
+    """fullon2 integrations: a stale .pyc (its test was deleted) sits beside
+    bytecode ptest already ignores. Declaring the whole __pycache__ would
+    make that bytecode a fingerprinted input; only the stale file is drafted."""
+    root = _repo(tmp_path, gitignore="__pycache__/\n")
+    _write(root, "tests/__pycache__/test_app.cpython-313-pytest-9.1.1.pyc")
+    _write(root, "tests/__pycache__/test_gone.cpython-313-pytest-9.1.1.pyc")
+    assert _selection_changes(_plan(root)) == {
+        "ignored_inputs": ("tests/__pycache__/test_gone.cpython-313-pytest-9.1.1.pyc",)}
+
+
+def test_fix_says_when_it_could_not_check_gitignored_files(tmp_path, monkeypatch):
+    """fullon2 web: .next exceeded the input scan's byte limit and doctor
+    drafted nothing without saying so."""
+    from ptest import source
+
+    root = _repo(tmp_path, gitignore="data/\n")
+    _write(root, "data/x")
+    limited = C.InputSnapshot(digest=None, compatibility=None, head=None, clean=False,
+                              limitations=(C.Reason(code="scan-limit",
+                                  message="input fingerprint byte limit exceeded"),))
+    monkeypatch.setattr(source, "listing_snapshot", lambda config: limited)
+    plan = _plan(root)
+    assert plan.files == ()
+    assert "gitignored files not checked: input fingerprint byte limit exceeded" in _notes(plan)
 
 
 def test_fix_has_nothing_to_draft_for_a_clean_tree(tmp_path):

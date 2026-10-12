@@ -54,8 +54,11 @@ them to the shortest directory that hides no other file, and drafts:
   reaches doctor.)
 - a symlink that is not a `.env` file: nothing (it cannot be an input); the note
   names it.
-Existing entries are kept; a drafted entry that would make the policy invalid is
-dropped. The run-start "can improve this config" notice ignores these drafts, because
+A directory is drafted whole only when nothing else lies below it (ptest's own
+byproducts, such as current bytecode, are not in its snapshot; 0.6.6), otherwise
+its files are drafted one by one. When the scan stops at a limit, the note says
+so instead of drafting nothing silently (0.6.6). Existing entries are kept; a
+drafted entry that would make the policy invalid is dropped. The run-start "can improve this config" notice ignores these drafts, because
 they depend on the working tree, not on the ptest version.
 
 T6. **The run says how.** The "gitignored paths count as test inputs" reason and the

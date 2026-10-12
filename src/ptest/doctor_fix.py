@@ -920,6 +920,37 @@ def _tagged_cache(project_dir: Path, rel: str) -> bool:
     return data == _CACHEDIR_SIGNATURE
 
 
+#: A directory is declared whole only when a walk of at most this many
+#: entries finds nothing below it but the files being declared.
+_COLLAPSE_WALK_LIMIT = 10_000
+
+
+def _holds_only(project_dir: Path, entry: str, declared: set[str]) -> bool:
+    """True when every entry below directory ``entry`` is one of the
+    ``declared`` files. ptest's own byproducts and outputs are missing from
+    its snapshot, so the snapshot alone cannot tell whether declaring the
+    directory would also turn them into inputs or outputs."""
+    base = project_dir / entry
+    try:
+        if not stat.S_ISDIR(os.lstat(base).st_mode):
+            return True
+    except OSError:
+        return False
+    seen = 0
+    for directory, subdirs, names in os.walk(base):
+        # os.walk lists a symlinked directory but never descends into it.
+        links = [name for name in subdirs
+                 if os.path.islink(os.path.join(directory, name))]
+        for name in names + links:
+            seen += 1
+            if seen > _COLLAPSE_WALK_LIMIT:
+                return False
+            rel = Path(directory, name).relative_to(project_dir).as_posix()
+            if rel not in declared:
+                return False
+    return True
+
+
 def _draft_gitignored(config: C.Config, project_dir: Path,
                       changes: list[FieldChange], notes: list[str]) -> None:
     """Declare the gitignored files ptest would count as undeclared inputs.
@@ -936,6 +967,9 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
 
     snapshot = source.listing_snapshot(config)
     if snapshot.digest is None:
+        if any(item.code == "scan-limit" for item in snapshot.limitations):
+            notes.append("gitignored files not checked: "
+                         f"{snapshot.limitations[0].message}")
         return
     ignored = [change.new for change in snapshot.changes
                if change.kind == "ignored" and change.new
@@ -950,7 +984,15 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
     outputs, inputs = list(policy.non_input_outputs), list(policy.ignored_inputs)
     added_input = False
     env_files: list[str] = []
-    entries = selection_api.declarable(ignored, snapshot)
+    declared = set(ignored)
+    entries: list[str] = []
+    for entry in selection_api.declarable(ignored, snapshot):
+        if _holds_only(project_dir, entry, declared):
+            entries.append(entry)
+        else:
+            entries.extend(path for path in ignored
+                           if path.startswith(entry + "/"))
+    entries = sorted(dict.fromkeys(entries))
     for entry in entries[:_GITIGNORED_DRAFT_LIMIT]:
         try:
             link = stat.S_ISLNK(os.lstat(project_dir / entry).st_mode)
@@ -992,10 +1034,11 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
                           if (change.table, change.key) != ("selection", key)]
             changes.append(FieldChange("selection", key, after))
     if env_files:
+        it = "it" if len(env_files) == 1 else "them"
         notes.append(
-            f"not declared: {', '.join(env_files)} — tests may read it. To let "
-            "the full gate reuse a green run, add it to [selection] "
-            "non_input_outputs and run ptest --full --again after editing it "
+            f"not declared: {', '.join(env_files)} — tests may read {it}. To "
+            f"let the full gate reuse a green run, add {it} to [selection] "
+            f"non_input_outputs and run ptest --full --again after an edit "
             "(ignored_inputs refuses a worktree's symlinked .env)")
     if added_input:
         notes.append("ignored_inputs are gitignored files tests may read; "
