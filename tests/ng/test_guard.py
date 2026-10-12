@@ -1526,11 +1526,22 @@ def test_predecessor_quiescent_stays_fast_while_cancelling(monkeypatch):
 
     uncertain = SimpleNamespace(run_id="r1", state=C.LeaseState.UNCERTAIN)
     reads = []
+    scan_budgets = []
 
     def stuck(domain):
         reads.append(1)
         return (uncertain,)
 
+    # The real process-table scan is machine-dependent: with thousands of
+    # processes from other runs every pass can overrun its poll budget, so
+    # the scan ends "needs cleanup" before the lease view is consulted
+    # (0.6.5 gate, under a concurrent fullon run). Its budget is what this
+    # test is about, so record it instead of running it.
+    def scanned(identity, deadline_s=None):
+        scan_budgets.append(deadline_s)
+        return False
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup", scanned)
     monkeypatch.setattr(guard_module.scheduler, "reconcile", stuck)
 
     state = guard_module._State()
@@ -1540,6 +1551,7 @@ def test_predecessor_quiescent_stays_fast_while_cancelling(monkeypatch):
         _quiescent_manifest(), _quiescent_identity(), state) is False
     # A pending cancel owns the timeline: the kill path keeps its budget
     # instead of burning the patient spawn-gate budgets.
+    assert scan_budgets == [guard_module._CANCEL_QUIESCENCE_DEADLINE_S]
     assert time.monotonic() - started < 5
     assert state.problem is not None
     assert len(reads) >= 1

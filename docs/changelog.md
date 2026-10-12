@@ -16,6 +16,9 @@
 - When history cannot be saved, the end line says why (for example
   `path …/history.sqlite3 must be mode 0600`), not only "advanced attempt
   history could not be committed".
+- Test suite: a guard test no longer depends on how fast the machine's
+  whole process table can be scanned; it failed while another project's
+  run was in progress.
 
 ## 0.6.4
 
