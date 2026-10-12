@@ -26,7 +26,7 @@ import re
 import secrets
 import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import contracts as C
@@ -132,6 +132,7 @@ class FixPlan:
 
     files: tuple = ()
     refusals: tuple = ()
+    notes: tuple = ()
 
     @property
     def change_count(self) -> int:
@@ -898,9 +899,117 @@ def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, 
             {"groups": groups})
 
 
-def plan_project(root: Path, declaration: str,
-                 config: C.Config) -> FileFix | None:
-    """Compute the fix for one project, or None when it is up to date."""
+#: The Cache Directory Tagging signature (https://bford.info/cachedir/).
+_CACHEDIR_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
+#: At most this many gitignored entries are drafted per project.
+_GITIGNORED_DRAFT_LIMIT = 64
+_SELECTION_PATH_KEYS = ("input_roots", "ignored_inputs", "full_triggers",
+                        "always", "no_tests", "non_input_outputs")
+
+
+def _tagged_cache(project_dir: Path, rel: str) -> bool:
+    """A real directory holding a regular ``CACHEDIR.TAG`` that starts with
+    the standard signature; a link anywhere on the way means no."""
+    try:
+        if not stat.S_ISDIR(os.lstat(project_dir / rel).st_mode):
+            return False
+        data = files.read_regular(project_dir, f"{rel}/CACHEDIR.TAG",
+                                  len(_CACHEDIR_SIGNATURE))
+    except (OSError, C.Problem):
+        return False
+    return data == _CACHEDIR_SIGNATURE
+
+
+def _draft_gitignored(config: C.Config, project_dir: Path,
+                      changes: list[FieldChange], notes: list[str]) -> None:
+    """Declare the gitignored files ptest would count as undeclared inputs.
+
+    ptest's own snapshot names them, so built-in outputs and runner
+    byproducts never appear. Tagged caches become outputs; anything else
+    becomes an input, which is fingerprinted, so a wrong guess costs a
+    rerun and never keeps stale proof. ``.env`` files and symlinks are only
+    named: tests may read a ``.env``, yet a worktree's ``.env`` is a
+    symlink, which an input entry refuses, so that choice is the user's.
+    """
+    from . import selection as selection_api
+    from . import source
+
+    snapshot = source.listing_snapshot(config)
+    if snapshot.digest is None:
+        return
+    ignored = [change.new for change in snapshot.changes
+               if change.kind == "ignored" and change.new
+               and not change.new.startswith("../")]
+    if not ignored:
+        return
+    policy = config.selection
+    for change in changes:
+        if change.table == "selection" and change.key in _SELECTION_PATH_KEYS:
+            policy = replace(policy, **{change.key: tuple(change.value)})
+    test_roots = tuple(config.runner.test_roots)
+    outputs, inputs = list(policy.non_input_outputs), list(policy.ignored_inputs)
+    added_input = False
+    env_files: list[str] = []
+    entries = selection_api.declarable(ignored, snapshot)
+    for entry in entries[:_GITIGNORED_DRAFT_LIMIT]:
+        try:
+            link = stat.S_ISLNK(os.lstat(project_dir / entry).st_mode)
+        except OSError:
+            continue
+        name = entry.rsplit("/", 1)[-1]
+        if name == ".env" or name.startswith(".env."):
+            env_files.append(entry)
+            continue
+        if _tagged_cache(project_dir, entry):
+            target = outputs
+        elif link:
+            notes.append(f"not declared: {entry} is a symlink; declare it "
+                         "in [selection] yourself")
+            continue
+        else:
+            target = inputs
+        target.append(entry)
+        try:
+            candidate = replace(policy, non_input_outputs=tuple(outputs),
+                                ignored_inputs=tuple(inputs))
+            invalid = selection_api._invalid_policy(candidate, test_roots)
+        except (TypeError, ValueError):
+            invalid = True
+        if invalid:
+            target.pop()
+            notes.append(f"not declared: {entry} overlaps a declared "
+                         "[selection] entry")
+            continue
+        added_input = added_input or target is inputs
+    if len(entries) > _GITIGNORED_DRAFT_LIMIT:
+        notes.append(f"not declared: {len(entries) - _GITIGNORED_DRAFT_LIMIT} "
+                     "more gitignored paths")
+    for key, before, after in (
+            ("non_input_outputs", policy.non_input_outputs, tuple(outputs)),
+            ("ignored_inputs", policy.ignored_inputs, tuple(inputs))):
+        if after != before:
+            changes[:] = [change for change in changes
+                          if (change.table, change.key) != ("selection", key)]
+            changes.append(FieldChange("selection", key, after))
+    if env_files:
+        notes.append(
+            f"not declared: {', '.join(env_files)} — tests may read it. To let "
+            "the full gate reuse a green run, add it to [selection] "
+            "non_input_outputs and run ptest --full --again after editing it "
+            "(ignored_inputs refuses a worktree's symlinked .env)")
+    if added_input:
+        notes.append("ignored_inputs are gitignored files tests may read; "
+                     "move one to non_input_outputs if no test reads it")
+
+
+def plan_project(root: Path, declaration: str, config: C.Config, *,
+                 tree_drafts: bool = True,
+                 notes: list | None = None) -> FileFix | None:
+    """Compute the fix for one project, or None when it is up to date.
+
+    ``tree_drafts`` adds the drafts that depend on the working tree
+    (gitignored files); notes about them are appended to ``notes``.
+    """
     rel = _cfg(declaration)
     raw, identity = _read_text(root, rel)
     parsed = _parse_table(raw, rel)
@@ -983,22 +1092,21 @@ def plan_project(root: Path, declaration: str,
                 changes.append(FieldChange("setup", "argv", fixed_argv))
 
     selection = parsed.get("selection", {})
-    if kind is C.RunnerKind.VITEST:
+    have_outputs: tuple = ()
+    if isinstance(selection, dict) and isinstance(
+            selection.get("non_input_outputs"), list):
+        have_outputs = tuple(
+            item for item in selection["non_input_outputs"]
+            if isinstance(item, str))
+    if kind is C.RunnerKind.VITEST and "node_modules" not in have_outputs:
         # Vite writes its cache under node_modules (e.g. .vite-temp), so
         # an existing vitest config without that exemption can never
         # record a baseline.  Append only the missing exemption, keeping
         # any hand-tuned entries; dependency changes stay governed by the
         # lockfile/setup fingerprint.
-        have_outputs: tuple = ()
-        if isinstance(selection, dict) and isinstance(
-                selection.get("non_input_outputs"), list):
-            have_outputs = tuple(
-                item for item in selection["non_input_outputs"]
-                if isinstance(item, str))
-        if "node_modules" not in have_outputs:
-            changes.append(FieldChange(
-                "selection", "non_input_outputs",
-                have_outputs + ("node_modules",)))
+        changes.append(FieldChange(
+            "selection", "non_input_outputs",
+            have_outputs + ("node_modules",)))
     if (kind is C.RunnerKind.PYTEST
             and not _has_cov(tuple(current_args) + coverage_tokens)
             and isinstance(selection, dict)
@@ -1038,6 +1146,9 @@ def plan_project(root: Path, declaration: str,
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
 
+    if tree_drafts and kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST):
+        _draft_gitignored(config, project_dir, changes,
+                          notes if notes is not None else [])
     if not changes:
         return None
     updated = _apply_changes(raw, changes)
@@ -1159,8 +1270,14 @@ def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
     return "".join(result).encode("utf-8")
 
 
-def plan_all(root: Path, resolution: C.ConfigResolution) -> FixPlan:
-    """Plan fixes for the dispatcher children or the standalone project."""
+def plan_all(root: Path, resolution: C.ConfigResolution, *,
+             tree_drafts: bool = True) -> FixPlan:
+    """Plan fixes for the dispatcher children or the standalone project.
+
+    The run-start upgrade notice passes ``tree_drafts=False``: it speaks
+    once per ptest version, and drafts for gitignored files depend on the
+    working tree, not on the version.
+    """
     if resolution.config is None and resolution.monorepo is None:
         raise resolution.problem or _problem(
             "initialization-required", "project configuration is required")
@@ -1172,6 +1289,7 @@ def plan_all(root: Path, resolution: C.ConfigResolution) -> FixPlan:
         targets.append((".", resolution.config))
     files_out: list[FileFix] = []
     refusals: list[Refusal] = []
+    notes: list[str] = []
     for declaration, config in targets:
         try:
             if config is None:
@@ -1183,14 +1301,20 @@ def plan_all(root: Path, resolution: C.ConfigResolution) -> FixPlan:
                         "invalid-config",
                         f"child {declaration} does not resolve")
                 config = diagnosis.config
-            planned = plan_project(root, declaration, config)
+            project_notes: list[str] = []
+            planned = plan_project(root, declaration, config,
+                                   tree_drafts=tree_drafts,
+                                   notes=project_notes)
+            notes.extend(f"# {_cfg(declaration)}: {note}"
+                         for note in project_notes)
         except C.Problem as problem:
             refusals.append(Refusal(rel=_cfg(declaration), code=problem.code,
                                     message=problem.message))
             continue
         if planned is not None:
             files_out.append(planned)
-    return FixPlan(files=tuple(files_out), refusals=tuple(refusals))
+    return FixPlan(files=tuple(files_out), refusals=tuple(refusals),
+                   notes=tuple(notes))
 
 
 def render_diff(plan: FixPlan) -> str:
@@ -1204,6 +1328,7 @@ def render_diff(plan: FixPlan) -> str:
         parts.append("\n".join(diff))
         if item.drafts:
             parts.append(_SELECTION_DRAFT_NOTE)
+    parts.extend(plan.notes)
     return "\n".join(parts) + "\n" if parts else ""
 
 
@@ -1264,6 +1389,7 @@ def render_summary(plan: FixPlan) -> str:
             lines.append(f"{item.rel}: {_summarise_change(change)}")
         if item.drafts:
             lines.append(_SELECTION_DRAFT_NOTE)
+    lines.extend(plan.notes)
     return "\n".join(lines) + "\n" if lines else ""
 
 

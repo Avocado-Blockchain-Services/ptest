@@ -2481,6 +2481,8 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
         raise _problem(refusal.code, f"{refusal.rel}: {refusal.message}")
     if not plan.files:
         print("config is up to date")
+        for note in plan.notes:
+            print(note)
         return 0
     if parsed.verbose:
         sys.stdout.write(doctor_fix.render_diff(plan))
@@ -3454,7 +3456,8 @@ def _notice_config_upgrade(resolution: C.ConfigResolution, parsed) -> None:
         if seen == C.PTEST_VERSION:
             return
         files.publish_atomic(seen_dir, name, C.PTEST_VERSION.encode("ascii"))
-        plan = doctor_fix.plan_all(resolution.root, resolution)
+        plan = doctor_fix.plan_all(resolution.root, resolution,
+                                   tree_drafts=False)
         count = int(plan.change_count)
         if count:
             progress.emit(

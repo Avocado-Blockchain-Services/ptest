@@ -1,6 +1,7 @@
 """Pure, conservative mapping from a static snapshot to a test plan."""
 from __future__ import annotations
 
+import functools
 import hashlib
 from dataclasses import replace
 
@@ -22,6 +23,52 @@ def _matches(path: str, patterns: tuple) -> bool:
 
 def _overlaps(left: str, right: str) -> bool:
     return _matches(left, (right,)) or _matches(right, (left,))
+
+
+#: Tool outputs no test reads, exempt at the project root without any
+#: configuration: graphify's knowledge graph and the ruff and mypy caches.
+BUILTIN_OUTPUTS = ("graphify-out", ".ruff_cache", ".mypy_cache")
+
+
+@functools.lru_cache(maxsize=64)
+def non_input_outputs(policy: C.SelectionPolicy, test_roots: tuple = ()) -> tuple:
+    """Declared non-input outputs plus every built-in no config entry claims.
+
+    The config wins: a built-in overlapping an input, trigger, exclusion,
+    group or test root is dropped, so it can never hide a declared input
+    or make a valid policy invalid. Built-ins are not policy fields, so
+    the policy digest (and every baseline) is unchanged by them.
+    """
+    claimed = (policy.input_roots + policy.full_triggers + policy.always
+               + policy.ignored_inputs + policy.no_tests + tuple(test_roots)
+               + tuple(path for group in policy.groups
+                       for path in group.sources + group.tests))
+    builtin = tuple(item for item in BUILTIN_OUTPUTS
+                    if item not in policy.non_input_outputs
+                    and not any(_overlaps(item, other) for other in claimed))
+    return policy.non_input_outputs + builtin
+
+
+def declarable(ignored: list[str], snapshot: C.InputSnapshot) -> list[str]:
+    """Collapse ignored files to the shortest directory holding no tracked,
+    untracked or deleted path, so declaring it can never hide another file."""
+    ignored_set = set(ignored)
+    protected = {item.path for item in snapshot.files if item.path not in ignored_set}
+    protected.update(path for change in snapshot.changes if change.kind != "ignored"
+                     for path in (change.old, change.new) if path)
+    protected_dirs = {"/".join(path.split("/")[:index])
+                      for path in protected for index in range(1, path.count("/") + 1)}
+    declare = []
+    for path in ignored:
+        parts = path.split("/")
+        chosen = path
+        for index in range(1, len(parts)):
+            prefix = "/".join(parts[:index])
+            if prefix not in protected_dirs:
+                chosen = prefix
+                break
+        declare.append(chosen)
+    return sorted(dict.fromkeys(declare))
 
 
 def _invalid_policy(policy: C.SelectionPolicy, test_roots: tuple = ()) -> bool:
@@ -113,7 +160,8 @@ def choose_plan(config: C.Config, snapshot: C.InputSnapshot,
                 return _full(request, snapshot, "policy-changed", "full-trigger input changed")
             if _matches(path, policy.no_tests):
                 continue
-            if change.kind in {"untracked", "ignored"} and _matches(path, policy.non_input_outputs):
+            if change.kind in {"untracked", "ignored"} and _matches(
+                    path, non_input_outputs(policy, tuple(config.runner.test_roots))):
                 continue
             if change.kind == "ignored" and not _matches(path, policy.ignored_inputs):
                 return _full(request, snapshot, "unknown-input", "ignored input is not declared")

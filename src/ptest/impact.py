@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import contracts as C
 from .monorepo import _git_blob, worktree_changed_files
-from .selection import _matches
+from .selection import _matches, non_input_outputs
 
 MAX_SCAN_FILES = 20000
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -259,7 +259,7 @@ def _is_test_support(path: str, test_roots: tuple) -> bool:
     return False
 
 
-def _is_ignored(path: str, selection) -> bool:
+def _is_ignored(path: str, selection, test_roots: tuple = ()) -> bool:
     parts = path.split("/")
     if any(part.startswith(".") for part in parts):
         return True
@@ -271,7 +271,7 @@ def _is_ignored(path: str, selection) -> bool:
         return True
     if _matches(path, selection.ignored_inputs):
         return True
-    if _matches(path, selection.non_input_outputs):
+    if _matches(path, non_input_outputs(selection, test_roots)):
         return True
     return False
 
@@ -462,12 +462,12 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
     graph_kinds = (C.RunnerKind.PYTEST.value, C.RunnerKind.VITEST.value)
     for path in scoped:
         if _is_code_file(path, kind_value):
-            (relevant if not _is_ignored(path, selection)
+            (relevant if not _is_ignored(path, selection, test_roots)
              else noted).append(path)
         elif kind_value in graph_kinds and not _inside_code_area(
                 project_root, path, test_roots):
             dropped += 1
-        elif _is_ignored(path, selection):
+        elif _is_ignored(path, selection, test_roots):
             noted.append(path)
         else:
             relevant.append(path)

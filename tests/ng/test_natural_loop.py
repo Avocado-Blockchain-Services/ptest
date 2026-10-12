@@ -645,8 +645,9 @@ def test_undeclared_gitignored_inputs_are_named_with_their_fix():
     reason = operations.full_run_reason(_baseline(), snapshot, "dd" * 32)
     assert reason == (
         "gitignored paths count as test inputs: .env, build, graphify-out (+1 more)"
-        " — in .ptest.toml [selection], list the ones tests never read in"
-        " non_input_outputs and the ones they read in ignored_inputs")
+        " — run ptest doctor --fix, or in .ptest.toml [selection] list the ones"
+        " tests never read in non_input_outputs and the ones they read in"
+        " ignored_inputs")
 
 
 def test_an_untracked_sibling_keeps_its_directory_from_being_declared():

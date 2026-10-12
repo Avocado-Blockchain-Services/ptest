@@ -354,8 +354,8 @@ def _unclean_detail(before: C.InputSnapshot, after: C.InputSnapshot) -> str:
     paths = list(dict.fromkeys(change.new or change.old for change in changes))
     more = f" (+{len(paths) - 1} more)" if len(paths) > 1 else ""
     return (f"gitignored files count as test inputs: "
-            f"{render.terminal_text(paths[0])}{more} · declare them in "
-            f"[selection] non_input_outputs or ignored_inputs")
+            f"{render.terminal_text(paths[0])}{more} · run ptest doctor --fix "
+            f"or declare them in [selection] non_input_outputs or ignored_inputs")
 
 
 def _no_baseline_detail(result: C.RunResult) -> str:

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.4
+
+- Gitignored tool output no longer blocks the full mode's baseline:
+  `graphify-out`, `.ruff_cache` and `.mypy_cache` at the project root (or a
+  monorepo child's root) count as outputs no test reads, without any
+  configuration. A tracked file under them stays an input, and a config
+  entry that names them wins (`ignored_inputs = [".mypy_cache"]` keeps it
+  fingerprinted). Existing baselines stay valid. Found in the 0.6.3 reuse
+  trial: specvm passed `ptest --full` twice and recorded nothing because of
+  `graphify-out/`.
+- `ptest doctor --fix` declares the remaining gitignored files the run
+  counts as test inputs: directories with a valid `CACHEDIR.TAG` go to
+  `non_input_outputs`, anything else to `ignored_inputs`, where it is
+  fingerprinted. `.env` files and symlinks are named, not declared: tests
+  may read a `.env`, and a worktree's `.env` is a symlink, which
+  `ignored_inputs` refuses. To let the full gate reuse a green run anyway,
+  list it in `non_input_outputs` and run `ptest --full --again` after
+  editing it. The run's "gitignored
+  paths count as test inputs" line now names `ptest doctor --fix`. The
+  once-per-version "can improve this config" notice ignores these drafts.
+  Spec: `docs/specs/2026-10-12-tool-outputs.md`.
+
 ## 0.6.3
 
 - New `[runner] reuse = true` (pytest): puts a project that declares no

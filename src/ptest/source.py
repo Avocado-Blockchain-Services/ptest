@@ -27,7 +27,7 @@ from pathlib import Path
 from . import contracts as C
 from . import files as safe_files
 from .files import create_exclusive, read_regular, validate_private_file
-from .selection import _invalid_policy, _matches
+from .selection import _invalid_policy, _matches, non_input_outputs
 
 _KEY = "input-hmac.key"
 _MAX_FILES = 100_000
@@ -68,7 +68,8 @@ def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
 
 
 def _is_non_input_output(config: C.Config, path: str) -> bool:
-    """Declared non-input outputs, plus nested node_modules for vitest.
+    """Non-input outputs (declared and built-in), plus nested node_modules
+    for vitest.
 
     ``non_input_outputs`` entries are literal path prefixes, so the
     generated ``node_modules`` exemption only covers the checkout-root
@@ -80,7 +81,8 @@ def _is_non_input_output(config: C.Config, path: str) -> bool:
     are unaffected, and child-scope ``../`` aliases for declared root
     inputs are matched only against the declared prefixes.
     """
-    if _matches(path, config.selection.non_input_outputs):
+    if _matches(path, non_input_outputs(config.selection,
+                                        tuple(config.runner.test_roots))):
         return True
     return (config.runner.kind is C.RunnerKind.VITEST
             and not path.startswith("../")
@@ -760,7 +762,17 @@ def _pytest_tool_generated(path: str, included: set[str],
     return source
 
 
-def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | None,
+def listing_snapshot(config: C.Config) -> C.InputSnapshot:
+    """Classify the checkout's files without ptest state (doctor --fix).
+
+    A fresh random key stands in for the domain key, so no state is read
+    or written and the digests match nothing: the result can name paths,
+    never prove a tree.
+    """
+    return snapshot(None, config, None, None)
+
+
+def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baseline | None,
              base: str | None, *, runtime_identity: str | None = None,
              pytest_full_outputs: bool = False) -> C.InputSnapshot:
     """Read supplied state only; unknown runtime evidence prevents compatibility.
@@ -805,7 +817,7 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
     head, changes = None, ()
     baseline_head = baseline.head if baseline is not None else None
     try:
-        key = _key(domain)
+        key = _key(domain) if domain is not None else secrets.token_bytes(64)
         if key is None:
             raise _Unavailable("fingerprint key is absent or unsafe", "state-unavailable")
         scan.remaining()

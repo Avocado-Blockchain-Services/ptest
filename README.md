@@ -129,9 +129,10 @@ not compared (the tracked lockfile stands in for them), and a failed or
 unfinished full run on the same tree in any checkout withdraws it. When a
 pytest full gate cannot reuse a green run it says why on one line
 (`ptest: full gate runs: <reason>`), for example gitignored paths that count as
-test inputs: list those tests never read in `[selection] non_input_outputs`
-and those they read in `ignored_inputs`. A worktree's symlinked `.env` may be
-declared as an output; edits to it then need `ptest --full --again`.
+test inputs: `ptest doctor --fix` declares them, or list those tests never
+read in `[selection] non_input_outputs` and those they read in `ignored_inputs`.
+A worktree's symlinked `.env` may be declared as an output; edits to it then
+need `ptest --full --again`.
 
 Vitest can also reuse a verified whole-suite full command, including native
 `--maxWorkers=100%`. It preserves the configured command and runner output;
@@ -214,7 +215,11 @@ reuse = true
 The full mode is stricter than the normal one: it refuses conftest code that
 changes which tests run or how the exit status is decided, and it counts
 gitignored files as test inputs until they are listed in `[selection]
-non_input_outputs` or `ignored_inputs`. If it refuses a project, the end line
+non_input_outputs` or `ignored_inputs`. `graphify-out`, `.ruff_cache` and
+`.mypy_cache` at the project root need no entry (since 0.6.4), unless the
+config names them; `ptest doctor --fix` drafts the rest: tagged caches as
+outputs, anything else as inputs, and it names `.env` files for you to decide.
+If it refuses a project, the end line
 says `fix the cause above or remove reuse = true from .ptest.toml`. ptest 0.6.2
 and older reject the key, so everyone running the repository needs 0.6.3 or
 newer. `ptest doctor` suggests it; `doctor --fix` never sets it.

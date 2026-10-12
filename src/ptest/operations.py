@@ -2354,7 +2354,8 @@ def _unmapped_changed_path(config: C.Config,
             if selection._matches(path, triggers):
                 continue
             if (change.kind in ("untracked", "ignored")
-                    and selection._matches(path, policy.non_input_outputs)):
+                    and selection._matches(path, selection.non_input_outputs(
+                        policy, tuple(config.runner.test_roots)))):
                 continue
             if not selection._matches(path, tuple(covered)):
                 return path
@@ -2715,28 +2716,6 @@ def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
     return (head[:7], age_s)
 
 
-def _declarable_outputs(ignored: list[str], snapshot: C.InputSnapshot) -> list[str]:
-    """Collapse ignored files to the shortest directory holding no tracked,
-    untracked or deleted path, so declaring it can never hide another file."""
-    ignored_set = set(ignored)
-    protected = {item.path for item in snapshot.files if item.path not in ignored_set}
-    protected.update(path for change in snapshot.changes if change.kind != "ignored"
-                     for path in (change.old, change.new) if path)
-    protected_dirs = {"/".join(path.split("/")[:index])
-                      for path in protected for index in range(1, path.count("/") + 1)}
-    declare = []
-    for path in ignored:
-        parts = path.split("/")
-        chosen = path
-        for index in range(1, len(parts)):
-            prefix = "/".join(parts[:index])
-            if prefix not in protected_dirs:
-                chosen = prefix
-                break
-        declare.append(chosen)
-    return sorted(dict.fromkeys(declare))
-
-
 def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
                     policy_digest: str, *, last_failed: bool = False,
                     child: bool = False,
@@ -2752,11 +2731,11 @@ def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
     ignored = [change.new or change.old or "" for change in snapshot.changes
                if change.kind == "ignored"]
     if not snapshot.clean and ignored and snapshot.files:
-        declare = _declarable_outputs(ignored, snapshot)
+        declare = selection.declarable(ignored, snapshot)
         shown = ", ".join(declare[:3]) + (f" (+{len(declare) - 3} more)" if len(declare) > 3 else "")
-        return (f"gitignored paths count as test inputs: {shown} — in .ptest.toml "
-                "[selection], list the ones tests never read in non_input_outputs "
-                "and the ones they read in ignored_inputs")
+        return (f"gitignored paths count as test inputs: {shown} — run ptest doctor "
+                "--fix, or in .ptest.toml [selection] list the ones tests never read "
+                "in non_input_outputs and the ones they read in ignored_inputs")
     if not snapshot.clean:
         return "uncommitted changes in the working tree (see git status)"
     if baseline is None:

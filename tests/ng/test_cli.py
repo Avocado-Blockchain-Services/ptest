@@ -4577,13 +4577,17 @@ def test_config_upgrade_notice_appears_once_per_version(case, monkeypatch, capsy
     domain = case.domain()
     root = case.project(domain, kind="command")
     monkeypatch.chdir(root)
+    calls = []
     monkeypatch.setattr(doctor_fix, "plan_all",
-                        lambda root, resolution: type("Plan", (), {"change_count": 2})())
+                        lambda root, resolution, **kwargs: (
+                            calls.append(kwargs), type("Plan", (), {"change_count": 2})())[1])
     run = ("--fixture-domain", str(domain.root), "--full")
     notice = "can improve this config (2 changes) — run ptest doctor --fix"
 
     main(run)
     assert notice in capsys.readouterr().err
+    # Drafts for gitignored files follow the working tree, not the version.
+    assert calls == [{"tree_drafts": False}]
     main(run)
     assert notice not in capsys.readouterr().err
     monkeypatch.setattr(C, "PTEST_VERSION", "99.0.0")

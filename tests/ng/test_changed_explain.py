@@ -313,8 +313,8 @@ def test_no_baseline_recorded_names_undeclared_ignored_files(case):
     result = _result(case, input_before=dirty, input_after=dirty)
     assert progress.format_baseline_note(result) == (
         "ptest: no baseline recorded: gitignored files count as test "
-        "inputs: .env (+2 more) · declare them in [selection] "
-        "non_input_outputs or ignored_inputs")
+        "inputs: .env (+2 more) · run ptest doctor --fix or declare them "
+        "in [selection] non_input_outputs or ignored_inputs")
 
 
 def test_no_baseline_recorded_real_changes_stay_uncommitted(case):
