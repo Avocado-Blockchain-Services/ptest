@@ -27,7 +27,7 @@ from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.6.6"
+PTEST_VERSION = "0.6.7"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2

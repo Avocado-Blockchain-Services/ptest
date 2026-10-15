@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.7
+
+- `ptest plan` at a monorepo root no longer dies on an `AssertionError`
+  traceback with exit 1 (an agent in persea read it as a test failure). It
+  prints the static preview and one line per child (`api · full (static
+  preview)`); `ptest plan --json` returns the same plan document as in a
+  single project.
+
 ## 0.6.6
 
 - `ptest doctor --fix` no longer declares a whole directory when ptest's

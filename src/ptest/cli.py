@@ -3046,10 +3046,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     )
             return 0
         if command == "plan":
-            if resolution.config is None:
+            if resolution.config is None and resolution.monorepo is None:
                 if resolution.problem is not None:
                     raise resolution.problem
-            assert resolution.config is not None
+            assert resolution.config is not None or resolution.monorepo is not None
             plan = C.Plan(mode=C.Mode.FULL, execution="full",
                           reasons=(C.Reason(code="selection-disabled",
                                             message="static plan requires a verified execution identity",
@@ -3062,6 +3062,11 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 sys.stdout.buffer.write(_document("plan", payload))
             else:
                 print("plan: full (static preview)")
+                # A monorepo root has no config of its own; every child
+                # gets the same static preview.
+                if resolution.monorepo is not None:
+                    for child in resolution.monorepo.children:
+                        print(f"{render.terminal_text(child)} · full (static preview)")
             return 0
         if command == "status":
             domain = platform.domain_paths(parsed.fixture_domain)

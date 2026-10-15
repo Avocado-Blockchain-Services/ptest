@@ -91,6 +91,32 @@ def _mock_execute(monkeypatch):
     return calls
 
 
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_static_plan_at_monorepo_root_previews_full_for_every_child(
+        tmp_path, monkeypatch, capsys, monorepo, json_mode):
+    # Bug report 2026-10-15: `ptest plan` at a monorepo root died on an
+    # AssertionError traceback with exit 1 (persea cc-auth0-sweep).
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("plan", "--json") if json_mode else ("plan",)) == 0
+    captured = capsys.readouterr()
+    assert calls == []
+    assert "Traceback" not in captured.err
+    if json_mode:
+        data = C.decode_public_document(captured.out).data
+        assert data["execution"] == "full"
+        assert data["static_preview"] is True
+        assert data["reasons"][0]["code"] == "selection-disabled"
+    else:
+        assert captured.out.splitlines() == [
+            "plan: full (static preview)",
+            "api · full (static preview)",
+            "web · full (static preview)",
+        ]
+
+
 def test_full_bare_child_runs_all_tests_under_it_without_gate(
         tmp_path, monkeypatch, capsys, monorepo):
     _full_monorepo(tmp_path, monorepo)
