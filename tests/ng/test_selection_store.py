@@ -855,6 +855,73 @@ def test_eviction_removes_only_oldest_run(domain_factory, monkeypatch):
         store.close()
 
 
+def _sized_run(prefix, count):
+    vocab_funcs = tuple((1, f"f{n}") for n in range(20))
+    nodes = {f"tests/test_a.py::{prefix}_{n}": _node(
+        f"tests/test_a.py::{prefix}_{n}",
+        deps=_ctx(funcs=range(20))) for n in range(count)}
+    return S.RunDependencies(
+        vocabulary=_vocab(("tests/test_a.py", "pkg/a.py"), vocab_funcs),
+        nodes=nodes, fixtures={}, ambient=_ctx(), complete=True,
+        recording=True, python=(3, 12), inactive_reason=None, notes=())
+
+
+def test_small_run_never_evicts_a_larger_full_run(domain_factory,
+                                                  monkeypatch):
+    """Bug (persea, 0.6.7): after a 14k-test full run the next one-test
+    scoped run evicted it oldest-first, so selection fell back to the
+    static rule and ran the whole suite again on every change. A run
+    holding more records than the incoming one is never evicted for the
+    size target."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        full = "aa" * 16
+        store.update(_sized_run("full", 600), run_id=full, recorded_at=0.0,
+                     compatibility=COMPAT, digests=_digests(), full=True)
+        monkeypatch.setattr(S, "SELECTION_STORE_TARGET_BYTES", 30_000)
+        for index, run_id in enumerate((RUN_A, RUN_B)):
+            store.update(_sized_run(f"scoped{index}", 1), run_id=run_id,
+                         recorded_at=1.0 + index, compatibility=COMPAT,
+                         digests=_digests(), full=False)
+        snap = store.snapshot()
+        assert full in snap.runs
+        assert sum(1 for node in snap.nodes.values()
+                   if node.run_id == full) == 600
+        # The older small run made room for the newer one.
+        assert set(snap.runs) == {full, RUN_B}
+    finally:
+        store.close()
+
+
+def test_size_target_drops_unreferenced_cache_before_any_run(
+        domain_factory, monkeypatch):
+    """Spec 2.5 pruning: file versions no record references go before any
+    record does. Same persea bug: 21 MB of young unreferenced parse cache
+    pushed the store over its target and records were evicted instead."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        referenced = "aa" * 32  # the digest _digests() records
+        store.put_many({referenced: b"r" * 50_000})
+        store.put_many({f"{n:064x}": os.urandom(50_000) for n in range(8)})
+        store.update(_sized_run("full", 300), run_id=RUN_A,
+                     recorded_at=0.0, compatibility=COMPAT,
+                     digests=_digests(), full=True)
+        size_with_cache = store._db_size(store._conn)
+        monkeypatch.setattr(S, "SELECTION_STORE_TARGET_BYTES",
+                            size_with_cache - 200_000)
+        store.update(_sized_run("big", 400), run_id=RUN_B, recorded_at=1.0,
+                     compatibility=COMPAT, digests=_digests(), full=False)
+        snap = store.snapshot()
+        assert set(snap.runs) == {RUN_A, RUN_B}
+        assert set(store.get_many([referenced])) == {referenced}
+        assert store.get_many([f"{n:064x}" for n in range(8)]) == {}
+        assert _db_path(domain).stat().st_size <= S.SELECTION_STORE_MAX_BYTES
+    finally:
+        store.close()
+
+
 def test_concurrent_create_from_two_connections(domain_factory):
     """Two racers creating the same fresh store never see corruption."""
     domain = domain_factory()

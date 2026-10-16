@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.8
+
+- Test selection keeps a full run's dependency records. Before, the next
+  small run (any checkout of the project) evicted them oldest-first to meet
+  the store's size target, so selection fell back to the static rule and a
+  change to a widely imported file ran the whole suite again, every time.
+  In persea, one scoped run cut 14,328 recorded tests to 1; with the
+  records kept, the same change selects 37 tests instead of 14,328. Under
+  size pressure the store now drops cached file versions that no record
+  references first (spec 2.5), then the runs holding the fewest records,
+  and never trades a larger run for a smaller newer one.
+
 ## 0.6.7
 
 - `ptest plan` at a monorepo root no longer dies on an `AssertionError`

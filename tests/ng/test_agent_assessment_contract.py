@@ -35,12 +35,12 @@ EXPECTED_IDS = (
     "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
 
-# Golden bytes recorded before the registry extension (RED baseline); re-recorded for 0.6.7 (the version is part of the document bytes; only the version changed).
+# Golden bytes recorded before the registry extension (RED baseline); re-recorded for 0.6.8 (the version is part of the document bytes; only the version changed).
 DOCTOR_GOLDEN_SHA256 = (
-    "5798320179977c447945b7f5dd4080837cce30331c5e2163d8339f34cd18eb25"
+    "cbfc6b0b0d04635284e7e416dad4ddf040ba941a5fc0269f8a3df256b012c693"
 )
 DOCTOR_ERROR_GOLDEN_SHA256 = (
-    "b193d2462febe178563affad7f60dcddb09940d589adaba3b5b81f11837ea5aa"
+    "9fe99d6b820d0f1624562311ebe5e6c10e339ffd5f59ade776c0951fd40e7cb3"
 )
 
 

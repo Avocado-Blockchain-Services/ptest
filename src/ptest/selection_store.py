@@ -55,6 +55,7 @@ _SCHEMA_VERSION = "1"
 _CACHE_PRUNE_AFTER_S = 14 * 24 * 3600
 _CACHE_TOUCH_AFTER_S = 3600
 _INVENTORY_CHUNK = 5000
+_CACHE_DROP_BATCH = 64
 
 
 def _fail(code: str, message: str) -> None:
@@ -816,9 +817,10 @@ class SelectionStore:
                full: bool) -> None:
         """Record one run: one transaction replacing only the tests it ran.
 
-        Never fails for size (oldest-first eviction keeps the newest run);
-        raises ``capacity-exceeded`` only when even that cannot fit, after
-        one evict-and-retry. A lock held past the wait budget raises
+        Never fails for size: unreferenced cache goes first, then the
+        runs holding the fewest records (the newest run is kept); raises
+        ``capacity-exceeded`` only when even that cannot fit, after one
+        evict-and-retry. A lock held past the wait budget raises
         retryable ``coordinator-unavailable`` and an I/O failure raises
         ``state-unavailable`` (never a raw sqlite error).
         """
@@ -1175,55 +1177,91 @@ class SelectionStore:
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         return int(page_count - freelist_count) * int(page_size)
 
+    def _drop_unreferenced_cache(self, conn: sqlite3.Connection, *,
+                                 to_target: bool) -> bool:
+        """Drop cached file versions no record references, least recently
+        used first (spec 2.5); True when any row went.
+
+        They only spare a re-parse, while a dropped record costs a run of
+        every test it covered, so size pressure takes them before any run.
+        """
+        dropped = False
+        while (not to_target
+               or self._db_size(conn) > SELECTION_STORE_TARGET_BYTES):
+            rows = conn.execute(
+                "SELECT digest FROM cache WHERE digest NOT IN"
+                " (SELECT digest FROM run_digests)"
+                " ORDER BY used_at ASC, digest ASC LIMIT ?",
+                (_CACHE_DROP_BATCH,)).fetchall()
+            if not rows:
+                break
+            conn.executemany("DELETE FROM cache WHERE digest = ?", rows)
+            dropped = True
+        return dropped
+
+    @staticmethod
+    def _eviction_order(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+        """Runs with their surviving record counts, fewest first, then
+        oldest: a full run outlives the small runs recorded after it."""
+        return [(row[0], int(row[1])) for row in conn.execute(
+            "SELECT runs.run_id, COUNT(nodes.nodeid) AS kept FROM runs"
+            " LEFT JOIN nodes ON nodes.run_id = runs.run_id"
+            " GROUP BY runs.run_id"
+            " ORDER BY kept ASC, runs.recorded_at ASC, runs.rowid ASC")]
+
+    @staticmethod
+    def _delete_run(conn: sqlite3.Connection, run_id: str) -> None:
+        conn.execute("DELETE FROM nodes WHERE run_id = ?", (run_id,))
+        conn.execute(
+            "DELETE FROM runs WHERE run_id NOT IN"
+            " (SELECT DISTINCT run_id FROM nodes)")
+        try:
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
+        except sqlite3.Error:
+            pass
+
     def _evict_to_target(self, conn: sqlite3.Connection,
                          *, exclude: str) -> bool:
-        """Oldest-first eviction; True when any rows were evicted."""
-        evicted = False
+        """Meet the size target; True when any rows were evicted.
+
+        Unreferenced cache goes first, then the runs holding the fewest
+        records. A run holding more records than the newest one is never
+        traded for it: the store then stays over the target, and the hard
+        cap still bounds it (SQLITE_FULL takes the update's retry path).
+        """
+        evicted = self._drop_unreferenced_cache(conn, to_target=True)
+        incoming = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE run_id = ?",
+            (exclude,)).fetchone()[0]
         while True:
-            runs = conn.execute(
-                "SELECT run_id FROM runs ORDER BY recorded_at ASC,"
-                " rowid ASC").fetchall()
-            run_ids = [row[0] for row in runs]
+            order = self._eviction_order(conn)
+            too_many = len(order) > SELECTION_MAX_RUNS
             oversize = self._db_size(conn) > SELECTION_STORE_TARGET_BYTES
-            if ((not oversize and len(run_ids) <= SELECTION_MAX_RUNS)
-                    or len(run_ids) <= 1):
+            if (not oversize and not too_many) or len(order) <= 1:
                 return evicted
-            victim = next((rid for rid in run_ids if rid != exclude),
-                          run_ids[0] if exclude not in run_ids else None)
+            victim = next(((rid, kept) for rid, kept in order
+                           if rid != exclude), None)
             if victim is None:
                 return evicted
-            conn.execute("DELETE FROM nodes WHERE run_id = ?", (victim,))
-            conn.execute(
-                "DELETE FROM runs WHERE run_id NOT IN"
-                " (SELECT DISTINCT run_id FROM nodes)")
+            if not too_many and victim[1] > incoming:
+                return evicted
+            self._delete_run(conn, victim[0])
             evicted = True
-            try:
-                conn.execute("PRAGMA incremental_vacuum").fetchall()
-            except sqlite3.Error:
-                pass
 
     def _evict_oldest(self, conn: sqlite3.Connection, *,
                       exclude: str) -> None:
+        """Make room after SQLITE_FULL: every unreferenced cache row, or,
+        when there is none, the run holding the fewest records."""
         try:
             _begin_immediate(conn)
         except sqlite3.Error:
             return
         try:
-            rows = conn.execute(
-                "SELECT run_id FROM runs ORDER BY recorded_at ASC,"
-                " rowid ASC").fetchall()
-            run_ids = [row[0] for row in rows]
-            victim = next((rid for rid in run_ids if rid != exclude), None)
-            if victim is not None:
-                conn.execute("DELETE FROM nodes WHERE run_id = ?",
-                             (victim,))
-                conn.execute(
-                    "DELETE FROM runs WHERE run_id NOT IN"
-                    " (SELECT DISTINCT run_id FROM nodes)")
-            try:
-                conn.execute("PRAGMA incremental_vacuum").fetchall()
-            except sqlite3.Error:
-                pass
+            if not self._drop_unreferenced_cache(conn, to_target=False):
+                victim = next((rid for rid, _ in self._eviction_order(conn)
+                               if rid != exclude), None)
+                if victim is not None:
+                    self._delete_run(conn, victim)
             conn.execute("COMMIT")
         except BaseException:
             try:
