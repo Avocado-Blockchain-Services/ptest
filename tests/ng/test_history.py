@@ -1252,6 +1252,13 @@ def test_teardown_failure_is_not_hidden_by_a_passing_inventory(case):
     assert any(item.file is None for item in H.read_history(domain, checkout).obligations)
 
 
+def _public_summary(result):
+    """The public run JSON minus ``selection`` (R34: never persisted)."""
+    payload = C.serialize_run_result(result)
+    payload.pop("selection")
+    return payload
+
+
 def test_clean_complete_full_pass_publishes_baseline_and_history_payload(case):
     domain = case.domain()
     checkout = case.checkout(domain)
@@ -1267,7 +1274,7 @@ def test_clean_complete_full_pass_publishes_baseline_and_history_payload(case):
     assert baseline.input_digest == snapshot.digest
     assert baseline.inventory == inventory
     payload = H.read_history_payload(domain, checkout)
-    assert payload["summaries"] == [C.serialize_run_result(result)]
+    assert payload["summaries"] == [_public_summary(result)]
     assert payload["obligations"] == []
 
 
@@ -1379,7 +1386,7 @@ def test_private_snapshot_codec_preserves_baseline_head(case, baseline_head):
         assert H._snapshot_from_dict(private) == snapshot
     assert H.read_history(domain, checkout).selection_disabled is False
     summary = H.read_history_summaries(domain, checkout)[0]
-    assert summary == C.serialize_run_result(result)
+    assert summary == _public_summary(result)
     assert "baseline_head" not in json.dumps(summary)
     if baseline_head is not None:
         assert baseline_head not in json.dumps(summary)
@@ -1627,7 +1634,7 @@ def test_history_summaries_reuse_public_run_serializer_without_private_fields(ca
         case.inventory(("tests/test_a.py",), outcome="passed"),
     )
     summary = H.read_history_summaries(domain, checkout)[0]
-    assert summary == C.serialize_run_result(result)
+    assert summary == _public_summary(result)
     assert "sequence" not in summary
     assert "input_before" not in summary
     assert "input_after" not in summary
