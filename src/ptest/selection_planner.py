@@ -507,7 +507,7 @@ def plan(inputs):
     audit = inputs.audit
     observers = inputs.observers
     conditional_mode = inputs.conditional
-    # R9: deferral is measured since the gate, so every diff-derived
+    # Spec R9 - deferral is measured since the gate, so every diff-derived
     # input uses the union; the precise clauses stay on the stale sets.
     changed_all = set(inputs.changed) | set(inputs.since_gate)
     changed_py = {c for c in changed_all if c.endswith(".py")}
@@ -689,7 +689,7 @@ def plan(inputs):
         if not usable:
             fallbacks[nodeid] = _CAP_REASON
             continue
-        # R22: the record nearest the tree decides, then the newest, then
+        # Spec R22 - the record nearest the tree decides, then the newest, then
         # the smallest run id; every clause below reads only that record.
         if len(usable) == 1:
             node = usable[0]
@@ -783,7 +783,7 @@ def plan(inputs):
                 codes.add("f")
                 if not counted:
                     _count("data", path, nodeid)
-        # R16: an observer's learned or declared paths against the
+        # Spec R16 - an observer's learned or declared paths against the
         # chosen record's import-time changes.
         observer = False
         rows = observers.get(nodeid)

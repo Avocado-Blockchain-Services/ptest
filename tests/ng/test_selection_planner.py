@@ -1048,7 +1048,7 @@ def test_ambient_data_change_is_g_data_not_full_reason():
     inputs = INP(index, deps, versions={"d": lib, "dt": FI(scopes=[SC("test_f")])},
                  data_digests={data: "h-new"}, changed=(data,))
     d = _plan(inputs)
-    # R6: the planner never promotes to the full suite any more; every
+    # Spec R6 - the planner never promotes to the full suite any more; every
     # node of the run is deferred as g-data via the changed file.
     assert d.full_reason is None
     _assert_t2(d, node.nodeid, "g-data", data)
@@ -1689,7 +1689,7 @@ def test_needed_data_paths_returns_recorded_data_only():
 
 
 def test_is_selected_ignores_the_deprecated_full_reason():
-    # R6: full_reason is a deprecated field that nothing sets or reads;
+    # Spec R6 - full_reason is a deprecated field that nothing sets or reads;
     # a decision carrying one selects exactly its files minus deselect.
     old = FI(scopes=[SC("f", body="b1")])
     new = FI(scopes=[SC("f", body="b2")])
@@ -2355,12 +2355,12 @@ def test_code_g_data_ambient_data_change_replaces_full_reason():
 
 
 def test_r1_t1_beats_t2_and_codes_follow_the_documented_order():
-    # d (T1) beats the g-shared that also holds for this node.
+    # Clause d (T1) beats the g-shared that also holds for this node.
     def amb(vb):
         return CT(vb, funcs=[(LIB, "f")])
     inputs = _dep_case(node_kw={"funcs": [(LIB, "f")]}, ambient=amb)
     assert tier(_plan(inputs), NID) == (T1, "d")
-    # f (data) beats e (skeleton) when both hold.
+    # Clause f (data) beats clause e (skeleton) when both hold.
     case = _skeleton_case()
     assert tier(_plan(case), NID) == (T1, "e")
 
@@ -2471,7 +2471,7 @@ def test_u_static_via_prefers_py_then_non_py():
 # --- R3 / corrupt ------------------------------------------------------------
 
 def test_opaque_and_demoted_precise_hit_is_t1():
-    # R3: a precise hit (clause d) on an opaque node is T1 even when the
+    # Spec R3 - a precise hit (clause d) on an opaque node is T1 even when the
     # static rule misses (the node ran LIB through a dynamic import).
     inputs = _dep_case(node_kw={"funcs": [(LIB, "f")], "opaque": True},
                        test_imports=())
