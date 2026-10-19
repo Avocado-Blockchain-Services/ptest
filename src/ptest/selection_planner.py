@@ -6,12 +6,22 @@ staleness (4.2), per-path diff (4.3), propagation fixpoint (4.4),
 per-test clauses (4.5), unrecorded files (4.6), static reach (4.7) and
 output assembly (4.8), plus the self-audit miss computation.
 
+0.7.0 tiers: every recorded node and considered unrecorded test file
+gets at most one (tier, code). T1 ("run now") carries positive evidence
+(codes a, c, d, f, n, o, e, w); T2 ("deferred") is what the proof system
+cannot clear (g-shared, g-reach, g-data, b-static, u-static) and never
+runs in an iteration run. Each node is judged by its chosen record: the
+usable record nearest the tree (R22).
+
 Purity contract: no I/O, no clock, no project-code imports. Every
 output tuple is sorted, so identical inputs give identical outputs.
 Unresolvable vocabulary ids make the affected node opaque (static
 rule), never silently dropped.
 """
 from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 from ptest import contracts as C
 
@@ -417,34 +427,46 @@ def _context_ids(ctx):
     return (list(ctx.functions), list(ctx.modules), list(ctx.data))
 
 
-def _context_paths(vocabulary, fixture_map, ctx, fids):
+def _context_paths(vocabulary, fixture_map, ctx, fids, lenient=False):
     """Resolve one context plus fixtures to path sets; None means corrupt.
 
     Returns (functions, modules, data) with functions as (path, qualname)
-    pairs, or None when any id is unresolvable (the node turns opaque).
+    pairs, or None when any id is unresolvable (the node is corrupt).
+    ``lenient`` skips unresolvable ids and missing fixture records
+    instead, keeping what resolves (positive evidence, chosen-record
+    distance); it never returns None.
     """
     funcs, mods, data = set(), set(), set()
     func_ids, mod_ids, data_ids = _context_ids(ctx)
     for fid in func_ids:
         resolved = _resolve_function(vocabulary, fid)
         if resolved is None:
+            if lenient:
+                continue
             return None
         funcs.add(resolved)
     for pid in mod_ids:
         path = _resolve_path(vocabulary, pid)
         if path is None:
+            if lenient:
+                continue
             return None
         mods.add(path)
     for pid in data_ids:
         path = _resolve_path(vocabulary, pid)
         if path is None:
+            if lenient:
+                continue
             return None
         data.add(path)
     for fid in fids:
         record = fixture_map.get(fid)
         if record is None:
+            if lenient:
+                continue
             return None
-        nested = _context_paths(vocabulary, fixture_map, record.deps, ())
+        nested = _context_paths(vocabulary, fixture_map, record.deps, (),
+                                lenient)
         if nested is None:
             return None
         funcs |= nested[0]
@@ -453,16 +475,46 @@ def _context_paths(vocabulary, fixture_map, ctx, fids):
     return (funcs, mods, data)
 
 
+_T1 = C.SELECTION_TIER_RUN_NOW
+_T2 = C.SELECTION_TIER_DEFERRED
+_T1_ORDER = {code: pos for pos, code in enumerate(C.SELECTION_T1_CODES)}
+
+
+@dataclass(frozen=True, slots=True)
+class GateAudit:
+    """R15 classification of one gate's failures against its plan."""
+
+    previously_deferred: int
+    failed: int
+    learned: Mapping[str, frozenset[str]]
+    unlearned: tuple[str, ...]
+    misses: tuple[str, ...]
+
+
+def _records_of(deps):
+    """Every kept record per node id, newest first (None means one each)."""
+    if deps.records is not None:
+        return deps.records
+    return {nodeid: (record,) for nodeid, record in deps.nodes.items()}
+
+
 def plan(inputs):
-    """Decide which recorded tests must run (design section 4)."""
+    """Decide which recorded tests run now (T1) and which wait (T2)."""
     index = inputs.index
     deps = inputs.deps
     vocabulary = deps.vocabulary
     compatibility = inputs.compatibility
-    changed = set(inputs.changed)
-    changed_py = {c for c in changed if c.endswith(".py")}
-    nonpy_changed = any(not c.endswith(".py") for c in changed)
+    audit = inputs.audit
+    observers = inputs.observers
+    conditional_mode = inputs.conditional
+    # R9: deferral is measured since the gate, so every diff-derived
+    # input uses the union; the precise clauses stay on the stale sets.
+    changed_all = set(inputs.changed) | set(inputs.since_gate)
+    changed_py = {c for c in changed_all if c.endswith(".py")}
+    nonpy_paths = sorted(c for c in changed_all if not c.endswith(".py"))
+    nonpy_changed = bool(nonpy_paths)
     test_roots = tuple(inputs.test_roots)
+    test_set = _test_set(index)
 
     compat_runs = {rid: run for rid, run in deps.runs.items()
                    if run.compatibility == compatibility}
@@ -475,7 +527,7 @@ def plan(inputs):
         sig_of[rid] = _signature(stale_py, basemap, stale_data)
 
     # D5: memoise analyses by stale signature, newest runs first; the
-    # oldest runs past the cap become unrecorded (static rule).
+    # oldest runs past the cap become unusable (R23).
     by_newest = sorted(compat_runs,
                        key=lambda rid: (-compat_runs[rid].recorded_at, rid))
     memo = {}
@@ -493,103 +545,181 @@ def plan(inputs):
         else:
             overcap.add(rid)
 
-    # Ambient data changes anywhere force the full suite (clause g).
-    # Unresolvable ambient ids taint the run: its nodes turn opaque.
-    full_candidates = set()
+    path_reach_memo = {}
+
+    def path_reach(path):
+        found = path_reach_memo.get(path)
+        if found is None:
+            found = path_reach_memo[path] = _reach(index, test_roots,
+                                                   {path})
+        return found
+
+    # Per-run ambient facts: every ambient path (chosen-record distance),
+    # unresolvable ids (taint), and the smallest stale ambient data file
+    # (g-data; it replaces the old full_reason).
     ambient_bad = set()
+    ambient_paths = {}
+    ambient_data_via = {}
     for rid, run in compat_runs.items():
-        _, _, stale_data = stale_of[rid]
-        ambient_data = set()
+        stale_data = stale_of[rid][2]
+        paths, stale_ambient = set(), set()
         for pid in list(run.ambient.data):
             path = _resolve_path(vocabulary, pid)
             if path is None:
                 ambient_bad.add(rid)
             else:
-                ambient_data.add(path)
+                paths.add(path)
+                if path in stale_data:
+                    stale_ambient.add(path)
         for fid in list(run.ambient.functions):
-            if _resolve_function(vocabulary, fid) is None:
+            resolved = _resolve_function(vocabulary, fid)
+            if resolved is None:
                 ambient_bad.add(rid)
-        for path in ambient_data & stale_data:
-            full_candidates.add(path)
-    full_reason = None
-    if full_candidates:
-        full_reason = f"ambient data file {min(full_candidates)} changed"
+            else:
+                paths.add(resolved[0])
+        for pid in list(run.ambient.modules):
+            path = _resolve_path(vocabulary, pid)
+            if path is None:
+                ambient_bad.add(rid)
+            else:
+                paths.add(path)
+        ambient_paths[rid] = paths
+        if stale_ambient:
+            ambient_data_via[rid] = min(stale_ambient)
 
-    # Per-run/per-signature precomputes (D5/A3): the clause-b reach set,
-    # the clause-g ambient reach set plus its changed-function labels,
-    # and the stale/changed path union are identical for every node of a
-    # run, so they are built once here; per node only membership tests
-    # remain.
-    reach_b = {}
-    reach_all = {}
-    touch = {}
-    ambient_pre = {}
-    for rid in compat_runs:
+    # Per-signature precomputes: clause-b reach, the full static reach of
+    # the stale or changed code, and the touched-path union are identical
+    # for every run of one signature.
+    reach_b, reach_all, touch = {}, {}, {}
+    for rid in per_run:
+        sig = sig_of[rid]
+        if sig in reach_b:
+            continue
         _, stale_py, stale_data = stale_of[rid]
-        reach_b[rid] = _reach(index, test_roots, set(stale_py) | changed_py)
-        reach_all[rid] = C.selection_static_reach(
+        reach_b[sig] = _reach(index, test_roots, set(stale_py) | changed_py)
+        reach_all[sig] = C.selection_static_reach(
             index.reverse, set(stale_py) | changed_py)
-        touch[rid] = (frozenset(set(stale_py) | set(stale_data))
-                      | frozenset(changed))
+        touch[sig] = (frozenset(set(stale_py) | set(stale_data))
+                      | frozenset(changed_all))
+
+    # Per-analysis ambient facts (g-shared via, g-reach via-by-file).
+    shared_via = {}
+    am_via = {}
     for rid, analysis in per_run.items():
-        ambient_paths = set(analysis.am)
-        ambient_labels = []
-        # Changed code the run's ambient context executed (collection,
-        # imports, app factories) shaped state every test of that run
-        # shared, however the module was reached (importlib, plugins):
-        # the whole run is affected, not only static importers.
+        key_ = id(analysis)
+        if key_ in shared_via:
+            continue
         shared = []
         for fid in list(compat_runs[rid].ambient.functions):
-            # Unresolvable ids already tainted this run opaque above.
             resolved = _resolve_function(vocabulary, fid)
             if resolved is None:
                 continue
             path, qual = resolved
             if (path in analysis.pw or (path, qual) in analysis.cf
                     or (path, qual) in analysis.af):
-                ambient_paths.add(path)
-                shared.append(("function", f"{path}::{qual}"))
-                if (path, qual) in analysis.cf:
-                    ambient_labels.append(f"{path}::{qual}")
+                shared.append(path)
         for pid in list(compat_runs[rid].ambient.modules):
             path = _resolve_path(vocabulary, pid)
             if path is not None and (path in analysis.am
                                      or path in analysis.pw):
-                shared.append(("module", path))
-        ambient_pre[rid] = (_reach(index, test_roots, ambient_paths),
-                            tuple(ambient_labels), tuple(shared))
+                shared.append(path)
+        shared_via[key_] = min(shared) if shared else None
+        by_file = {}
+        for path in sorted(analysis.am):
+            for test in path_reach(path):
+                by_file.setdefault(test, path)
+        am_via[key_] = by_file
+
+    b_via_memo = {}
+
+    def b_static_via(rid, test_file):
+        """Smallest stale or changed .py path that statically reaches the
+        file, else the smallest changed non-.py path, else the file."""
+        sig = sig_of[rid]
+        by_file = b_via_memo.get(sig)
+        if by_file is None:
+            by_file = {}
+            for path in sorted(stale_of[rid][1] | changed_py):
+                for test in path_reach(path):
+                    by_file.setdefault(test, path)
+            b_via_memo[sig] = by_file
+        found = by_file.get(test_file)
+        if found is not None:
+            return found
+        return nonpy_paths[0] if nonpy_paths else test_file
 
     fallbacks = {}
-    selected_files = set()
-    selected_nodes = set()
+    tiers = {}           # node id / test file -> (tier, code)
+    via = {}
+    learnable = {}
+    conditional = {}     # node id -> chosen run id
+    chosen_run = {}
     usable_of = {}
-    paths_of = {}       # nodeid -> project paths whose code it ran
+    paths_of = {}        # nodeid -> project paths whose code it ran
     counts = {}
-    reached = set()     # passing nodes whose recorded code changed
+    touched = set()      # passing, untiered nodes whose recorded code changed
     recorded = 0
 
     def _count(kind, label, nodeid):
         counts.setdefault((kind, label), set()).add(nodeid)
 
-    for nodeid, node in deps.nodes.items():
-        run = compat_runs.get(node.run_id)
-        if run is None:
+    def _t1(nodeid, code):
+        tiers[nodeid] = (_T1, code)
+        via.pop(nodeid, None)
+        learnable.pop(nodeid, None)
+        conditional.pop(nodeid, None)
+
+    for nodeid, recs in _records_of(deps).items():
+        if not recs:
+            continue
+        test_file = recs[0].test_file
+        usable = []
+        saw_compat = False
+        for rec in recs:
+            if rec.run_id not in compat_runs:
+                continue
+            saw_compat = True
+            if rec.run_id not in overcap:
+                usable.append(rec)
+        if not saw_compat:
             fallbacks[nodeid] = _OTHER_CONFIG_REASON
             continue
-        if node.test_file not in index.test_files:
+        if test_file not in test_set:
             continue  # its file is gone: nothing to run
-        if node.run_id in overcap:
+        if not usable:
             fallbacks[nodeid] = _CAP_REASON
             continue
+        # R22: the record nearest the tree decides, then the newest, then
+        # the smallest run id; every clause below reads only that record.
+        if len(usable) == 1:
+            node = usable[0]
+        else:
+            def distance(rec):
+                lenient = _context_paths(vocabulary, deps.fixtures, rec.deps,
+                                         list(rec.fixtures), lenient=True)
+                rid_ = rec.run_id
+                paths = ({p for p, _ in lenient[0]} | lenient[1]
+                         | lenient[2] | ambient_paths[rid_] | {test_file})
+                stale = stale_of[rid_][1] | stale_of[rid_][2]
+                return (len(stale & paths), -compat_runs[rid_].recorded_at,
+                        rid_)
+            node = min(usable, key=distance)
+        rid = node.run_id
+        run = compat_runs[rid]
+        sig = sig_of[rid]
         recorded += 1
-        usable_of[nodeid] = node.test_file
-        _, _, stale_data = stale_of[node.run_id]
-        analysis = per_run[node.run_id]
+        usable_of[nodeid] = test_file
+        chosen_run[nodeid] = rid
+        _, stale_py, stale_data = stale_of[rid]
+        analysis = per_run[rid]
         node_fids = list(node.fixtures)
         missing_fixture = any(fid not in deps.fixtures for fid in node_fids)
         own = _context_paths(vocabulary, deps.fixtures, node.deps, node_fids)
-        if own is not None:
-            paths_of[nodeid] = {p for p, _ in own[0]} | set(own[1])
+        lenient = (own if own is not None else
+                   _context_paths(vocabulary, deps.fixtures, node.deps,
+                                  node_fids, lenient=True))
+        funcs, mods, data = lenient
+        paths_of[nodeid] = {p for p, _ in funcs} | set(mods)
         fixture_opaque = False
         if not missing_fixture:
             for fid in node_fids:
@@ -599,106 +729,126 @@ def plan(inputs):
         if missing_fixture:
             opaque_why = _FIXTURE_REASON
         if (own is None or node.deps.opaque or fixture_opaque
-                or run.ambient.opaque or node.run_id in ambient_bad):
+                or run.ambient.opaque or rid in ambient_bad):
             opaque_why = opaque_why or _OPAQUE_REASON
         demoted = (deps.demotions.get(nodeid)
-                   == _cur_digest(index, node.test_file))
-
-        def _select():
-            selected_nodes.add(nodeid)
-            selected_files.add(node.test_file)
+                   == _cur_digest(index, test_file))
+        corrupt = own is None or rid in ambient_bad
+        if opaque_why is not None or demoted:
+            fallbacks[nodeid] = _DEMOTED_REASON if demoted else opaque_why
 
         if node.outcome not in C.SELECTION_PASSING_OUTCOMES:
-            _select()  # clause a: a non-passing outcome always runs
+            tiers[nodeid] = (_T1, "a")  # a non-passing record always runs
             continue
-        if opaque_why is not None or demoted:
-            # Clause b is definitive for opaque/demoted nodes (N3): the
-            # static rule alone decides, and no precise clause applies.
-            fallbacks[nodeid] = _DEMOTED_REASON if demoted else opaque_why
-            # A recorded module that statically reaches the change counts
-            # like the test file: it covers the entry module of a spawned
-            # project interpreter, whose imports run in the child.
-            if (node.test_file in reach_b[node.run_id]
-                    or stale_data or nonpy_changed
-                    or (own is not None
-                        and not reach_all[node.run_id].isdisjoint(own[1]))):
-                _select()
-            elif own is not None:
-                funcs, mods, data = own
-                dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
-                if dep_paths & touch[node.run_id]:
-                    reached.add(nodeid)
-            continue
-        if node.test_file in analysis.wf:
-            _select()  # clause c
-            _count("file", node.test_file, nodeid)
-            continue
-        funcs, mods, data = own
+
+        # T1 clauses on the chosen record (R3: opaque and demoted nodes
+        # get the precise ones, a/c/d/f; e is a static-style clause).
+        precise_only = opaque_why is not None or demoted
+        codes = set()
+        counted = False
+        if test_file in analysis.wf:
+            codes.add("c")
+            _count("file", test_file, nodeid)
+            counted = True
         hit = False
         for path, qual in funcs:
             if path in analysis.pw:
                 hit = True
-                _count("module", path, nodeid)
+                if not counted:
+                    _count("module", path, nodeid)
             elif (path, qual) in analysis.cf:
                 hit = True
-                _count("function", f"{path}::{qual}", nodeid)
+                if not counted:
+                    _count("function", f"{path}::{qual}", nodeid)
             elif (path, qual) in analysis.af:
                 hit = True  # affected via propagation; no unit for AF
         if hit:
-            _select()  # clause d
-            continue
-        for path in mods:
-            if path in analysis.sk:
-                hit = True  # clause e
-                if path in analysis.am:
-                    _count("module", path, nodeid)
-                else:
-                    for key in analysis.seeds:
-                        if C.selection_key_path(key) == path:
-                            _count("name", key, nodeid)
-        if hit:
-            _select()
-            continue
+            codes.add("d")
+            counted = True
+        if not precise_only:
+            for path in mods:
+                if path in analysis.sk:
+                    codes.add("e")
+                    if not counted:
+                        if path in analysis.am:
+                            _count("module", path, nodeid)
+                        else:
+                            for key_ in analysis.seeds:
+                                if C.selection_key_path(key_) == path:
+                                    _count("name", key_, nodeid)
+            if "e" in codes:
+                counted = True
         for path in data:
             if path in stale_data:
-                hit = True  # clause f
-                _count("data", path, nodeid)
-        if hit:
-            _select()
+                codes.add("f")
+                if not counted:
+                    _count("data", path, nodeid)
+        # R16: an observer's learned or declared paths against the
+        # chosen record's import-time changes.
+        observer = False
+        rows = observers.get(nodeid)
+        if rows:
+            ambient_changed = analysis.am | analysis.pw
+            stale_all = stale_py | stale_data
+            for row in rows:
+                if row == C.SELECTION_OBSERVER_ALL:
+                    if ambient_changed:
+                        observer = True
+                elif row in ambient_changed or (
+                        row not in index.files and row in stale_all):
+                    observer = True
+        if observer and not conditional_mode:
+            codes.add("o")
+
+        # T2 clauses (only reached when no T1 code holds).
+        t2 = None
+        if shared_via[id(analysis)] is not None:
+            t2 = ("g-shared", shared_via[id(analysis)])
+        elif test_file in am_via[id(analysis)]:
+            t2 = ("g-reach", am_via[id(analysis)][test_file])
+        elif rid in ambient_data_via:
+            t2 = ("g-data", ambient_data_via[rid])
+        elif corrupt or ((opaque_why is not None or demoted) and (
+                test_file in reach_b[sig] or stale_data or nonpy_changed
+                or not reach_all[sig].isdisjoint(mods))):
+            t2 = ("b-static", b_static_via(rid, test_file))
+
+        if codes:
+            _t1(nodeid, min(codes, key=_T1_ORDER.__getitem__))
             continue
-        ambient_reach, ambient_labels, shared = ambient_pre[node.run_id]
-        if shared:
-            for kind, label in shared:
-                _count(kind, label, nodeid)
-            _select()  # clause g: the run's shared import-time state
+        if observer and t2 is None:
+            _t1(nodeid, "o")  # no T2 clause: running is always safe (D6)
             continue
-        if node.test_file in ambient_reach:
-            # Clause g selects first; units count only nodes it selected
-            # (4.8: each unit carries the count of nodes it selected).
-            for label in ambient_labels:
-                _count("function", label, nodeid)
-            _select()  # clause g
+        if t2 is not None:
+            tiers[nodeid] = (_T2, t2[0])
+            via[nodeid] = t2[1]
+            ambient_or_pw = analysis.am | analysis.pw
+            if ambient_or_pw:
+                learnable[nodeid] = frozenset(ambient_or_pw)
+            if observer:
+                conditional[nodeid] = rid
             continue
-        dep_paths = ({p for p, _ in funcs} | set(mods) | set(data))
-        if dep_paths & touch[node.run_id]:
-            reached.add(nodeid)
+        if ({p for p, _ in funcs} | set(mods) | set(data)) & touch[sig]:
+            touched.add(nodeid)
 
     # Caller-local import-time changes select only the code that runs
     # them. A change that breaks the import shows in any test importing
-    # the module, so one selected test must still import it; otherwise
-    # the path follows the import-time rule for that run (static reach,
-    # plus the whole run when its ambient imported the module).
+    # the module, so one selected test must still import it (R4): in an
+    # iteration run exactly one witness per uncovered path; the audit
+    # plan keeps today's whole set.
     fallback_modules = set()
     for rid, analysis in per_run.items():
         soft = analysis.soft - analysis.am - analysis.pw
         if not soft:
             continue
-        members = [nodeid for nodeid, path in usable_of.items()
-                   if deps.nodes[nodeid].run_id == rid]
+        members = sorted(nodeid for nodeid in usable_of
+                         if chosen_run[nodeid] == rid)
+        t1_nodes = {n for n in members
+                    if tiers.get(n, (None,))[0] == _T1}
         missing = set()
         for path in sorted(soft):
-            reach = _reach(index, test_roots, {path})
-            if not any(nodeid in selected_nodes
+            reach = path_reach(path)
+            if not any(nodeid in t1_nodes
                        and (path in paths_of.get(nodeid, ())
                             or usable_of[nodeid] in reach)
                        for nodeid in members):
@@ -707,30 +857,39 @@ def plan(inputs):
             continue
         ambient_mods = {_resolve_path(vocabulary, pid)
                         for pid in list(compat_runs[rid].ambient.modules)}
-        whole = not missing.isdisjoint(ambient_mods)
-        reach = _reach(index, test_roots, missing)
         fallback_modules |= missing
-        for nodeid in members:
-            if nodeid in selected_nodes:
+        if audit:
+            whole = not missing.isdisjoint(ambient_mods)
+            reach = _reach(index, test_roots, missing)
+            for nodeid in members:
+                if nodeid in t1_nodes:
+                    continue
+                ran = missing & paths_of.get(nodeid, set())
+                if whole or ran or usable_of[nodeid] in reach:
+                    _t1(nodeid, "w")
+                    for path in (ran or missing):
+                        _count("module", path, nodeid)
+            continue
+        for path in sorted(missing):
+            reach = path_reach(path)
+            candidates = [nodeid for nodeid in members
+                          if path in paths_of.get(nodeid, ())
+                          or usable_of[nodeid] in reach]
+            if not candidates and path in ambient_mods:
+                candidates = members
+            if not candidates:
                 continue
-            ran = missing & paths_of.get(nodeid, set())
-            if whole or ran or usable_of[nodeid] in reach:
-                selected_nodes.add(nodeid)
-                selected_files.add(usable_of[nodeid])
-                for path in (ran or missing):
-                    _count("module", path, nodeid)
+            witness = min(candidates,
+                          key=lambda nodeid: (usable_of[nodeid], nodeid))
+            if tiers.get(witness, (None,))[0] != _T1:
+                _t1(witness, "w")
+            _count("module", path, witness)
 
-    # 4.6: test files with no usable node follow the static rule (N2).
+    # 4.6: test files with no usable node. A new test file (changed
+    # against a run baseline) is T1 n, whole; one merely reached by the
+    # static rule is T2 u-static (R1, R9).
     usable_files = set(usable_of.values())
     static_all = _reach(index, test_roots, changed_py)
-    unrecorded = set()
-    for path in sorted(index.test_files):
-        if path in usable_files:
-            continue
-        if path in static_all or nonpy_changed:
-            unrecorded.add(path)
-            fallbacks[path] = _NO_RECORD_REASON
-
     cf_all, seeds_all, am_all = set(), set(), set()
     data_all, wf_all = set(), set()
     for analysis in memo.values():
@@ -740,8 +899,27 @@ def plan(inputs):
         wf_all |= analysis.wf
     # 5.8 lists runnable test files: a removed path must never leak into
     # files/whole_files (or their units), however it entered WF.
-    test_set = _test_set(index)
     wf_all &= test_set
+    unrecorded = set()
+    n_files = set()
+    for path in sorted(index.test_files):
+        if path in usable_files:
+            continue
+        reached_static = path in static_all or nonpy_changed
+        if reached_static:
+            unrecorded.add(path)
+            fallbacks[path] = _NO_RECORD_REASON
+        if path in wf_all:
+            tiers[path] = (_T1, "n")
+            n_files.add(path)
+        elif reached_static:
+            tiers[path] = (_T2, "u-static")
+            for source in sorted(changed_py):
+                if path in path_reach(source):
+                    via[path] = source
+                    break
+            else:
+                via[path] = nonpy_paths[0]
     for _, _, stale_data in stale_of.values():
         data_all |= stale_data
     units = []
@@ -750,10 +928,10 @@ def plan(inputs):
                                    tests=len(counts.get(
                                        ("function", f"{path}::{qual}"),
                                        ()))))
-    for key in seeds_all:
+    for key_ in seeds_all:
         units.append(C.ChangedUnit(
-            kind="name", label=key,
-            tests=len(counts.get(("name", key), ()))))
+            kind="name", label=key_,
+            tests=len(counts.get(("name", key_), ()))))
     for path in am_all | fallback_modules:
         units.append(C.ChangedUnit(
             kind="module", label=path,
@@ -772,12 +950,22 @@ def plan(inputs):
             tests=len(counts.get(("unrecorded", path), ()))))
     units.sort(key=lambda unit: (-unit.tests, unit.label))
 
-    files = sorted((selected_files | wf_all | unrecorded) & test_set)
-    whole = sorted((wf_all | unrecorded) & test_set)
-    whole_set = set(whole)
-    files_set = set(files)
+    t1_node_ids = {nodeid for nodeid in usable_of
+                   if tiers.get(nodeid, (None,))[0] == _T1}
+    files_set = ({usable_of[nodeid] for nodeid in t1_node_ids} | n_files
+                 | {usable_of[nodeid] for nodeid in conditional}) & test_set
+    # A changed test file runs whole only when every usable node in it
+    # is T1; a file holding T2 or conditional nodes keeps them deselected.
+    by_file = {}
+    for nodeid, path in usable_of.items():
+        by_file.setdefault(path, []).append(nodeid)
+    whole_set = set(n_files)
+    for path in wf_all & usable_files:
+        if all(nodeid in t1_node_ids for nodeid in by_file[path]):
+            whole_set.add(path)
+    whole_set &= test_set
     deselect = sorted(nodeid for nodeid, path in usable_of.items()
-                      if nodeid not in selected_nodes
+                      if nodeid not in t1_node_ids
                       and path in files_set and path not in whole_set)
     total_files = len(index.test_files)
     if total_files:
@@ -785,18 +973,40 @@ def plan(inputs):
                        ) / total_files
     else:
         coverage = 0.0
+
+    file_keys = [k for k in tiers if k not in usable_of]
+    weights = {}
+    if file_keys:
+        inventory_counts = {}
+        for nodeid in deps.inventory:
+            path = C.selection_test_file(nodeid)
+            inventory_counts[path] = inventory_counts.get(path, 0) + 1
+        for path in file_keys:
+            weights[path] = max(1, inventory_counts.get(path, 0))
+    promoted = sum(1 for nodeid in usable_of
+                   if tiers.get(nodeid) == (_T1, "o"))
+    deferred_observers = sum(
+        1 for nodeid in usable_of
+        if nodeid in observers and tiers.get(nodeid, (None,))[0] == _T2)
     return C.SelectionDecision(
-        full_reason=full_reason,
-        files=tuple(files),
+        files=tuple(sorted(files_set)),
         deselect=tuple(deselect),
-        whole_files=tuple(whole),
-        selected=len(selected_nodes),
-        reached=len(reached - selected_nodes),
+        whole_files=tuple(sorted(whole_set)),
+        selected=len(t1_node_ids),
+        reached=len(touched - set(tiers)),
         recorded=recorded,
         total_files=total_files,
         units=tuple(units),
         fallbacks=tuple(sorted(fallbacks.items())),
         coverage=coverage,
+        tiers=dict(sorted(tiers.items())),
+        via=dict(sorted(via.items())),
+        weights=dict(sorted(weights.items())),
+        chosen=dict(sorted(chosen_run.items())),
+        learnable=dict(sorted(learnable.items())),
+        conditional=tuple(sorted(conditional.items())),
+        observers_promoted=promoted,
+        observers_deferred=deferred_observers,
     )
 
 
@@ -831,23 +1041,72 @@ def needed_data_paths(deps, compatibility):
 
 
 def is_selected(decision, nodeid):
-    """True when the decision runs this node id (unknown ids run)."""
-    if decision.full_reason is not None:
-        return True
+    """True when the iteration run executes this node id (unknown ids run)."""
     return (C.selection_test_file(nodeid) in set(decision.files)
             and nodeid not in set(decision.deselect))
 
 
+def _chosen_record(decision, deps, nodeid):
+    records = _records_of(deps).get(nodeid, ())
+    wanted = decision.chosen.get(nodeid)
+    if wanted is not None:
+        for record in records:
+            if record.run_id == wanted:
+                return record
+    if records:
+        return records[0]
+    return deps.nodes.get(nodeid)
+
+
+def audit_classify(decision, deps, failed, ran):
+    """R15: classify a gate's failures against the plan of its snapshot.
+
+    (a) a failing T2 node with paths to learn; (b) a failing T2 node with
+    none, or any failing id under a T2 file key; (c) a failing node whose
+    chosen record passed and that no tier or selection covered (a miss);
+    (d) a failing T1 node produces nothing.
+    """
+    failed_set = set(failed)
+    ran_set = set(ran)
+    tiers = decision.tiers
+    t2_files = {key_ for key_, (tier_, _) in tiers.items()
+                if tier_ == _T2 and key_ not in decision.chosen}
+    deferred = set()
+    for nodeid in ran_set:
+        entry = tiers.get(nodeid)
+        if entry is not None and entry[0] == _T2 and nodeid in decision.chosen:
+            deferred.add(nodeid)
+        elif (nodeid not in decision.chosen
+              and C.selection_test_file(nodeid) in t2_files):
+            deferred.add(nodeid)
+    learned, unlearned, misses = {}, [], []
+    for nodeid in sorted(failed_set):
+        if (nodeid not in decision.chosen
+                and C.selection_test_file(nodeid) in t2_files):
+            unlearned.append(nodeid)
+            continue
+        record = _chosen_record(decision, deps, nodeid)
+        if record is None or record.outcome not in C.SELECTION_PASSING_OUTCOMES:
+            continue
+        entry = tiers.get(nodeid)
+        if entry is None:
+            if not is_selected(decision, nodeid):
+                misses.append(nodeid)
+        elif entry[0] == _T2:
+            paths = decision.learnable.get(nodeid)
+            if paths:
+                learned[nodeid] = paths
+            else:
+                unlearned.append(nodeid)
+    return GateAudit(
+        previously_deferred=len(deferred),
+        failed=len(deferred & failed_set),
+        learned=learned,
+        unlearned=tuple(sorted(unlearned)),
+        misses=tuple(sorted(misses)),
+    )
+
+
 def audit_misses(decision, deps, failed):
-    """Failing tests with a passing prior record the plan skipped."""
-    out = []
-    for nodeid in failed:
-        record = deps.nodes.get(nodeid)
-        if record is None:
-            continue
-        if record.outcome not in C.SELECTION_PASSING_OUTCOMES:
-            continue
-        if is_selected(decision, nodeid):
-            continue
-        out.append(nodeid)
-    return tuple(sorted(out))
+    """Failing tests with a passing chosen record the plan skipped."""
+    return audit_classify(decision, deps, failed, ()).misses
