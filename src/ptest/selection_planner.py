@@ -603,12 +603,12 @@ def plan(inputs):
                       | frozenset(changed_all))
 
     # Per-analysis ambient facts (g-shared via, g-reach via-by-file).
+    # g-shared is per run (its own ambient context); am_via depends only on
+    # the analysis, so it is memoised per analysis.
     shared_via = {}
     am_via = {}
     for rid, analysis in per_run.items():
         key_ = id(analysis)
-        if key_ in shared_via:
-            continue
         shared = []
         for fid in list(compat_runs[rid].ambient.functions):
             resolved = _resolve_function(vocabulary, fid)
@@ -623,7 +623,9 @@ def plan(inputs):
             if path is not None and (path in analysis.am
                                      or path in analysis.pw):
                 shared.append(path)
-        shared_via[key_] = min(shared) if shared else None
+        shared_via[rid] = min(shared) if shared else None
+        if key_ in am_via:
+            continue
         by_file = {}
         for path in sorted(analysis.am):
             for test in path_reach(path):
@@ -802,8 +804,8 @@ def plan(inputs):
 
         # T2 clauses (only reached when no T1 code holds).
         t2 = None
-        if shared_via[id(analysis)] is not None:
-            t2 = ("g-shared", shared_via[id(analysis)])
+        if shared_via[rid] is not None:
+            t2 = ("g-shared", shared_via[rid])
         elif test_file in am_via[id(analysis)]:
             t2 = ("g-reach", am_via[id(analysis)][test_file])
         elif rid in ambient_data_via:

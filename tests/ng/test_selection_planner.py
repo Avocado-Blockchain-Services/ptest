@@ -1688,20 +1688,14 @@ def test_needed_data_paths_returns_recorded_data_only():
     assert PL.needed_data_paths(deps, OTHER) == frozenset({"data/c.json"})
 
 
-def test_is_selected_ignores_the_deprecated_full_reason():
-    # Spec R6 - full_reason is a deprecated field that nothing sets or reads;
-    # a decision carrying one selects exactly its files minus deselect.
+def test_is_selected_uses_files_and_deselect_only():
+    # Spec R6 / D3 - the planner never sets full_reason; a decision selects
+    # exactly its files minus deselect.
     old = FI(scopes=[SC("f", body="b1")])
     new = FI(scopes=[SC("f", body="b2")])
     inputs, nid = pair(old, new)
     d = _plan(inputs)
     assert d.full_reason is None
-    stale = C.SelectionDecision(
-        full_reason="ambient data file data/x.bin changed", files=(),
-        deselect=(), whole_files=(), selected=0, reached=0, recorded=0,
-        total_files=0, units=(), fallbacks=(), coverage=0.0,
-    )
-    assert not PL.is_selected(stale, "anything/at_all.py::test_x")
     assert PL.is_selected(d, nid)
     assert not PL.is_selected(d, "tests/other.py::test_y")
 
@@ -2879,18 +2873,52 @@ def test_t2_never_counts_as_reached():
 # --- the planner no longer sets full_reason ----------------------------------------
 
 def test_policy_digest_and_compatibility_unchanged_for_same_config():
-    # Planner half of the R46 invariant: a config without the new keys
-    # (default fields) and the same inputs with explicit defaults give
-    # byte-identical decisions.
+    # Planner half of the R46 invariant: inputs built WITHOUT the new fields
+    # (since_gate, observers, conditional, audit left at their defaults)
+    # plan exactly as pinned on fixed records.
     old = FI(scopes=[SC("f", body="b1"), SC("g", body="g1")])
     new = FI(scopes=[SC("f", body="b2"), SC("g", body="g2")])
-    a, _ = pair(old, new)
+    a, nid = pair(old, new)
     b = C.SelectionInputs(
         index=a.index, deps=a.deps, versions=a.versions,
         data_digests=a.data_digests, compatibility=a.compatibility,
-        changed=a.changed, test_roots=a.test_roots, since_gate=frozenset(),
-        observers={}, conditional=False, audit=False)
-    assert PL.plan(a) == PL.plan(b)
+        changed=a.changed, test_roots=a.test_roots)
+    assert (b.since_gate, b.observers, b.conditional, b.audit) == (
+        frozenset(), {}, False, False)
+    d = PL.plan(b)
+    assert d == PL.plan(a)
+    assert d.files == (TEST,)
+    assert d.deselect == ()
+    assert PL.is_selected(d, nid)
+    assert all(tier == T1 for tier, _ in d.tiers.values())
+
+
+def test_g_shared_is_per_run_in_both_recording_orders():
+    # R1: g-shared asks whether THIS run's ambient context ran a changed
+    # function. Two runs on one tree share a stale signature (one analysis)
+    # but not an ambient context; the result must not depend on order.
+    test2 = "tests/test_b.py"
+    old = FI(scopes=[SC("create_app", body="b1")])
+    new = FI(scopes=[SC("create_app", body="b2")])
+    tfi = FI(scopes=[SC("test_f")])
+    for t_a, t_b in ((2.0, 1.0), (1.0, 2.0)):
+        vb = VB()
+        index = IDX({LIB: PF(LIB, "dn", new),
+                     TEST: PF(TEST, "dt", tfi, test=True),
+                     test2: PF(test2, "dt2", tfi, test=True)})
+        digests = {LIB: "do", TEST: "dt", test2: "dt2"}
+        runs = [RUN(vb, "rA", digests, recorded_at=t_a,
+                    ambient=CT(vb, funcs=[(LIB, "create_app")])),
+                RUN(vb, "rB", digests, recorded_at=t_b, ambient=CT(vb))]
+        na = NODE(vb, TEST + "::test_f", TEST, "rA", funcs=[(TEST, "test_f")])
+        nb = NODE(vb, test2 + "::test_f", test2, "rB",
+                  funcs=[(test2, "test_f")])
+        d = PL.plan(INP(index, SNAP(vb, runs, [na, nb]),
+                        versions={"do": old, "dt": tfi, "dt2": tfi},
+                        changed=(LIB,)))
+        assert d.tiers.get(na.nodeid) == (T2, "g-shared"), (t_a, t_b, d.tiers)
+        assert d.tiers.get(nb.nodeid) != (T2, "g-shared"), (t_a, t_b, d.tiers)
+        assert na.nodeid in d.via
 
 
 # --- audit classifier (R15) ---------------------------------------------------------
