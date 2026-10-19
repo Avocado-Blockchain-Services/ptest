@@ -229,6 +229,20 @@ def test_child_full_records_baseline_then_changed_selects(case):
     assert baseline is not None
     assert baseline.head == git(root, "rev-parse", "HEAD")
 
+    # The advanced (coverage) bridge must record a real outcome: an
+    # "unknown" record is non-passing and would rerun with nothing changed.
+    from ptest import selection_engine
+    web_config = _children(root)["web"].config
+    store, _ = selection_engine._open_store_reason(
+        domain, web_config.project_id, create=False)
+    assert store is not None
+    try:
+        outcomes = {nodeid: node.outcome
+                    for nodeid, node in store.snapshot().nodes.items()}
+    finally:
+        store.close()
+    assert outcomes == {"tests/test_web.py::test_web": "passed"}
+
     web_baseline = history_api.read_history(
         domain, operations._checkout(_children(root)["web"].config)).baseline
     assert web_baseline is not None
@@ -246,7 +260,7 @@ def test_child_full_records_baseline_then_changed_selects(case):
     git(root, "checkout", "-b", "api-change")
     (root / "api" / "tests" / "test_api.py").write_text(
         "import api_module\n\n\ndef test_api():\n"
-        "    assert api_module.VALUE == 7\n# committed change\n",
+        "    assert api_module.VALUE == 7\n    assert api_module.VALUE > 0\n",
         encoding="utf-8")
     git(root, "add", "-A")
     git(root, "commit", "-m", "touch api")

@@ -3402,6 +3402,12 @@ class AdvancedPlugin(OwnedPlugin):
             item["teardown_s"] = duration
             if getattr(report, "failed", False):
                 item["outcome"] = "error"
+        recorder = self._selection
+        if recorder is not None:
+            try:
+                recorder.observe(report)
+            except Exception:
+                pass
         arm = self._stall_arm
         if arm is not None:
             arm.observe(report)
