@@ -589,7 +589,7 @@ def plan(inputs):
 
     # Per-signature precomputes: clause-b reach, the full static reach of
     # the stale or changed code, and the touched-path union are identical
-    # for every run of one signature.
+    # across all runs sharing one signature.
     reach_b, reach_all, touch = {}, {}, {}
     for rid in per_run:
         sig = sig_of[rid]
