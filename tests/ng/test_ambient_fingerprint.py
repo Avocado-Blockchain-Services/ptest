@@ -64,7 +64,8 @@ def test_digest_is_hmac_of_stdout_and_outcome_holds_no_output(tmp_path):
 
 def test_fingerprint_output_never_printed_or_stored(tmp_path, capfd):
     # Oracle: R43 -- stdout of the command is never echoed or retained.
-    out = _run(_py("print('LEAKME-STDOUT')"), tmp_path)
+    out = _run(
+        _py("import sys; sys.stdout.write('LEAKME-STDOUT\\n')"), tmp_path)
     seen = capfd.readouterr()
     assert "LEAKME" not in seen.out + seen.err
     assert "LEAKME" not in repr(out)
