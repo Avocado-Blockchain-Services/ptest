@@ -990,3 +990,116 @@ def test_a_miss_that_passes_again_under_the_mutant_is_flaky(tmp_path,
     record = _report(seen)["mutants"][0]
     assert record["misses"] == []
     assert record["flaky"] == ["tests/test_a.py::test_1"]
+
+
+# --- --tiers (A3, report only) ---------------------------------------------------
+
+def _tier_plan(*, kind="selected", files=(), deselect=(), tiers=None,
+               run_now=1, deferred=2):
+    import types
+
+    decision = types.SimpleNamespace(tiers=tiers or {})
+    report = types.SimpleNamespace(run_now=run_now, deferred=deferred)
+    return types.SimpleNamespace(kind=kind, files=tuple(files),
+                                 deselect=tuple(deselect), decision=decision,
+                                 selection=report)
+
+
+def test_tiers_flag_defaults_off_and_parses():
+    base = ["--project", "p", "--mutants", "1", "--seed", "1", "--out", "o"]
+    assert se.parse_args(base).tiers is False
+    assert se.parse_args(base + ["--tiers"]).tiers is True
+
+
+@pytest.mark.parametrize("node, expected", [
+    ("tests/test_a.py::t0", "T1:d"),
+    ("tests/test_a.py::t1", "T2:g-shared"),
+    # An unrecorded file key covers every node under it.
+    ("tests/test_n.py::t9", "T2:u-static"),
+    # In a selected file, not deselected, not tiered: it ran.
+    ("tests/test_a.py::t5", "ran"),
+    # Nowhere at all, so a miss of every tier.
+    ("tests/test_z.py::t0", "missed"),
+])
+def test_tier_of_names_where_a_failure_fell(node, expected):
+    plan = _tier_plan(
+        files=("tests/test_a.py",),
+        deselect=("tests/test_a.py::t1",),
+        tiers={"tests/test_a.py::t0": ("T1", "d"),
+               "tests/test_a.py::t1": ("T2", "g-shared"),
+               "tests/test_n.py": ("T2", "u-static")})
+    assert se.tier_of(plan, node, "") == expected
+
+
+def test_tier_of_strips_the_monorepo_prefix_and_trusts_a_full_plan():
+    plan = _tier_plan(tiers={"tests/test_a.py::t0": ("T2", "b-static")})
+    assert se.tier_of(plan, "svc/tests/test_a.py::t0", "svc") == "T2:b-static"
+    full = _tier_plan(kind="full")
+    assert se.tier_of(full, "anything::x", "") == "ran"
+
+
+def test_tier_summary_counts_fates_and_names_the_missed():
+    plan = _tier_plan(
+        files=("tests/test_a.py",),
+        tiers={"tests/test_a.py::t0": ("T1", "d"),
+               "tests/test_b.py::t1": ("T2", "b-static")},
+        run_now=3, deferred=9)
+    summary = se.tier_summary(
+        plan, ("tests/test_a.py::t0", "tests/test_a.py::t5",
+               "tests/test_b.py::t1", "tests/test_z.py::t0"), "")
+    assert summary["run_now"] == 3 and summary["deferred"] == 9
+    assert (summary["failed_run_now"], summary["failed_deferred"],
+            summary["failed_missed"]) == (2, 1, 1)
+    assert summary["by_tier"] == {"T1:d": 1, "T2:b-static": 1, "ran": 1,
+                                  "missed": 1}
+    assert summary["missed_nodes"] == ["tests/test_z.py::t0"]
+
+
+def _tier_report():
+    return se.EvalReport(seed=5, mutants=(
+        se.MutantRecord(mutant_id="m0001", site_class="constant-change",
+                        path="pkg/core.py", lineno=3,
+                        tiers={"run_now": 1, "deferred": 3,
+                               "failed_run_now": 1, "failed_deferred": 2,
+                               "failed_missed": 1,
+                               "missed_nodes": ["tests/test_z.py::t0"],
+                               "by_tier": {"T1:d": 1}}),
+        se.MutantRecord(mutant_id="m0002", site_class="data-change",
+                        path="d.json", lineno=1)))
+
+
+def test_tiers_report_names_sizes_fates_and_shares():
+    text = se.render_tiers_markdown(_tier_report())
+    assert "1 mutants planned" in text
+    assert "1 run now, 2 deferred to the gate, 1 missed by every tier" in text
+    assert "Median share of tests deferred per mutant: 75%." in text
+    assert "| m0001 | constant-change | pkg/core.py:3 | 1 | 3 | 1 / 2 / 1 |" \
+        " tests/test_z.py::t0 |" in text
+    assert "m0002" not in text  # nothing planned for it
+    payload = json.loads(se.render_tiers_json(_tier_report()))
+    assert [m["mutant_id"] for m in payload["mutants"]] == ["m0001"]
+    assert payload["mutants"][0]["tiers"]["failed_missed"] == 1
+
+
+def test_default_reports_are_byte_identical_with_tiers_data():
+    """--tiers adds files, never bytes to the existing reports."""
+    plain = se.EvalReport(seed=5, mutants=(
+        se.MutantRecord(mutant_id="m0001", site_class="constant-change",
+                        path="pkg/core.py", lineno=3),))
+    tiered = se.EvalReport(seed=5, mutants=(
+        se.MutantRecord(mutant_id="m0001", site_class="constant-change",
+                        path="pkg/core.py", lineno=3,
+                        tiers={"run_now": 1, "deferred": 0}),))
+    assert se.render_json(plain) == se.render_json(tiered)
+    assert se.render_markdown(plain) == se.render_markdown(tiered)
+
+
+def test_tier_files_are_written_only_with_the_flag(tmp_path):
+    report = _tier_report()
+    se._write_reports(tmp_path / "off", report)
+    assert sorted(p.name for p in (tmp_path / "off").iterdir()) == [
+        "selection-eval.json", "selection-eval.md"]
+    se._write_reports(tmp_path / "on", report, tiers=True)
+    assert sorted(p.name for p in (tmp_path / "on").iterdir()) == [
+        "selection-eval.json", "selection-eval.md",
+        "selection-tiers.json", "selection-tiers.md"]

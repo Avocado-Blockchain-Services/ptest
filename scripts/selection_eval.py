@@ -18,6 +18,11 @@ or written, while runs still wait in the machine-wide queue. A seed
 ``--full`` run records the pristine tree before the first mutant. Every pure-logic unit in this
 module is stdlib-only and covered by tests/ng/test_selection_eval.py.
 The A1-A5 campaign itself is never executed in tests.
+
+``--tiers`` (A3, report only) additionally writes ``selection-tiers.json``
+and ``selection-tiers.md``: per mutant, how many tests the v2 plan runs now
+(T1) and defers to the gate (T2), and where each ground-truth failure fell
+(run now, deferred, or missed by every tier). It changes no other output.
 """
 from __future__ import annotations
 
@@ -143,6 +148,9 @@ class MutantRecord:
     error: str = ""
     # Candidate misses that passed when rerun under the mutant.
     flaky: tuple = ()
+    # ``--tiers`` only (A3): ``tier_summary`` of the v2 plan; never part of
+    # ``render_json`` / ``render_markdown``.
+    tiers: Mapping = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,6 +716,10 @@ def parse_args(argv=None):
     parser.add_argument("--truth", choices=("full", "union"), default="full",
                         help="ground truth: the whole suite (default), or "
                              "the union of the v1 and v2 selections")
+    parser.add_argument("--tiers", action="store_true",
+                        help="also write selection-tiers.json/.md: tests run "
+                             "now vs deferred per mutant and where each "
+                             "ground-truth failure fell (report only)")
     return parser.parse_args(argv)
 
 
@@ -735,10 +747,16 @@ def read_tree_files(root: Path) -> dict:
     return tree
 
 
-def _write_reports(out: Path, report: EvalReport) -> None:
+def _write_reports(out: Path, report: EvalReport, *,
+                   tiers: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "selection-eval.json").write_text(render_json(report), encoding="utf-8")
     (out / "selection-eval.md").write_text(render_markdown(report), encoding="utf-8")
+    if tiers:
+        (out / "selection-tiers.json").write_text(
+            render_tiers_json(report), encoding="utf-8")
+        (out / "selection-tiers.md").write_text(
+            render_tiers_markdown(report), encoding="utf-8")
 
 
 def _dry_run(args) -> int:
@@ -876,6 +894,113 @@ def v2_covering(mutant_failed: tuple, plan, prefix: str) -> tuple:
                for nodeid in (getattr(plan, "deselect", ()) or ())}
     return tuple(node for node in mutant_failed
                  if file_part(node) in files and node not in skipped)
+
+
+def _unscope_node(prefix: str, nodeid: str) -> str:
+    """A repo-scoped node id as the child-relative id a plan uses."""
+    if prefix and nodeid.startswith(prefix + "/"):
+        return nodeid[len(prefix) + 1:]
+    return nodeid
+
+
+def tier_of(plan, nodeid: str, prefix: str) -> str:
+    """Where one ground-truth failure fell in the v2 plan.
+
+    ``T1:<code>`` (run now, with the planner's clause code), ``T2:<code>``
+    (deferred to the gate), ``ran`` (inside a selected file and not
+    deselected, or the plan was the full suite) or ``missed`` (no tier
+    and not executed).
+    """
+    if getattr(plan, "kind", "selected") == "full":
+        return "ran"
+    decision = getattr(plan, "decision", None)
+    tiers = getattr(decision, "tiers", None) or {}
+    local = _unscope_node(prefix, nodeid)
+    entry = tiers.get(local) or tiers.get(file_part(local))
+    if entry:
+        return f"{entry[0]}:{entry[1]}"
+    if v2_covering((nodeid,), plan, prefix):
+        return "ran"
+    return "missed"
+
+
+def tier_summary(plan, failed: tuple, prefix: str) -> dict:
+    """The ``--tiers`` facts of one mutant: plan sizes and failure fates."""
+    report = getattr(plan, "selection", None)
+    by_tier: dict = {}
+    missed = []
+    for node in failed:
+        label = tier_of(plan, node, prefix)
+        by_tier[label] = by_tier.get(label, 0) + 1
+        if label == "missed":
+            missed.append(node)
+    run_now = sum(count for label, count in by_tier.items()
+                  if label == "ran" or label.startswith("T1:"))
+    deferred = sum(count for label, count in by_tier.items()
+                   if label.startswith("T2:"))
+    return {
+        "run_now": getattr(report, "run_now", None),
+        "deferred": getattr(report, "deferred", None),
+        "failed_run_now": run_now,
+        "failed_deferred": deferred,
+        "failed_missed": len(missed),
+        "by_tier": dict(sorted(by_tier.items())),
+        "missed_nodes": sorted(missed),
+    }
+
+
+def render_tiers_json(report: "EvalReport") -> str:
+    payload = {
+        "seed": report.seed,
+        "mutants": [
+            {"mutant_id": record.mutant_id, "site_class": record.site_class,
+             "path": record.path, "lineno": record.lineno,
+             "error": record.error, "tiers": dict(record.tiers)}
+            for record in report.mutants if record.tiers or record.error],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def render_tiers_markdown(report: "EvalReport") -> str:
+    """The A3 tier report: run-now versus deferred sizes and failure fates."""
+    rows = [record for record in report.mutants if record.tiers]
+    lines = [f"# selection tiers (seed {report.seed})", ""]
+    ran = sum(int(record.tiers.get("failed_run_now", 0)) for record in rows)
+    deferred = sum(int(record.tiers.get("failed_deferred", 0))
+                   for record in rows)
+    missed = sum(int(record.tiers.get("failed_missed", 0)) for record in rows)
+    shares = []
+    for record in rows:
+        run_now = record.tiers.get("run_now")
+        waiting = record.tiers.get("deferred")
+        if isinstance(run_now, int) and isinstance(waiting, int) \
+                and run_now + waiting > 0:
+            shares.append(waiting / (run_now + waiting))
+    lines.append(f"{len(rows)} mutants planned; ground-truth failures: "
+                 f"{ran} run now, {deferred} deferred to the gate, "
+                 f"{missed} missed by every tier.")
+    if shares:
+        lines.append(f"Median share of tests deferred per mutant: "
+                     f"{median(shares):.0%}.")
+    lines.append("")
+    lines.append("| mutant | class | path | run now | deferred | "
+                 "failed: run / deferred / missed | missed nodes |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for record in rows:
+        tiers = record.tiers
+        names = ",".join(tiers.get("missed_nodes", ())) or "none"
+        run_now = tiers.get("run_now")
+        waiting = tiers.get("deferred")
+        lines.append(
+            f"| {record.mutant_id} | {record.site_class} | "
+            f"{record.path}:{record.lineno} | "
+            f"{'?' if run_now is None else run_now} | "
+            f"{'?' if waiting is None else waiting} | "
+            f"{tiers.get('failed_run_now', 0)} / "
+            f"{tiers.get('failed_deferred', 0)} / "
+            f"{tiers.get('failed_missed', 0)} | {names} |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def clear_lastfailed(scratch: Path) -> None:
@@ -1431,7 +1556,9 @@ def _run_mutant(args, campaign: Campaign, mutant: Mutant) -> MutantRecord:
             v2_reason=str(getattr(v2, "static_reason", "")
                           or getattr(v2, "reason", "") or ""),
             v2_details=tuple(str(line) for line in
-                             (getattr(v2, "details", ()) or ())[:12]))
+                             (getattr(v2, "details", ()) or ())[:12]),
+            tiers=(tier_summary(v2, mutant_failed, prefix)
+                   if getattr(args, "tiers", False) else {}))
         _log(f"{mutant.mutant_id} {mutant.site.site_class} "
              f"{mutant.site.path}: v1 {record.v1_tests} v2 {record.v2_tests}"
              f" of {record.total_tests} tests, {len(mutant_failed)} failed,"
@@ -1498,14 +1625,16 @@ def run_campaign(args) -> int:
                     error=str(exc)[:2000]))
             # Partial reports survive an interrupted multi-hour campaign.
             _write_reports(out, EvalReport(seed=args.seed,
-                                           mutants=tuple(records)))
+                                           mutants=tuple(records)),
+                           tiers=bool(getattr(args, "tiers", False)))
         overhead = {}
         if args.benchmark_overhead:
             overhead = benchmark_overhead(project, out, args.ptest,
                                           campaign.project_id)
     except BaseException:
         _write_reports(out, EvalReport(seed=args.seed,
-                                       mutants=tuple(records)))
+                                       mutants=tuple(records)),
+                       tiers=bool(getattr(args, "tiers", False)))
         raise
     finally:
         for scratch in (campaign.truth, campaign.base):
@@ -1515,7 +1644,8 @@ def run_campaign(args) -> int:
         if campaign.backup is not None and campaign.backup.is_file():
             campaign.backup.unlink()
     _write_reports(out, EvalReport(seed=args.seed, mutants=tuple(records),
-                                   overhead_ms=overhead))
+                                   overhead_ms=overhead),
+                   tiers=bool(getattr(args, "tiers", False)))
     return 0
 
 

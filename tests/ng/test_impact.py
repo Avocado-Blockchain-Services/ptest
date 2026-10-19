@@ -1030,3 +1030,84 @@ def test_impact_accepts_only_0_4_arguments():
     assert impact.project_index is None
     assert I.PLANNING.get() is None
     assert I.PLANNING.name == "ptest_impact_planning"
+
+
+# --- 0.7.0: new Impact fields and the shared changed-set filter ---------------
+
+def test_impact_new_fields_default_to_nothing_and_never_affect_equality():
+    plain = I.Impact(kind="selected", changed=("a.py",))
+    assert plain.selection is None and plain.decision is None
+    assert plain.conditional == () and plain.observed == frozenset()
+    with_report = I.Impact(
+        kind="selected", changed=("a.py",),
+        selection=C.SelectionReport(engine="dynamic", iteration=True,
+                                    run_now=1, deferred=0),
+        conditional=(), observed=frozenset({"tests/test_a.py::t"}))
+    # selection, decision and observed are compare=False, repr=False.
+    assert with_report == plain
+    assert "selection" not in repr(with_report)
+
+
+def _filter_repo(tmp_path):
+    return _repo(tmp_path, _graph_files())
+
+
+def test_relevant_paths_is_the_filter_plan_applies_to_the_changed_set(
+        tmp_path):
+    """relevant_paths keeps exactly the paths plan() reports as relevant:
+    tool output, ignored classes and non-code paths outside the code area
+    are dropped, and the project prefix is stripped."""
+    _filter_repo(tmp_path)
+    write_file(tmp_path / "tests" / "data" / "cfg.json", "{}\n")
+    write_file(tmp_path / "notes.md", "docs\n")
+    write_file(tmp_path / "docs" / "outside.json", "{}\n")
+    write_file(tmp_path / "__pycache__" / "x.pyc", "out")
+    write_file(tmp_path / ".coverage", "out")
+    paths = ["pkg/b.py", "tests/data/cfg.json", "notes.md",
+             "docs/outside.json", "__pycache__/x.pyc", ".coverage",
+             "pkg/new.py"]
+
+    got = I.relevant_paths(tmp_path, tmp_path, _config(), paths)
+
+    assert got == frozenset({"pkg/b.py", "tests/data/cfg.json",
+                             "pkg/new.py"})
+
+
+def test_relevant_paths_agrees_with_plan_relevant(tmp_path):
+    """The same names through plan() leave exactly this relevant set."""
+    _filter_repo(tmp_path)
+    names = ("pkg/b.py", "notes.md", "__pycache__/x.pyc", ".coverage")
+    verdict = I.plan(tmp_path, tmp_path, _config(), names)
+    assert verdict.dynamic_ok is True
+    assert set(verdict.relevant) == {"pkg/b.py"}
+    assert I.relevant_paths(tmp_path, tmp_path, _config(),
+                            names) == frozenset(verdict.relevant)
+
+
+def test_relevant_paths_keeps_trigger_basenames_as_plain_paths(tmp_path):
+    """A full-trigger basename never becomes a verdict here."""
+    _filter_repo(tmp_path)
+    write_file(tmp_path / "pkg" / "setup.cfg", "[x]\n")
+    got = I.relevant_paths(tmp_path, tmp_path, _config(),
+                           ["uv.lock", "pkg/setup.cfg", "pkg/a.py"])
+    # setup.cfg is a trigger basename but only a path here; uv.lock at the
+    # root lies outside the code area and is dropped like plan() drops it.
+    assert got == frozenset({"pkg/setup.cfg", "pkg/a.py"})
+
+
+def test_relevant_paths_scopes_to_a_monorepo_child(tmp_path):
+    init_git_repo(tmp_path, files={"svc/pkg/a.py": "A = 1\n",
+                                   "svc/tests/test_a.py": "def test_a(): pass\n",
+                                   "other/b.py": "B = 1\n"})
+    child = tmp_path / "svc"
+    got = I.relevant_paths(tmp_path, child, _config(),
+                           ["svc/pkg/a.py", "other/b.py", "svc/pkg/x.py"])
+    assert got == frozenset({"pkg/a.py", "pkg/x.py"})
+
+
+def test_relevant_paths_never_raises_for_an_unrelated_location(tmp_path):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    got = I.relevant_paths(tmp_path / "missing", other, _config(),
+                           ["a.py", 3, None])
+    assert got == frozenset()

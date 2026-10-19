@@ -489,3 +489,101 @@ def test_malformed_lazy_edges_are_ignored_not_fatal(tmp_path, lazy):
     funcs, mods, data = _names(run, "tests/test_b.py::test_reuse")
     assert funcs == {"tests/conftest.py::db"}
     assert mods == set() and data == set()
+
+
+# --- deselect rewrite (R44) --------------------------------------------------
+
+def _bridge_read(report: Path, run_id: str, monkeypatch):
+    from ptest.runtime import pytest_bridge as bridge
+
+    monkeypatch.setenv("PTEST_SELECTION_DESELECT",
+                       str(report) + I.DESELECT_SUFFIX)
+    monkeypatch.setenv("PTEST_EXECUTION", "scoped")
+    return bridge._read_deselect_binding(report, run_id)
+
+
+def test_conditional_binding_rewrite_keeps_bridge_checks(tmp_path,
+                                                         monkeypatch):
+    """R44: the rewritten binding passes the bridge's own reader.
+
+    Owner, mode 0600, a single link, format and run id all hold, only the
+    promoted ids are gone, and no temporary file is left behind.
+    """
+    report = _report(tmp_path)
+    ids = ["tests/test_a.py::t1", "tests/test_a.py::t2",
+           "tests/test_a.py::t3"]
+    I.write_deselect_binding(report, RUN_ID, ids)
+    binding = Path(f"{report}{I.DESELECT_SUFFIX}")
+    rewritten = I.rewrite_deselect_binding(report, RUN_ID, ids[1:])
+    assert rewritten == binding
+    stamp = os.lstat(binding)
+    assert stat.S_ISREG(stamp.st_mode)
+    assert stat.S_IMODE(stamp.st_mode) == 0o600
+    assert stamp.st_nlink == 1
+    assert stamp.st_uid == os.getuid()
+    assert not Path(f"{report}{I.REWRITE_SUFFIX}").exists()
+    nodeids, status = _bridge_read(report, RUN_ID, monkeypatch)
+    assert (nodeids, status) == (ids[1:], "applied")
+    # A different run id is refused by the bridge, never silently applied.
+    assert _bridge_read(report, OTHER_RUN, monkeypatch) == (None, "ignored")
+
+
+def test_rewrite_deselect_binding_to_nothing_is_still_a_valid_binding(
+        tmp_path, monkeypatch):
+    report = _report(tmp_path)
+    I.write_deselect_binding(report, RUN_ID, ["tests/test_a.py::t1"])
+    I.rewrite_deselect_binding(report, RUN_ID, [])
+    assert _bridge_read(report, RUN_ID, monkeypatch) == ([], "applied")
+
+
+def test_rewrite_failure_unlinks_tmp_and_keeps_old_binding(tmp_path,
+                                                           monkeypatch):
+    report = _report(tmp_path)
+    I.write_deselect_binding(report, RUN_ID, ["tests/test_a.py::t1"])
+    before = Path(f"{report}{I.DESELECT_SUFFIX}").read_bytes()
+
+    def broken(src, dst):
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(os, "rename", broken)
+    monkeypatch.setattr(os, "replace", broken)
+    with pytest.raises(OSError):
+        I.rewrite_deselect_binding(report, RUN_ID, [])
+    assert not Path(f"{report}{I.REWRITE_SUFFIX}").exists()
+    assert Path(f"{report}{I.DESELECT_SUFFIX}").read_bytes() == before
+
+
+@pytest.mark.parametrize("run_id, nodeids", [
+    ("not-hex", ["tests/test_a.py::t1"]),
+    (RUN_ID, ["../evil.py::t"]),
+    (RUN_ID, ["tests/test_a.py::t\x00"]),
+])
+def test_rewrite_refuses_hostile_input_and_leaves_no_tmp(tmp_path, run_id,
+                                                         nodeids):
+    report = _report(tmp_path)
+    I.write_deselect_binding(report, RUN_ID, ["tests/test_a.py::t1"])
+    with pytest.raises(ValueError):
+        I.rewrite_deselect_binding(report, run_id, nodeids)
+    assert not Path(f"{report}{I.REWRITE_SUFFIX}").exists()
+
+
+def test_rewrite_never_follows_a_planted_tmp_link(tmp_path):
+    """O_EXCL|O_NOFOLLOW: a leftover or planted tmp fails closed."""
+    report = _report(tmp_path)
+    I.write_deselect_binding(report, RUN_ID, ["tests/test_a.py::t1"])
+    target = tmp_path / "victim"
+    target.write_bytes(b"keep")
+    Path(f"{report}{I.REWRITE_SUFFIX}").symlink_to(target)
+    with pytest.raises(OSError):
+        I.rewrite_deselect_binding(report, RUN_ID, [])
+    assert target.read_bytes() == b"keep"
+
+
+def test_cleanup_removes_a_leftover_rewrite_tmp(tmp_path):
+    report = _report(tmp_path)
+    tmp = Path(f"{report}{I.REWRITE_SUFFIX}")
+    tmp.write_bytes(b"x")
+    os.chmod(tmp, 0o600)
+    I.cleanup(report)
+    assert not tmp.exists()
+    I.cleanup(report)

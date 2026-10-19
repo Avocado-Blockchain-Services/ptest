@@ -186,6 +186,14 @@ def _head(top: Path) -> str | None:
     return sha if _valid_sha(sha) else None
 
 
+def head_commit(top: Path) -> str | None:
+    """HEAD of the checkout at ``top`` (40 lowercase hex), or None."""
+    try:
+        return _head(Path(top))
+    except Exception:
+        return None
+
+
 def _under(path: str, prefix: str) -> bool:
     return prefix == "" or path == prefix or path.startswith(prefix + "/")
 
@@ -209,6 +217,21 @@ def _content_hash(top: Path, rel: str) -> str | None:
         return None
 
 
+def dirty_files(top: Path, project: str) -> tuple[str, ...] | None:
+    """Git-top-relative dirty paths under ``project`` (record_pass's set).
+
+    None when local Git evidence is unavailable; callers decide what a
+    missing or oversize set means (``MAX_GREEN_FILES``).
+    """
+    try:
+        dirty = monorepo.worktree_changed_files(Path(top), None)
+    except Exception:
+        return None
+    if dirty is None:
+        return None
+    return tuple(path for path in dirty if _under(path, project))
+
+
 def record_pass(domain_root: str | Path, repo_root: str, project: str,
                 top: Path) -> None:
     """Store HEAD plus the dirty-tree fingerprint; clears last-failed."""
@@ -217,11 +240,9 @@ def record_pass(domain_root: str | Path, repo_root: str, project: str,
         head = _head(top)
         if head is None:
             return
-        dirty = monorepo.worktree_changed_files(top, None)
-        if dirty is None:
+        scoped = dirty_files(top, project)
+        if scoped is None:
             return
-        prefix = project
-        scoped = [path for path in dirty if _under(path, prefix)]
         if len(scoped) > MAX_GREEN_FILES:
             return
         files = {path: _content_hash(top, path) for path in scoped}

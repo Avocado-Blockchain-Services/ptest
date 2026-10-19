@@ -51,6 +51,16 @@ class Impact:
     reached: int = 0
     units: tuple[str, ...] = ()
     details: tuple[str, ...] = ()
+    selection: C.SelectionReport | None = field(
+        default=None, compare=False, repr=False)
+    # RunRequest.conditional entries: (node id, expected fingerprint | None).
+    conditional: tuple[tuple[str, str | None], ...] = ()
+    decision: C.SelectionDecision | None = field(
+        default=None, compare=False, repr=False)
+    # Node ids that hold observer rows (merged map); lets ``narrow`` recount
+    # the deferred observers of a folder exactly.
+    observed: frozenset[str] = field(
+        default=frozenset(), compare=False, repr=False)
     project_index: C.ProjectIndex | None = field(
         default=None, compare=False, repr=False)
 
@@ -402,6 +412,65 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def _split_scoped(project_root: Path, config: C.Config,
+                  scoped: list[str]) -> tuple[list[str], list[str], int]:
+    """Split project-relative, non-output paths into (relevant, noted, dropped).
+
+    The one filter every changed set passes through: ignored paths are only
+    noted, and non-code paths outside the code area are dropped.
+    """
+    selection = config.selection
+    kind_value = config.runner.kind.value
+    test_roots = tuple(config.runner.test_roots)
+    graph_kinds = (C.RunnerKind.PYTEST.value, C.RunnerKind.VITEST.value)
+    relevant: list[str] = []
+    noted: list[str] = []
+    dropped = 0
+    for path in scoped:
+        if _is_code_file(path, kind_value):
+            (relevant if not _is_ignored(path, selection, test_roots)
+             else noted).append(path)
+        elif kind_value in graph_kinds and not _inside_code_area(
+                project_root, path, test_roots):
+            dropped += 1
+        elif _is_ignored(path, selection, test_roots):
+            noted.append(path)
+        else:
+            relevant.append(path)
+    return relevant, noted, dropped
+
+
+def relevant_paths(top: Path, project_root: Path, config: C.Config,
+                   paths) -> frozenset[str]:
+    """Git-top-relative paths -> project-relative paths that survive exactly
+    the filter ``plan`` applies to the changed set.
+
+    Tool and build output, ignored paths and non-code paths outside the code
+    area are dropped. A full-trigger basename stays a plain path: this is
+    never a verdict (only the diff forces a full run). Never raises for an
+    unusable location: it returns the empty set.
+    """
+    try:
+        project_root = Path(project_root)
+        prefix = project_root.resolve().relative_to(
+            Path(top).resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return frozenset()
+    if prefix == ".":
+        prefix = ""
+    under: list[str] = []
+    for path in paths:
+        if not isinstance(path, str):
+            continue
+        if prefix == "":
+            under.append(path)
+        elif path == prefix or path.startswith(prefix + "/"):
+            under.append(path[len(prefix) + 1:])
+    scoped = [path for path in sorted(set(under)) if not _is_output(path)]
+    relevant, _, _ = _split_scoped(project_root, config, scoped)
+    return frozenset(relevant)
+
+
 def plan(top: Path | None, project_root: Path, config: C.Config,
          repo_changed: tuple[str, ...] | None, *,
          key: bytes | None = None, cache: C.ParseCache | None = None,
@@ -457,20 +526,8 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
                 or _matches(path, selection.full_triggers):
             return Impact(kind="full",
                           reason=f"{path} is a full trigger")
-    relevant: list[str] = []
-    noted: list[str] = []
-    graph_kinds = (C.RunnerKind.PYTEST.value, C.RunnerKind.VITEST.value)
-    for path in scoped:
-        if _is_code_file(path, kind_value):
-            (relevant if not _is_ignored(path, selection, test_roots)
-             else noted).append(path)
-        elif kind_value in graph_kinds and not _inside_code_area(
-                project_root, path, test_roots):
-            dropped += 1
-        elif _is_ignored(path, selection, test_roots):
-            noted.append(path)
-        else:
-            relevant.append(path)
+    relevant, noted, outside = _split_scoped(project_root, config, scoped)
+    dropped += outside
     changed = tuple(sorted(relevant) + sorted(noted))
     if not relevant:
         return Impact(kind="none", changed=changed, ignored=dropped)

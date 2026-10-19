@@ -18,6 +18,7 @@ node-level deselect inside partially selected files.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -215,6 +216,32 @@ def test_effectful_change_selects_static_reach(recorded, case):
     # so nothing runs now. Deferral wording belongs to the cli layer.
     assert result.code == 0, err[-2000:]
     assert _markers(root) == set()
+    # Spec R32 - the -v lines name what waits for the gate.
+    match = re.search(
+        r"-v selection: tiers: 0 run now \(none\) · (\d+) deferred", err)
+    assert match and int(match.group(1)) >= 1, err[-2000:]
+    assert "-v selection: since gate: 1 path · gate " in err
+
+
+def test_gate_after_a_deferral_runs_every_deferred_test(recorded, case):
+    """R15/R33: the gate that follows a deferral executes the deferred
+    tests and reports them; nothing failed, so nothing is learned."""
+    domain, root = recorded
+    (root / "pkg" / "core.py").write_text(
+        _CORE + "\nprint('effect-marker')\n")
+    deferred, deferred_err = _changed(case, domain, root)
+    assert deferred.code == 0, deferred_err[-2000:]
+    assert _markers(root) == set()
+
+    gate = case.invoke(domain, root, "--full", "-v", timeout=_FULL_TIMEOUT)
+    err = gate.stderr.decode()
+
+    assert gate.code == 0, err[-2000:]
+    assert _markers(root) == _ALL
+    match = re.search(
+        r"ptest: selection gate: ran (\d+) previously deferred tests? · "
+        r"0 failed · 0 observers learned", err)
+    assert match and int(match.group(1)) >= 1, err[-2000:]
 
 
 def test_empty_store_reports_static_note(case):

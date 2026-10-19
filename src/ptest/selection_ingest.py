@@ -611,14 +611,11 @@ def _incomplete(parsed: list[dict], notes: list[str]) -> RunDependencies:
         notes=tuple(notes[:_MAX_NOTES]))
 
 
-def write_deselect_binding(report_path: Path, run_id: str,
-                           nodeids) -> Path:
-    """Write the private ``<report>.deselect`` binding (O_EXCL, 0600).
+REWRITE_SUFFIX = ".deselect.tmp"
 
-    Raises ``ValueError`` for a bad run id or any unsafe node id (the
-    caller then keeps the whole file selected) and ``OSError`` when the
-    file cannot be created exclusively.
-    """
+
+def _binding_payload(run_id: str, nodeids) -> bytes:
+    """The validated binding bytes, or ``ValueError`` for hostile input."""
     if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
         raise ValueError("deselect binding needs a 32-hex run id")
     try:
@@ -630,13 +627,17 @@ def write_deselect_binding(report_path: Path, run_id: str,
     for item in ids:
         if not isinstance(item, str) or not selection_nodeid_safe(item):
             raise ValueError(f"deselect node id is not safe: {item!r}")
-    path = selection_deselect_path(Path(report_path))
     payload = json.dumps({"format": DESELECT_FORMAT, "run_id": run_id,
                           "nodeids": ids},
                          ensure_ascii=True,
                          separators=(",", ":")).encode("utf-8")
     if len(payload) > DESELECT_MAX_BYTES:
         raise ValueError("deselect binding exceeds the size cap")
+    return payload
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    """Create ``path`` exclusively (0600, no symlink) and write ``payload``."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     cloexec = getattr(os, "O_CLOEXEC", 0)
     if cloexec:
@@ -691,7 +692,49 @@ def write_deselect_binding(report_path: Path, run_id: str,
                 os.close(parent_fd)
             except OSError:
                 pass
+
+
+def write_deselect_binding(report_path: Path, run_id: str,
+                           nodeids) -> Path:
+    """Write the private ``<report>.deselect`` binding (O_EXCL, 0600).
+
+    Raises ``ValueError`` for a bad run id or any unsafe node id (the
+    caller then keeps the whole file selected) and ``OSError`` when the
+    file cannot be created exclusively.
+    """
+    payload = _binding_payload(run_id, nodeids)
+    path = selection_deselect_path(Path(report_path))
+    _write_private(path, payload)
     return path
+
+
+def rewrite_deselect_binding(report_path: Path, run_id: str,
+                             nodeids) -> Path:
+    """Replace the binding with ``nodeids`` (R44), atomically.
+
+    The new content goes to ``<report>.deselect.tmp`` (O_EXCL|O_NOFOLLOW,
+    0600, in the binding's own directory) and is renamed over the binding,
+    so the bridge never sees a half-written file and its owner, mode,
+    single-link, format and run-id checks still hold. A leftover or
+    planted temporary file fails closed (``OSError``) instead of being
+    followed. The temporary file is unlinked when the rename fails.
+    Raises ``ValueError`` for hostile input and ``OSError`` otherwise.
+    """
+    payload = _binding_payload(run_id, nodeids)
+    binding = selection_deselect_path(Path(report_path))
+    tmp = binding.with_name(Path(report_path).name + REWRITE_SUFFIX)
+    _write_private(tmp, payload)
+    try:
+        os.rename(tmp, binding)
+    except BaseException:
+        try:
+            stamp = os.lstat(tmp)
+            files.unlink_if_same(tmp.parent, tmp.name, stamp.st_dev,
+                                 stamp.st_ino)
+        except Exception:
+            pass
+        raise
+    return binding
 
 
 def _remove_if_owned_regular(report_dir: Path, name: str) -> None:
@@ -717,7 +760,8 @@ def cleanup(report_path: Path) -> None:
                  if selection_deps_pid(report_name, name) is not None]
     except Exception:
         return
-    for name in [report_name + DESELECT_SUFFIX, *names]:
+    for name in [report_name + DESELECT_SUFFIX, report_name + REWRITE_SUFFIX,
+                 *names]:
         try:
             _remove_if_owned_regular(report_dir, name)
         except Exception:
@@ -725,5 +769,5 @@ def cleanup(report_path: Path) -> None:
 
 
 __all__ = ["DEPS_FORMAT", "DEPS_INFIX", "DESELECT_SUFFIX", "DESELECT_FORMAT",
-           "DEPS_MAX_BYTES", "MAX_DIR_ENTRIES", "read_run",
-           "write_deselect_binding", "cleanup"]
+           "REWRITE_SUFFIX", "DEPS_MAX_BYTES", "MAX_DIR_ENTRIES", "read_run",
+           "write_deselect_binding", "rewrite_deselect_binding", "cleanup"]
