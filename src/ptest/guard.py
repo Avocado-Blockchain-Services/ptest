@@ -23,7 +23,7 @@ from . import contracts as _contracts
 from . import leases, platform, scheduler, stall
 from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
-    DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, DEFAULT_COMPOUND_TIMEOUT_S,
+    DEFAULT_COMPOUND_TIMEOUT_S,
     GUARD_PROTOCOL_VERSION,
     MAX_COMPOUND_TIMEOUT_S, MAX_DYNAMIC_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
     decode_control_frame, decode_launch_manifest, encode_control_frame,
@@ -284,7 +284,7 @@ class _Control:
             compound_deadline: float) -> bool:
         now = time.monotonic()
         deadline = min(
-            now + DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, compound_deadline)
+            now + self.manifest.attempt_decision_timeout_s, compound_deadline)
         if deadline <= now:
             self.state.fail(_problem(
                 "execution-timeout", _compound_timeout_message(self.manifest)))

@@ -531,7 +531,8 @@ def test_attempt_gate_eof_cancellation_and_watchdog_never_launch(harness):
 
     timed = harness(label="timed")
     timed.auto_decide = False
-    timed.start(decision_timeout=0.2)
+    timed.manifest = replace(timed.manifest, attempt_decision_timeout_s=1.0)
+    timed.start()
     assert timed.read().kind == "registered"
     ready = timed.read()
     assert ready.kind == "attempt-ready"
@@ -2053,3 +2054,37 @@ def test_fail_after_external_cancel_arms_no_dump():
     assert state.problem.code == "execution-timeout"
     assert state.dump_requested is False
 
+
+
+def _ready_budget(h):
+    """Seconds between receiving attempt-ready and its decision deadline."""
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    ready = h.read()
+    assert ready.kind == "attempt-ready"
+    budget = ready.payload["deadline_monotonic"] - time.monotonic()
+    os.killpg(h.process.pid, signal.SIGTERM)
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 128 + signal.SIGTERM
+    return budget
+
+
+def test_decision_budget_follows_manifest_and_is_capped_by_compound(harness):
+    # Oracle: R41/R42 -- the guard watchdog uses manifest.attempt_decision_timeout_s
+    # (30 s without an ambient fingerprint, 90 s with), never the module default,
+    # and the compound deadline still caps it.
+    default = harness(label="default")
+    default.manifest = replace(default.manifest, compound_timeout_s=300)
+    assert 20 < _ready_budget(default) <= C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S
+
+    widened = harness(label="widened")
+    widened.manifest = replace(
+        widened.manifest, attempt_decision_timeout_s=90.0,
+        compound_timeout_s=300)
+    assert 60 < _ready_budget(widened) <= 90.0
+
+    capped = harness(label="capped")
+    capped.manifest = replace(
+        capped.manifest, attempt_decision_timeout_s=90.0,
+        compound_timeout_s=C.MIN_COMPOUND_TIMEOUT_S)
+    assert _ready_budget(capped) <= C.MIN_COMPOUND_TIMEOUT_S
