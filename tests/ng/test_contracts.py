@@ -17,7 +17,7 @@ WRONG_NONCE = "cd" * 32
 
 
 def test_bootstrap_smoke():
-    assert C.PTEST_VERSION == "0.6.8"
+    assert C.PTEST_VERSION == "0.7.0"
     assert C.SCHEMA_VERSION == 1
     assert C.MAX_PROMPT_BYTES == 65536
     assert C.ExecutionTier("advanced") is C.ExecutionTier.ADVANCED
@@ -339,7 +339,7 @@ def test_nine_public_documents_parse():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
-        assert doc.ptest_version == "0.6.8"
+        assert doc.ptest_version == "0.7.0"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
     full = C.decode_public_document(
@@ -1473,7 +1473,7 @@ _PUBLIC_DATA_KEYS = {
             "runner_exit_code", "exit_code", "exit_origin", "signal",
             "source_valid", "full_gate_eligible", "baseline_published",
             "counts", "timings", "attempts", "reasons", "limitations",
-            "artifact_id"},
+            "artifact_id", "selection"},  # 0.7.0 R34: null or the block
     "plan": {"mode", "execution", "files", "reasons", "input_digest",
              "compatibility", "baseline_run_id", "static_preview"},
     "where": {"root", "config_path", "initialized", "runner_kind",
@@ -2325,8 +2325,8 @@ def test_selection_protocol_and_store_constants():
     assert C.SOURCE_INDEX_VERSION == 5
     assert C.SELECTION_STORE_DIR == "projects"
     assert C.SELECTION_STORE_NAME == "selection.db"
-    assert C.SELECTION_STORE_MAX_BYTES == 64 * 1024 * 1024
-    assert C.SELECTION_STORE_TARGET_BYTES == 48 * 1024 * 1024
+    assert C.SELECTION_STORE_MAX_BYTES == 128 * 1024 * 1024
+    assert C.SELECTION_STORE_TARGET_BYTES == 96 * 1024 * 1024
     assert C.SELECTION_MAX_RUNS == 256
     assert C.SELECTION_MAX_SIGNATURES == 128
     assert C.SELECTION_RECORD_ENV == "PTEST_SELECTION_RECORD"
@@ -2500,3 +2500,368 @@ def test_fingerprint_digest_is_exactly_lowercase_ascii_hex(digest):
     with pytest.raises(ValueError):
         C.FileFingerprint(path="a.py", digest=digest, mode=0o644, size=1)
     assert C.FileFingerprint(path="a.py", digest="0f" * 32, mode=0o644, size=1)
+
+
+
+# --- 0.7.0 tiered iteration selection contracts (R13-R14, R25, R34, R41) ------
+
+def test_tiered_selection_constants():
+    assert C.SELECTION_STORE_MAX_BYTES == 128 * 1024 * 1024
+    assert C.SELECTION_STORE_TARGET_BYTES == 96 * 1024 * 1024
+    assert C.SELECTION_RECORDS_PER_NODE == 3
+    assert C.SELECTION_OBSERVER_ROWS_PER_NODE == 64
+    assert C.SELECTION_OBSERVER_ROWS_MAX == 100000
+    assert C.SELECTION_OBSERVER_ALL == "*"
+    assert C.AMBIENT_FINGERPRINT_TIMEOUT_S == 60.0
+    assert C.AMBIENT_FINGERPRINT_STDOUT_MAX_BYTES == 16 * 1024 * 1024
+    assert C.AMBIENT_FINGERPRINT_STDERR_MAX_BYTES == 64 * 1024
+    assert C.AMBIENT_FINGERPRINT_STDERR_LINES == 10
+    assert C.MAX_ATTEMPT_DECISION_TIMEOUT_S == 90.0
+    assert C.SELECTION_TIER_RUN_NOW == "T1"
+    assert C.SELECTION_TIER_DEFERRED == "T2"
+    assert C.SELECTION_T1_CODES == ("a", "c", "d", "f", "n", "o", "e", "w")
+    assert C.SELECTION_T2_CODES == (
+        "g-shared", "g-reach", "g-data", "b-static", "u-static")
+    assert C.SELECTION_JSON_MAX_REASONS == 5
+    assert C.SELECTION_JSON_MAX_REASON_PATHS == 3
+    assert C.SELECTION_JSON_MAX_FILES == 50
+    assert C.SELECTION_ENGINES == frozenset(
+        {"dynamic", "static", "vitest-changed"})
+    assert C.SELECTION_FINGERPRINT_OUTCOMES == frozenset(
+        {"unchanged", "changed", "absent"})
+    assert "no-tests-needed" in C.ATTEMPT_DECISION_STOP_REASONS
+    assert C.GUARD_PROTOCOL_VERSION == 2
+
+
+def test_policy_observers_and_fingerprint_stay_out_of_repr():
+    plain = repr(_policy())
+    declared = _policy(observers=("tests/obs",),
+                       ambient_fingerprint=("python", "-m", "app.fp"))
+    assert declared.observers == ("tests/obs",)
+    assert declared.ambient_fingerprint == ("python", "-m", "app.fp")
+    assert repr(declared) == plain
+    assert "observers" not in plain and "ambient" not in plain
+    assert _policy().observers == () and _policy().ambient_fingerprint == ()
+
+
+@pytest.mark.parametrize("overrides", [
+    {"observers": "tests"}, {"observers": (1,)},
+    {"ambient_fingerprint": "python -m x"}, {"ambient_fingerprint": (1,)},
+    {"ambient_fingerprint": ("a\x00b",)},
+    {"ambient_fingerprint": ("x",) * 257},
+])
+def test_policy_rejects_malformed_observers_and_fingerprint(overrides):
+    with pytest.raises((TypeError, ValueError)):
+        _policy(**overrides)
+
+
+def test_run_baseline_fingerprint_defaults_to_none():
+    baseline = C.RunBaseline(
+        run_id="a" * 32, recorded_at=1.0, compatibility="c", digests={},
+        ambient=C.selection_empty_context())
+    assert baseline.fingerprint is None
+    assert C.RunBaseline(
+        run_id="a" * 32, recorded_at=1.0, compatibility="c", digests={},
+        ambient=C.selection_empty_context(),
+        fingerprint="ab" * 32).fingerprint == "ab" * 32
+
+
+def test_gate_marker_is_frozen_and_slotted():
+    marker = C.GateMarker(commit="a" * 40, dirty={"x.py": "d", "y.py": None},
+                          recorded_at=2.0)
+    assert marker.dirty["y.py"] is None
+    with pytest.raises(Exception):
+        marker.commit = "b" * 40
+    assert not hasattr(marker, "__dict__")
+
+
+def test_dependency_snapshot_and_inputs_new_fields_default_empty():
+    snapshot = C.DependencySnapshot(
+        vocabulary=None, runs={}, nodes={}, fixtures={}, demotions={})
+    assert snapshot.records is None
+    assert snapshot.observers == {}
+    assert snapshot.gate is None
+    assert snapshot.inventory == frozenset()
+    assert C.SelectionStoreMeta(
+        size_bytes=1, nodes=1, runs=1, newest_recorded_at=None, python=None,
+        inactive_reason=None, audit_checked=0, audit_misses=0,
+        demoted=0).observers == 0
+    inputs = C.SelectionInputs(
+        index=None, deps=snapshot, versions={}, data_digests={},
+        compatibility="c", changed=frozenset(), test_roots=("tests",))
+    assert inputs.since_gate == frozenset()
+    assert inputs.observers == {}
+    assert inputs.conditional is False and inputs.audit is False
+
+
+def _decision(**overrides):
+    fields = dict(files=(), deselect=(), whole_files=(), selected=0,
+                  reached=0, recorded=0, total_files=0, units=(),
+                  fallbacks=(), coverage=0.0)
+    fields.update(overrides)
+    return C.SelectionDecision(**fields)
+
+
+def test_selection_decision_is_keyword_only_with_tier_defaults():
+    decision = _decision()
+    assert decision.full_reason is None
+    assert decision.tiers == {} and decision.via == {}
+    assert decision.weights == {} and decision.chosen == {}
+    assert decision.learnable == {}
+    assert decision.conditional == ()
+    assert decision.observers_promoted == 0
+    assert decision.observers_deferred == 0
+    with pytest.raises(TypeError):
+        C.SelectionDecision(None, (), (), (), 0, 0, 0, 0, (), (), 0.0)
+
+
+def _report(**overrides):
+    fields = dict(engine="dynamic", iteration=True, run_now=3, deferred=13,
+                  deferred_by_reason=(("g-shared", "api/models.py", 10),
+                                      ("g-reach", "api/util.py", 3)),
+                  deferred_by_file=(("tests/a.py", 8), ("tests/b.py", 5)))
+    fields.update(overrides)
+    return C.SelectionReport(**fields)
+
+
+def test_selection_report_defaults_and_validation():
+    report = _report()
+    assert report.full_reason is None and report.gate is None
+    assert report.gate_recorded is False and report.conditional == ()
+    assert report.observers_promoted == 0 and report.fingerprint is None
+    C.SelectionReport(engine=None, iteration=False, run_now=None,
+                      deferred=None)
+    with pytest.raises(TypeError):
+        C.SelectionReport(None, True, 1, 1)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"engine": "other"},
+    {"run_now": -1},
+    {"deferred": -1},
+    {"run_now": True},
+    {"iteration": "yes"},
+    {"deferred_by_reason": (("g-bogus", "a.py", 13),),
+     "deferred_by_file": (("tests/a.py", 13),)},
+    {"deferred_by_reason": (("g-shared", "../x.py", 13),)},
+    {"deferred_by_reason": (("g-shared", "/abs.py", 13),)},
+    {"deferred_by_reason": (("g-shared", "a.py", 12),)},
+    {"deferred_by_file": (("tests/a.py", 12),)},
+    {"fingerprint": "maybe"},
+    {"gate": "gate"},
+    {"observers_promoted": -1},
+])
+def test_selection_report_rejects_inconsistent_values(overrides):
+    with pytest.raises((TypeError, ValueError)):
+        _report(**overrides)
+
+
+def test_selection_report_unknowable_counts_skip_sum_check():
+    report = C.SelectionReport(
+        engine="vitest-changed", iteration=True, run_now=None, deferred=None,
+        deferred_by_reason=(("g-shared", "a.py", 4),))
+    assert report.deferred is None
+
+
+def test_selection_deferred_reasons_orders_and_caps_paths():
+    by_reason = (
+        ("g-shared", "p1.py", 5), ("g-shared", "p2.py", 9),
+        ("g-shared", "p3.py", 9), ("g-shared", "p4.py", 1),
+        ("g-reach", "r.py", 20), ("g-data", "d.json", 20),
+    )
+    total = sum(item[2] for item in by_reason)
+    report = _report(deferred=total, deferred_by_reason=by_reason,
+                     deferred_by_file=(("tests/a.py", total),))
+    reasons = C.selection_deferred_reasons(report)
+    assert [(r.code, r.tests) for r in reasons] == [
+        ("g-shared", 24), ("g-reach", 20), ("g-data", 20)]
+    assert reasons[0].paths == ("p2.py", "p3.py", "p1.py")
+    assert isinstance(reasons[0], C.DeferredReason)
+    assert C.selection_deferred_reasons(
+        C.SelectionReport(engine=None, iteration=False, run_now=None,
+                          deferred=None)) == ()
+
+
+def test_selection_deferred_files_top_fifty_sorted_by_path():
+    files = tuple((f"tests/t{i:03d}.py", 1 + (i % 7)) for i in range(60))
+    total = sum(item[1] for item in files)
+    report = _report(deferred=total,
+                     deferred_by_reason=(("g-shared", "m.py", total),),
+                     deferred_by_file=files)
+    kept, truncated = C.selection_deferred_files(report)
+    assert truncated is True and len(kept) == 50
+    assert [item.file for item in kept] == sorted(item.file for item in kept)
+    cutoff = sorted(((-n, f) for f, n in files))[49]
+    assert all((-item.tests, item.file) <= cutoff for item in kept)
+    assert all(isinstance(item, C.DeferredFile) for item in kept)
+    few, flag = C.selection_deferred_files(_report())
+    assert flag is False
+    assert [(i.file, i.tests) for i in few] == [
+        ("tests/a.py", 8), ("tests/b.py", 5)]
+
+
+def _gate(**overrides):
+    fields = dict(previously_deferred=4, failed=1, observers_learned=1,
+                  observers_evicted=0, unlearned=0, demoted=0)
+    fields.update(overrides)
+    return C.SelectionGateReport(**fields)
+
+
+def test_run_request_conditional_and_selection_validation():
+    request = C.RunRequest(mode=C.Mode.SCOPED,
+                           conditional=(("t.py::a", "ab" * 32),
+                                        ("t.py::b", None)),
+                           selection=_report())
+    assert request.conditional[1] == ("t.py::b", None)
+    assert C.RunRequest(mode=C.Mode.FULL).conditional == ()
+    assert C.RunRequest(mode=C.Mode.FULL).selection is None
+    for bad in ((("t.py::a", "AB" * 32),), (("t.py::a", "ab"),),
+                (("t.py::a",),), (("bad\x00id", None),), ("t.py::a",),
+                (("../t.py::a", None),)):
+        with pytest.raises((TypeError, ValueError)):
+            C.RunRequest(mode=C.Mode.SCOPED, conditional=bad)
+    with pytest.raises(ValueError):
+        C.RunRequest(mode=C.Mode.FULL, conditional=(("t.py::a", None),))
+    with pytest.raises(TypeError):
+        C.RunRequest(mode=C.Mode.SCOPED, selection="report")
+    too_many = tuple((f"t.py::n{i}", None)
+                     for i in range(C.SELECTION_DESELECT_MAX_IDS + 1))
+    with pytest.raises(ValueError):
+        C.RunRequest(mode=C.Mode.SCOPED, conditional=too_many)
+
+
+def test_run_result_selection_is_type_checked_and_defaults_none():
+    result = _secret_result(["-q"])
+    assert result.selection is None
+    assert replace(result, selection=_report()).selection == _report()
+    with pytest.raises(TypeError):
+        replace(result, selection="report")
+
+
+def test_serialize_run_result_selection_null_by_default():
+    payload = C.serialize_run_result(_secret_result(["-q"]))
+    assert payload["selection"] is None
+
+
+def test_serialize_run_result_selection_exact_r34_shape_and_caps():
+    reasons = tuple(
+        (code, f"p/{code}-{i}.py", 100 - i)
+        for code in C.SELECTION_T2_CODES for i in range(5))
+    total = sum(item[2] for item in reasons)
+    files = tuple((f"tests/f{i:03d}.py", 1) for i in range(55))
+    files = files[:-1] + ((files[-1][0], 1 + total - 55),)
+    report = _report(
+        run_now=7, deferred=total, deferred_by_reason=reasons,
+        deferred_by_file=files, observers_promoted=2, observers_deferred=4,
+        fingerprint="unchanged", fingerprint_reason="not serialised",
+        gate=_gate(), gate_recorded=True,
+        conditional=(("t.py::a", "g-shared", "p/x.py"),),
+        full_reason=None)
+    payload = C.serialize_run_result(replace(_secret_result(["-q"]),
+                                             selection=report))
+    block = payload["selection"]
+    assert set(block) == {
+        "engine", "iteration", "run_now", "deferred", "full_reason",
+        "deferred_reasons", "deferred_files", "deferred_files_truncated",
+        "observers", "gate"}
+    assert block["engine"] == "dynamic" and block["iteration"] is True
+    assert block["run_now"] == 7 and block["deferred"] == total
+    assert block["full_reason"] is None
+    assert len(block["deferred_reasons"]) == 5
+    assert all(set(item) == {"code", "tests", "paths"}
+               and len(item["paths"]) <= 3
+               for item in block["deferred_reasons"])
+    assert len(block["deferred_files"]) == 50
+    assert all(set(item) == {"file", "tests"}
+               for item in block["deferred_files"])
+    names = [item["file"] for item in block["deferred_files"]]
+    assert names == sorted(names)
+    assert block["deferred_files_truncated"] is True
+    assert block["observers"] == {"promoted": 2, "deferred": 4,
+                                  "fingerprint": "unchanged"}
+    assert block["gate"] == {
+        "previously_deferred": 4, "failed": 1, "observers_learned": 1,
+        "observers_evicted": 0, "unlearned": 0, "demoted": 0}
+    rendered = json.dumps(payload)
+    for hidden in ("gate_recorded", "conditional", "fingerprint_reason",
+                   "not serialised"):
+        assert hidden not in rendered
+    revived = C.decode_public_document(
+        C.encode_public_document("run", payload))
+    assert revived.data["selection"] == block
+
+
+def test_run_document_selection_validator_accepts_absence_and_null():
+    data = _run_data()
+    assert "selection" not in data
+    C.decode_public_document(C.encode_public_document("run", data))
+    data["selection"] = None
+    revived = C.decode_public_document(C.encode_public_document("run", data))
+    assert revived.data["selection"] is None
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda b: b.update(extra=1),
+    lambda b: b.pop("engine"),
+    lambda b: b.update(engine="other"),
+    lambda b: b.update(iteration="yes"),
+    lambda b: b.update(run_now=-1),
+    lambda b: b.update(deferred="x"),
+    lambda b: b.update(full_reason=3),
+    lambda b: b.update(deferred_reasons={}),
+    lambda b: b.update(deferred_reasons=[{"code": "x", "tests": 1,
+                                          "paths": []}]),
+    lambda b: b.update(deferred_reasons=[{"code": "g-shared", "tests": 1,
+                                          "paths": [1]}]),
+    lambda b: b.update(deferred_files=[{"file": "a.py"}]),
+    lambda b: b.update(deferred_files_truncated=1),
+    lambda b: b["observers"].update(fingerprint="maybe"),
+    lambda b: b["observers"].update(extra=0),
+    lambda b: b.update(gate={"previously_deferred": 1}),
+    lambda b: b.update(gate="x"),
+], ids=range(16))
+def test_run_document_selection_validator_rejects_malformed(mutate):
+    payload = C.serialize_run_result(replace(_secret_result(["-q"]),
+                                             selection=_report(gate=_gate())))
+    mutate(payload["selection"])
+    with pytest.raises(Problem):
+        C.encode_public_document("run", payload)
+
+
+def test_history_documents_project_summaries_without_selection():
+    data = _run_data()
+    doc = C.decode_public_document(C.encode_public_document(
+        "history", {"summaries": [data], "obligations": []}))
+    assert "selection" not in doc.data["summaries"][0]
+
+
+def test_run_schema_has_nullable_selection_history_schema_does_not():
+    run = C.PUBLIC_SCHEMAS["run"]["properties"]["data"]
+    history = C.PUBLIC_SCHEMAS["history"]["properties"]["data"][
+        "properties"]["summaries"]["items"]
+    assert "selection" in run["properties"]
+    assert "selection" not in run["required"]
+    assert "selection" not in history["properties"]
+    assert run["properties"]["selection"]["type"] == ["object", "null"]
+
+
+def test_manifest_attempt_decision_timeout_optional_and_bounded(case):
+    manifest = _stall_manifest(case)
+    assert manifest.attempt_decision_timeout_s == 30.0
+    body = json.loads(C.encode_launch_manifest(manifest)[4:])
+    assert body["attempt_decision_timeout_s"] == 30.0
+    for value in (1.0, 30.0, 90.0):
+        built = _stall_manifest(case, attempt_decision_timeout_s=value)
+        decoded = C.decode_launch_manifest(C.encode_launch_manifest(built))
+        assert decoded.attempt_decision_timeout_s == value
+    # Absent key decodes to the default (stall_timeout_s precedent).
+    raw = _manifest_raw(case, lambda b: b.pop("attempt_decision_timeout_s"))
+    assert C.decode_launch_manifest(raw).attempt_decision_timeout_s == 30.0
+    for value in (0, 0.5, -1, 91, 90.5, 1e9, "x", True, None,
+                  float("nan"), float("inf")):
+        with pytest.raises((TypeError, ValueError)):
+            _stall_manifest(case, attempt_decision_timeout_s=value)
+        with pytest.raises((Problem, TypeError, ValueError)):
+            C.decode_launch_manifest(_manifest_raw(
+                case, lambda b, v=value: b.update(
+                    attempt_decision_timeout_s=v)))

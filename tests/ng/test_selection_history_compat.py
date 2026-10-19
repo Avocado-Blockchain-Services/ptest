@@ -170,3 +170,41 @@ def test_no_selection_fields_leak_into_summaries(case):
     for token in ("deselect", "dynamic", "selection audit", "demot",
                   "compatibility fingerprint"):
         assert token not in blob
+
+
+def test_selection_block_never_persisted(case):
+    """R34: ``selection`` is a run-JSON field only. A result carrying it
+    publishes a history summary without the key (frozen 0.4.10 key set),
+    a repeated publish with a different block compares equal, and the
+    persisted row contains none of the block's text."""
+    from dataclasses import replace
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    report = C.SelectionReport(
+        engine="dynamic", iteration=True, run_now=2, deferred=5,
+        deferred_by_reason=(("g-shared", "app/models.py", 5),),
+        deferred_by_file=(("tests/test_secret_marker.py", 5),),
+        observers_promoted=1, fingerprint="changed",
+        gate=C.SelectionGateReport(
+            previously_deferred=5, failed=0, observers_learned=1,
+            observers_evicted=0, unlearned=0, demoted=0))
+    result = _result(case, 1, checkout, mode=C.Mode.SCOPED,
+                     execution="scoped", before=snapshot, after=snapshot)
+    carrying = replace(result, selection=report)
+    assert C.serialize_run_result(carrying)["selection"] is not None
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(domain, checkout, carrying,
+                             inventory).committed
+
+    (summary,) = H.read_history_summaries(domain, checkout)
+    assert "selection" not in summary
+    assert set(summary) <= FROZEN_RUN_KEYS
+    blob = repr(summary)
+    for token in ("test_secret_marker", "g-shared", "observers_promoted",
+                  "deferred_files", "deferred_reasons"):
+        assert token not in blob
+    C.decode_public_document(C.encode_public_document("run", summary))
+    # The persisted payload is the same bytes with and without the block.
+    assert H._persisted_summary(carrying) == H._persisted_summary(result)
+    assert "selection" not in H._persisted_summary(carrying)

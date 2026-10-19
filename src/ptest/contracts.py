@@ -27,7 +27,7 @@ from typing import Protocol
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.6.8"
+PTEST_VERSION = "0.7.0"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2
@@ -124,6 +124,14 @@ MAX_QUEUE_TIMEOUT_S = 86400.0
 DEFAULT_SETUP_TIMEOUT_S = 300.0
 DEFAULT_ATTEMPT_TIMEOUT_S = 30.0
 DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = 30.0
+# R41/R42: the ambient fingerprint runs inside the attempt decision, so the
+# decision budget grows by exactly its timeout and no more.
+AMBIENT_FINGERPRINT_TIMEOUT_S = 60.0
+AMBIENT_FINGERPRINT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
+AMBIENT_FINGERPRINT_STDERR_MAX_BYTES = 64 * 1024
+AMBIENT_FINGERPRINT_STDERR_LINES = 10
+MAX_ATTEMPT_DECISION_TIMEOUT_S = (
+    DEFAULT_ATTEMPT_DECISION_TIMEOUT_S + AMBIENT_FINGERPRINT_TIMEOUT_S)
 DEFAULT_COMPOUND_TIMEOUT_S = 600.0
 MIN_COMPOUND_TIMEOUT_S = 60.0
 MAX_DYNAMIC_COMPOUND_TIMEOUT_S = 21600.0
@@ -213,7 +221,7 @@ CONTROL_KINDS = frozenset({
 ATTEMPT_DECISION_STOP_REASONS = frozenset({
     "changed-during-run", "unknown-input", "report-invalid",
     "incomplete-inventory", "unsupported-capability", "execution-timeout",
-    "state-unavailable",
+    "state-unavailable", "no-tests-needed",
 })
 
 LOCK_PATTERN = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
@@ -546,6 +554,10 @@ class SelectionPolicy:
     # repr=False keeps repr(SelectionPolicy), and so every policy digest
     # derived from it, byte-identical to 0.4.10 for any value of the key.
     dynamic: bool = field(default=True, repr=False)
+    # 0.7.0 keys, repr=False for the same reason: a config that does not use
+    # them keeps its policy digest and compatibility fingerprint (R46).
+    observers: tuple = field(default=(), repr=False)            # literal project-relative prefixes
+    ambient_fingerprint: tuple = field(default=(), repr=False)  # argv tokens; () = not declared
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enabled", _check_bool("selection.enabled", self.enabled))
@@ -555,6 +567,11 @@ class SelectionPolicy:
             object.__setattr__(self, field, _as_str_tuple(f"selection.{field}", getattr(self, field)))
         object.__setattr__(self, "full_ratio", _check_float("selection.full_ratio", self.full_ratio, lo=0.1, hi=1.0))
         object.__setattr__(self, "dynamic", _check_bool("selection.dynamic", self.dynamic))
+        object.__setattr__(self, "observers",
+                           _as_str_tuple("selection.observers", self.observers))
+        object.__setattr__(self, "ambient_fingerprint", _check_argv_tokens(
+            "selection.ambient_fingerprint", self.ambient_fingerprint,
+            allow_empty=True))
         object.__setattr__(self, "groups", _check_tuple("selection.groups", self.groups))
         for group in self.groups:
             if not isinstance(group, Group):
@@ -1169,6 +1186,12 @@ class RunRequest:
     # Recorded, unselected node ids inside the scoped argv files; the bridge
     # deselects exactly these (unknown ids always run). Never persisted.
     deselect: tuple = ()
+    # R44: (node id, expected fingerprint or None) of conditional observers;
+    # scoped mode only, never persisted.
+    conditional: tuple = ()
+    # Plan-time selection report of an iteration run (None for --full and
+    # literal scopes). Never persisted.
+    selection: SelectionReport | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1207,6 +1230,13 @@ class RunRequest:
                            _check_deselect("request.deselect", self.deselect))
         if self.deselect and self.mode is not Mode.SCOPED:
             raise ValueError("request.deselect requires scoped mode")
+        object.__setattr__(self, "conditional",
+                           _check_conditional("request.conditional", self.conditional))
+        if self.conditional and self.mode is not Mode.SCOPED:
+            raise ValueError("request.conditional requires scoped mode")
+        if self.selection is not None and not isinstance(
+                self.selection, SelectionReport):
+            raise TypeError("request.selection must be SelectionReport or None")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1334,8 +1364,21 @@ SELECTION_PROTOCOL = "ptest-selection-v1"
 SOURCE_INDEX_VERSION = 5
 SELECTION_STORE_DIR = "projects"
 SELECTION_STORE_NAME = "selection.db"
-SELECTION_STORE_MAX_BYTES = 64 * 1024 * 1024
-SELECTION_STORE_TARGET_BYTES = 48 * 1024 * 1024
+SELECTION_STORE_MAX_BYTES = 128 * 1024 * 1024
+SELECTION_STORE_TARGET_BYTES = 96 * 1024 * 1024
+SELECTION_RECORDS_PER_NODE = 3
+SELECTION_OBSERVER_ROWS_PER_NODE = 64
+SELECTION_OBSERVER_ROWS_MAX = 100000
+SELECTION_OBSERVER_ALL = "*"
+SELECTION_TIER_RUN_NOW = "T1"
+SELECTION_TIER_DEFERRED = "T2"
+SELECTION_T1_CODES = ("a", "c", "d", "f", "n", "o", "e", "w")
+SELECTION_T2_CODES = ("g-shared", "g-reach", "g-data", "b-static", "u-static")
+SELECTION_JSON_MAX_REASONS = 5
+SELECTION_JSON_MAX_REASON_PATHS = 3
+SELECTION_JSON_MAX_FILES = 50
+SELECTION_ENGINES = frozenset({"dynamic", "static", "vitest-changed"})
+SELECTION_FINGERPRINT_OUTCOMES = frozenset({"unchanged", "changed", "absent"})
 SELECTION_MAX_RUNS = 256
 SELECTION_MAX_SIGNATURES = 128
 SELECTION_RECORD_ENV = "PTEST_SELECTION_RECORD"
@@ -1519,6 +1562,25 @@ def selection_deselect_path(report_path: Path) -> Path:
     return Path(f"{report_path}{SELECTION_DESELECT_SUFFIX}")
 
 
+def _check_conditional(name: str, value: object) -> tuple:
+    items = _check_tuple(name, value)
+    if len(items) > SELECTION_DESELECT_MAX_IDS:
+        raise ValueError(f"{name} exceeds {SELECTION_DESELECT_MAX_IDS} node ids")
+    checked = []
+    for item in items:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise TypeError(f"{name}[] must be (node id, fingerprint or None)")
+        nodeid, expected = item
+        if not isinstance(nodeid, str):
+            raise TypeError(f"{name}[] node id must be str, got {type(nodeid).__name__}")
+        if not selection_nodeid_safe(nodeid):
+            raise ValueError(f"{name}[] is not a safe node id")
+        if expected is not None:
+            _check_hex(f"{name}[] fingerprint", expected, 64)
+        checked.append((nodeid, expected))
+    return tuple(checked)
+
+
 def _check_deselect(name: str, value: object) -> tuple:
     items = _check_tuple(name, value)
     if len(items) > SELECTION_DESELECT_MAX_IDS:
@@ -1669,6 +1731,7 @@ class RunBaseline:
     compatibility: str
     digests: Mapping[int, str]  # path id -> keyed digest for every .py and recorded data path
     ambient: ContextDeps
+    fingerprint: str | None = None  # 64-hex HMAC of the run's ambient fingerprint stdout (None = absent)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1688,15 +1751,31 @@ class FixtureRecord:
     deps: ContextDeps
 
 
+@dataclass(frozen=True, slots=True)
+class GateMarker:
+    """The last gate's tree (R27); paths are git-top-relative."""
+
+    commit: str                          # HEAD of the gate's checkout (40 or 64 hex)
+    dirty: Mapping[str, str | None]      # path dirty at the gate -> keyed digest ("?" oversize, None unreadable/absent)
+    recorded_at: float
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class DependencySnapshot:
     """The whole store as the planner sees it."""
 
     vocabulary: DepVocabulary
     runs: Mapping[str, RunBaseline]
-    nodes: Mapping[str, NodeRecord]
+    nodes: Mapping[str, NodeRecord]   # newest kept record per node id (== records[n][0] when records is set)
     fixtures: Mapping[int, FixtureRecord]
     demotions: Mapping[str, str]   # nodeid -> keyed digest of its test file when demoted
+    # Every kept record per node id (<= SELECTION_RECORDS_PER_NODE), newest
+    # first by (runs[run_id].recorded_at desc, run_id asc). None means
+    # {n: (nodes[n],) for n in nodes} (test fixtures, pre-v2 stores).
+    records: Mapping[str, tuple[NodeRecord, ...]] | None = None
+    observers: Mapping[str, frozenset[str]] = field(default_factory=dict)  # learned rows: nodeid -> paths ("*" = every path)
+    gate: GateMarker | None = None    # None = no usable marker readable from kv
+    inventory: frozenset[str] = frozenset()   # node ids of the newest full inventory
 
 
 @dataclass(frozen=True, slots=True)
@@ -1710,6 +1789,7 @@ class SelectionStoreMeta:
     audit_checked: int
     audit_misses: int
     demoted: int
+    observers: int = 0         # distinct node ids holding learned observer rows
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1746,6 +1826,11 @@ class SelectionInputs:
     compatibility: str                   # current compatibility fingerprint
     changed: frozenset[str]              # git-changed relevant paths under the project
     test_roots: tuple[str, ...]
+    since_gate: frozenset[str] = frozenset()   # R9: project-relative, filtered like the changed set
+    # Merged map: learned rows plus declared prefixes expanded to {"*"} per matching recorded node.
+    observers: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    conditional: bool = False   # ambient_fingerprint declared: R16 promotions become conditional (D6)
+    audit: bool = False         # the R15 gate-audit plan: R4 keeps today's whole fallback set (D2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1755,19 +1840,172 @@ class ChangedUnit:
     tests: int                 # recorded tests selected because of it
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SelectionDecision:
-    full_reason: str | None    # the dynamic engine requires the full suite
-    files: tuple[str, ...]     # test files to run, sorted
-    deselect: tuple[str, ...]  # recorded, unselected node ids inside partially selected files, sorted
-    whole_files: tuple[str, ...]  # files selected whole (static rule, unrecorded, changed test file)
-    selected: int              # recorded tests that will run
-    reached: int               # recorded tests that executed changed code but already passed on it
-    recorded: int              # usable recorded tests in current test files
-    total_files: int           # test files on disk
+    files: tuple[str, ...]        # test files in argv: files holding a T1 node, T1 file keys, conditional nodes' files; sorted
+    deselect: tuple[str, ...]     # usable recorded node ids in `files` (not whole) that are not T1, sorted
+    whole_files: tuple[str, ...]  # T1 file keys (files with no usable record, test files that changed), sorted
+    selected: int                 # T1 recorded nodes
+    reached: int                  # passing, not T1, not T2 nodes whose recorded code changed
+    recorded: int                 # usable recorded tests in current test files
+    total_files: int              # test files on disk
     units: tuple[ChangedUnit, ...]
     fallbacks: tuple[tuple[str, str], ...]   # (node id or test file, reason)
-    coverage: float            # share of test files with a usable record
+    coverage: float               # share of test files with a usable record
+    full_reason: str | None = None   # DEPRECATED (design D3): never set from 0.7.0
+    tiers: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    # node id or unrecorded test file -> (SELECTION_TIER_*, code)
+    via: Mapping[str, str] = field(default_factory=dict)
+    # every T2 key -> the one project path it is deferred via (R30 attribution)
+    weights: Mapping[str, int] = field(default_factory=dict)
+    # file keys only -> test count (D5); node keys weigh 1
+    chosen: Mapping[str, str] = field(default_factory=dict)
+    # usable node id -> run id of its chosen record (R22)
+    learnable: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # T2 node id -> am | pw of its chosen record's analysis, only when non-empty (R15 a)
+    conditional: tuple[tuple[str, str], ...] = ()
+    # (node id, chosen run id) of conditional observers (D6), sorted
+    observers_promoted: int = 0   # nodes coded T1 "o"
+    observers_deferred: int = 0   # observer nodes that are T2, conditional ones included
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredReason:
+    code: str                 # one of SELECTION_T2_CODES
+    tests: int
+    paths: tuple[str, ...]    # top paths by (-tests, path); capped by the caller that serialises
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredFile:
+    file: str
+    tests: int
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionGateReport:
+    previously_deferred: int
+    failed: int
+    observers_learned: int     # node ids that gained >= 1 row (R33)
+    observers_evicted: int     # rows removed by the R14 store cap in this transaction
+    unlearned: int             # R15 (b)
+    demoted: int               # R15 (c) misses actually demoted
+
+
+def _check_count(name: str, value: object, *, allow_none: bool = False) -> None:
+    if value is None and allow_none:
+        return
+    _check_int(name, value, lo=0)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SelectionReport:
+    engine: str | None                 # "dynamic" | "static" | "vitest-changed" | None
+    iteration: bool
+    run_now: int | None                # T1 test count; None when unknowable
+    deferred: int | None               # T2 test count; None when unknowable
+    full_reason: str | None = None     # R8a: the start-line reason after "-> full suite: "
+    deferred_by_reason: tuple[tuple[str, str, int], ...] = ()
+    # COMPLETE aggregate: every (T2 code, via path, tests) with tests > 0, sorted (code order, path)
+    deferred_by_file: tuple[tuple[str, int], ...] = ()
+    # COMPLETE aggregate: every (test file, deferred tests) with tests > 0, sorted by file
+    observers_promoted: int = 0
+    observers_deferred: int = 0
+    fingerprint: str | None = None     # one of SELECTION_FINGERPRINT_OUTCOMES or None
+    fingerprint_reason: str | None = None   # absent reason (R45 "-v"), never serialised
+    gate: SelectionGateReport | None = None
+    gate_recorded: bool = False        # a usable gate marker exists (drives the R29 hint); never serialised
+    conditional: tuple[tuple[str, str, str], ...] = ()
+    # (node id, T2 code, via path) of conditional observers, sorted; never serialised
+
+    def __post_init__(self) -> None:
+        if self.engine is not None and self.engine not in SELECTION_ENGINES:
+            raise ValueError("selection.engine must be dynamic, static or vitest-changed")
+        object.__setattr__(self, "iteration",
+                           _check_bool("selection.iteration", self.iteration))
+        _check_count("selection.run_now", self.run_now, allow_none=True)
+        _check_count("selection.deferred", self.deferred, allow_none=True)
+        if self.full_reason is not None:
+            _check_str("selection.full_reason", self.full_reason)
+        by_reason = _check_tuple("selection.deferred_by_reason", self.deferred_by_reason)
+        reason_total = 0
+        for entry in by_reason:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                raise TypeError("selection.deferred_by_reason entries must be (code, path, tests)")
+            code, path, tests = entry
+            if code not in SELECTION_T2_CODES:
+                raise ValueError(f"selection.deferred_by_reason code {code!r} is not a T2 code")
+            if not selection_relpath_safe(path):
+                raise ValueError("selection.deferred_by_reason path is not a safe project path")
+            reason_total += _check_int("selection.deferred_by_reason tests", tests, lo=0)
+        object.__setattr__(self, "deferred_by_reason",
+                           tuple((c, p, t) for c, p, t in by_reason))
+        by_file = _check_tuple("selection.deferred_by_file", self.deferred_by_file)
+        file_total = 0
+        for entry in by_file:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise TypeError("selection.deferred_by_file entries must be (file, tests)")
+            path, tests = entry
+            if not selection_relpath_safe(path):
+                raise ValueError("selection.deferred_by_file file is not a safe project path")
+            file_total += _check_int("selection.deferred_by_file tests", tests, lo=0)
+        object.__setattr__(self, "deferred_by_file", tuple((f, t) for f, t in by_file))
+        if isinstance(self.deferred, int):
+            if reason_total != self.deferred or file_total != self.deferred:
+                raise ValueError("selection aggregates must sum to selection.deferred")
+        _check_count("selection.observers_promoted", self.observers_promoted)
+        _check_count("selection.observers_deferred", self.observers_deferred)
+        if (self.fingerprint is not None
+                and self.fingerprint not in SELECTION_FINGERPRINT_OUTCOMES):
+            raise ValueError("selection.fingerprint must be unchanged, changed or absent")
+        if self.fingerprint_reason is not None:
+            _check_str("selection.fingerprint_reason", self.fingerprint_reason)
+        if self.gate is not None and not isinstance(self.gate, SelectionGateReport):
+            raise TypeError("selection.gate must be SelectionGateReport or None")
+        object.__setattr__(self, "gate_recorded",
+                           _check_bool("selection.gate_recorded", self.gate_recorded))
+        conditional = _check_tuple("selection.conditional", self.conditional)
+        for entry in conditional:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                raise TypeError("selection.conditional entries must be (node id, code, path)")
+            if not selection_nodeid_safe(entry[0]):
+                raise ValueError("selection.conditional node id is not safe")
+            if entry[1] not in SELECTION_T2_CODES:
+                raise ValueError("selection.conditional code is not a T2 code")
+            if not selection_relpath_safe(entry[2]):
+                raise ValueError("selection.conditional path is not a safe project path")
+        object.__setattr__(self, "conditional", tuple(tuple(e) for e in conditional))
+
+
+def selection_deferred_reasons(report: SelectionReport) -> tuple[DeferredReason, ...]:
+    """Per T2 code: tests summed over its paths, top paths by (-tests, path)
+    capped at SELECTION_JSON_MAX_REASON_PATHS, entries by (-tests, code order).
+    Every code with tests > 0 is returned (at most five, never truncated)."""
+    totals: dict[str, int] = {}
+    paths: dict[str, list[tuple[int, str]]] = {}
+    for code, path, tests in report.deferred_by_reason:
+        if tests <= 0:
+            continue
+        totals[code] = totals.get(code, 0) + tests
+        paths.setdefault(code, []).append((tests, path))
+    order = {code: index for index, code in enumerate(SELECTION_T2_CODES)}
+    entries = []
+    for code in sorted(totals, key=lambda c: (-totals[c], order[c])):
+        top = sorted(paths[code], key=lambda item: (-item[0], item[1]))
+        entries.append(DeferredReason(
+            code=code, tests=totals[code],
+            paths=tuple(path for _, path in top[:SELECTION_JSON_MAX_REASON_PATHS])))
+    return tuple(entries)
+
+
+def selection_deferred_files(
+        report: SelectionReport) -> tuple[tuple[DeferredFile, ...], bool]:
+    """The SELECTION_JSON_MAX_FILES files with the most deferred tests (ties
+    by path), sorted by path, plus True when more files exist."""
+    live = [(path, tests) for path, tests in report.deferred_by_file if tests > 0]
+    top = sorted(live, key=lambda item: (-item[1], item[0]))[:SELECTION_JSON_MAX_FILES]
+    kept = tuple(DeferredFile(file=path, tests=tests) for path, tests in sorted(top))
+    return kept, len(live) > SELECTION_JSON_MAX_FILES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1890,6 +2128,7 @@ class RunResult:
     input_after: InputSnapshot | None = None
     policy_digest: str | None = None
     runtime_identity: str | None = None
+    selection: SelectionReport | None = None
 
     def __post_init__(self) -> None:
         _check_hex("result.run_id", self.run_id, 32)
@@ -1949,6 +2188,9 @@ class RunResult:
             _check_hex("result.policy_digest", self.policy_digest, 64)
         if self.runtime_identity is not None:
             _check_hex("result.runtime_identity", self.runtime_identity, 64)
+        if self.selection is not None and not isinstance(
+                self.selection, SelectionReport):
+            raise TypeError("result.selection must be SelectionReport or None")
 
 
 def serialize_run_result(result: RunResult) -> dict:
@@ -1984,6 +2226,41 @@ def serialize_run_result(result: RunResult) -> dict:
         "reasons": [_reason_dict(item) for item in result.reasons],
         "limitations": [_reason_dict(item) for item in result.limitations],
         "artifact_id": result.artifact_id,
+        "selection": _selection_dict(result.selection),
+    }
+
+
+def _selection_dict(report: SelectionReport | None) -> dict | None:
+    """The R34 block: scalars and capped aggregates only, nothing per test."""
+    if report is None:
+        return None
+    files, truncated = selection_deferred_files(report)
+    gate = report.gate
+    return {
+        "engine": report.engine,
+        "iteration": report.iteration,
+        "run_now": report.run_now,
+        "deferred": report.deferred,
+        "full_reason": report.full_reason,
+        "deferred_reasons": [
+            {"code": item.code, "tests": item.tests, "paths": list(item.paths)}
+            for item in selection_deferred_reasons(report)[:SELECTION_JSON_MAX_REASONS]],
+        "deferred_files": [{"file": item.file, "tests": item.tests}
+                           for item in files],
+        "deferred_files_truncated": truncated,
+        "observers": {
+            "promoted": report.observers_promoted,
+            "deferred": report.observers_deferred,
+            "fingerprint": report.fingerprint,
+        },
+        "gate": None if gate is None else {
+            "previously_deferred": gate.previously_deferred,
+            "failed": gate.failed,
+            "observers_learned": gate.observers_learned,
+            "observers_evicted": gate.observers_evicted,
+            "unlearned": gate.unlearned,
+            "demoted": gate.demoted,
+        },
     }
 
 
@@ -2711,6 +2988,7 @@ class LaunchManifest:
     compound_timeout_s: float | None = None
     compound_timeout_source: str | None = None
     stall_timeout_s: float | None = None
+    attempt_decision_timeout_s: float = DEFAULT_ATTEMPT_DECISION_TIMEOUT_S
 
     def __post_init__(self) -> None:
         if (not _is_int(self.protocol)
@@ -2751,6 +3029,10 @@ class LaunchManifest:
             object.__setattr__(self, "stall_timeout_s", _check_float(
                 "manifest.stall_timeout_s", self.stall_timeout_s,
                 lo=0.1, hi=MAX_STALL_TIMEOUT_S))
+        object.__setattr__(self, "attempt_decision_timeout_s", _check_float(
+            "manifest.attempt_decision_timeout_s",
+            self.attempt_decision_timeout_s,
+            lo=1.0, hi=MAX_ATTEMPT_DECISION_TIMEOUT_S))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -3271,6 +3553,72 @@ def _validate_run_payload(data: dict) -> None:
     for name in ("reasons", "limitations"):
         for item in _need_list(data, name):
             _check_reason_dict(item)
+    if data.get("selection") is not None:
+        _validate_selection_payload(data["selection"])
+
+
+_SELECTION_KEYS = frozenset({
+    "engine", "iteration", "run_now", "deferred", "full_reason",
+    "deferred_reasons", "deferred_files", "deferred_files_truncated",
+    "observers", "gate"})
+_SELECTION_OBSERVER_KEYS = frozenset({"promoted", "deferred", "fingerprint"})
+_SELECTION_GATE_KEYS = frozenset({
+    "previously_deferred", "failed", "observers_learned",
+    "observers_evicted", "unlearned", "demoted"})
+
+
+def _exact_keys(item: object, keys: frozenset, ctx: str) -> dict:
+    if not isinstance(item, dict):
+        raise _invalid("report-invalid", f"{ctx} must be an object")
+    if set(item) != keys:
+        raise _invalid("report-invalid", f"{ctx} has the wrong field set")
+    return item
+
+
+def _validate_selection_payload(block: object) -> None:
+    """R34: an object with exactly the documented keys, or null."""
+    block = _exact_keys(block, _SELECTION_KEYS, "run.selection")
+    _check_closed(block, "engine", SELECTION_ENGINES, allow_none=True)
+    _need_bool(block, "iteration")
+    for name in ("run_now", "deferred"):
+        _need_int(block, name, allow_none=True)
+        _check_int_field(block, name, "run.selection", allow_none=True, lo=0)
+    _need_str(block, "full_reason", allow_none=True)
+    reasons = _need_list(block, "deferred_reasons")
+    if len(reasons) > SELECTION_JSON_MAX_REASONS:
+        raise _invalid("report-invalid", "run.selection has too many reasons")
+    for item in reasons:
+        item = _exact_keys(item, frozenset({"code", "tests", "paths"}),
+                           "run.selection.deferred_reasons entry")
+        _check_closed(item, "code", frozenset(SELECTION_T2_CODES))
+        _need_int(item, "tests")
+        _check_int_field(item, "tests", "run.selection reason", lo=0)
+        paths = _check_str_list(item["paths"], "run.selection reason paths")
+        if len(paths) > SELECTION_JSON_MAX_REASON_PATHS:
+            raise _invalid("report-invalid", "run.selection reason has too many paths")
+    files = _need_list(block, "deferred_files")
+    if len(files) > SELECTION_JSON_MAX_FILES:
+        raise _invalid("report-invalid", "run.selection has too many files")
+    for item in files:
+        item = _exact_keys(item, frozenset({"file", "tests"}),
+                           "run.selection.deferred_files entry")
+        _need_str(item, "file")
+        _need_int(item, "tests")
+        _check_int_field(item, "tests", "run.selection file", lo=0)
+    _need_bool(block, "deferred_files_truncated")
+    observers = _exact_keys(block["observers"], _SELECTION_OBSERVER_KEYS,
+                            "run.selection.observers")
+    for name in ("promoted", "deferred"):
+        _need_int(observers, name)
+        _check_int_field(observers, name, "run.selection.observers", lo=0)
+    _check_closed(observers, "fingerprint", SELECTION_FINGERPRINT_OUTCOMES,
+                  allow_none=True)
+    if block["gate"] is not None:
+        gate = _exact_keys(block["gate"], _SELECTION_GATE_KEYS,
+                           "run.selection.gate")
+        for name in _SELECTION_GATE_KEYS:
+            _need_int(gate, name)
+            _check_int_field(gate, name, "run.selection.gate", lo=0)
 
 
 def _validate_plan_payload(data: dict) -> None:
@@ -4011,7 +4359,38 @@ def _project_effective_limits(item: dict) -> dict:
     return {name: item[name] for name in _EFFECTIVE_LIMITS_FIELDS}
 
 
+def _project_selection(block: dict | None) -> dict | None:
+    if block is None:
+        return None
+    return {
+        "engine": block["engine"], "iteration": block["iteration"],
+        "run_now": block["run_now"], "deferred": block["deferred"],
+        "full_reason": block["full_reason"],
+        "deferred_reasons": [
+            {"code": entry["code"], "tests": entry["tests"],
+             "paths": list(entry["paths"])}
+            for entry in block["deferred_reasons"]],
+        "deferred_files": [{"file": entry["file"], "tests": entry["tests"]}
+                           for entry in block["deferred_files"]],
+        "deferred_files_truncated": block["deferred_files_truncated"],
+        "observers": {"promoted": block["observers"]["promoted"],
+                      "deferred": block["observers"]["deferred"],
+                      "fingerprint": block["observers"]["fingerprint"]},
+        "gate": None if block["gate"] is None else {
+            name: block["gate"][name] for name in (
+                "previously_deferred", "failed", "observers_learned",
+                "observers_evicted", "unlearned", "demoted")},
+    }
+
+
 def _project_run(item: dict) -> dict:
+    projected = _project_run_core(item)
+    if "selection" in item:
+        projected["selection"] = _project_selection(item["selection"])
+    return projected
+
+
+def _project_run_core(item: dict) -> dict:
     return {
         "run_id": item["run_id"], "project_id": item["project_id"],
         "checkout_id": item["checkout_id"], "mode": item["mode"],
@@ -4479,6 +4858,7 @@ def _manifest_object(manifest: LaunchManifest) -> dict:
         "compound_timeout_s": manifest.compound_timeout_s,
         "compound_timeout_source": manifest.compound_timeout_source,
         "stall_timeout_s": manifest.stall_timeout_s,
+        "attempt_decision_timeout_s": manifest.attempt_decision_timeout_s,
     }
 
 
@@ -4628,7 +5008,7 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
         if key not in ("protocol", "domain", "grant", "setup", "attempts",
                        "attempt_ids", "setup_timeout_s", "attempt_timeout_s",
                        "compound_timeout_s", "compound_timeout_source",
-                       "stall_timeout_s"):
+                       "stall_timeout_s", "attempt_decision_timeout_s"):
             raise _invalid("protocol-mismatch",
                            "manifest carries an unknown field")
     _check_nesting(obj, MANIFEST_MAX_NESTING)
@@ -4647,6 +5027,8 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
             compound_timeout_s=obj.get("compound_timeout_s"),
             compound_timeout_source=obj.get("compound_timeout_source"),
             stall_timeout_s=obj.get("stall_timeout_s"),
+            attempt_decision_timeout_s=obj.get(
+                "attempt_decision_timeout_s", DEFAULT_ATTEMPT_DECISION_TIMEOUT_S),
         )
     except (KeyError, TypeError, ValueError):
         raise _invalid("protocol-mismatch",
@@ -4917,7 +5299,77 @@ def _scan_usage_schema() -> dict:
     }
 
 
-def _run_data_schema() -> dict:
+def _selection_schema() -> dict:
+    """The nullable R34 ``selection`` block of a run document."""
+    counter = {"type": ["integer", "null"], "minimum": 0}
+    count = {"type": "integer", "minimum": 0}
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            "engine": {"type": ["string", "null"],
+                       "enum": sorted(SELECTION_ENGINES) + [None]},
+            "iteration": {"type": "boolean"},
+            "run_now": counter,
+            "deferred": counter,
+            "full_reason": {"type": ["string", "null"]},
+            "deferred_reasons": {
+                "type": "array", "maxItems": SELECTION_JSON_MAX_REASONS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string",
+                                 "enum": list(SELECTION_T2_CODES)},
+                        "tests": count,
+                        "paths": {"type": "array",
+                                  "maxItems": SELECTION_JSON_MAX_REASON_PATHS,
+                                  "items": {"type": "string"}},
+                    },
+                    "required": ["code", "tests", "paths"],
+                },
+            },
+            "deferred_files": {
+                "type": "array", "maxItems": SELECTION_JSON_MAX_FILES,
+                "items": {
+                    "type": "object",
+                    "properties": {"file": {"type": "string"}, "tests": count},
+                    "required": ["file", "tests"],
+                },
+            },
+            "deferred_files_truncated": {"type": "boolean"},
+            "observers": {
+                "type": "object",
+                "properties": {
+                    "promoted": count, "deferred": count,
+                    "fingerprint": {
+                        "type": ["string", "null"],
+                        "enum": sorted(SELECTION_FINGERPRINT_OUTCOMES) + [None]},
+                },
+                "required": ["promoted", "deferred", "fingerprint"],
+            },
+            "gate": {
+                "type": ["object", "null"],
+                "properties": {name: count for name in (
+                    "previously_deferred", "failed", "observers_learned",
+                    "observers_evicted", "unlearned", "demoted")},
+                "required": ["previously_deferred", "failed",
+                             "observers_learned", "observers_evicted",
+                             "unlearned", "demoted"],
+            },
+        },
+        "required": ["engine", "iteration", "run_now", "deferred",
+                     "full_reason", "deferred_reasons", "deferred_files",
+                     "deferred_files_truncated", "observers", "gate"],
+    }
+
+
+def _run_data_schema(*, selection: bool) -> dict:
+    schema = _run_data_core_schema()
+    if selection:
+        schema["properties"]["selection"] = _selection_schema()
+    return schema
+
+
+def _run_data_core_schema() -> dict:
     return {
         "type": "object",
         "properties": {
@@ -5162,7 +5614,7 @@ def _agent_assessment_data_schema() -> dict:
 
 
 PUBLIC_SCHEMAS: dict = {
-    "run": _envelope_schema("run", _run_data_schema()),
+    "run": _envelope_schema("run", _run_data_schema(selection=True)),
     "plan": _envelope_schema("plan", _plan_schema()),
     "where": _envelope_schema("where", {
         "type": "object",
@@ -5199,7 +5651,7 @@ PUBLIC_SCHEMAS: dict = {
         "type": "object",
         "properties": {
             "summaries": {"type": "array",
-                          "items": _run_data_schema()},
+                          "items": _run_data_schema(selection=False)},
             "obligations": {"type": "array", "items": _obligation_schema()},
         },
         "required": ["summaries", "obligations"],

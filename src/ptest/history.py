@@ -1946,6 +1946,11 @@ def _baseline_reasons(
 # knows; the message keeps the detail. Live output and --json are unchanged.
 _PERSISTED_REASON_ALIASES = {"post-test-stall": "state-unavailable"}
 
+# Public run-JSON keys that are never stored in a history summary: the stored
+# key set stays the frozen 0.4.10 one (the R34 selection block is a property
+# of one live run, not of history).
+_UNPERSISTED_SUMMARY_KEYS = frozenset({"selection"})
+
 
 def _persisted_reasons(value):
     """``value`` with every aliased ``{"code": ...}`` object rewritten."""
@@ -1960,11 +1965,19 @@ def _persisted_reasons(value):
     return value
 
 
+def _persisted_summary(result: C.RunResult) -> dict:
+    """``serialize_run_result`` minus unpersisted keys, reason aliases applied."""
+    payload = C.serialize_run_result(result)
+    for key in _UNPERSISTED_SUMMARY_KEYS:
+        payload.pop(key, None)
+    return _persisted_reasons(payload)
+
+
 def _insert_summary(
     connection: sqlite3.Connection, result: C.RunResult,
     inventory: C.Inventory | None,
 ) -> None:
-    summary = _persisted_reasons(C.serialize_run_result(result))
+    summary = _persisted_summary(result)
     before = _json_bytes(_snapshot_dict(result.input_before)) if result.input_before else None
     after = _json_bytes(_snapshot_dict(result.input_after)) if result.input_after else None
     source_digest, compatibility = _result_identity(result)
@@ -2133,7 +2146,7 @@ def _incoming_storage_size(
         _value_size(value)
         for value in (
             result.run_id, result.sequence, result.finished_at,
-            _json_bytes(_persisted_reasons(C.serialize_run_result(result))), before, after,
+            _json_bytes(_persisted_summary(result)), before, after,
             result.policy_digest, source_digest, compatibility,
             result.mode.value, result.status.value, stored_inventory,
         )

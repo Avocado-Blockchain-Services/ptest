@@ -36,7 +36,7 @@ _MAX_ARGV_BYTES = 131072
 _MAX_MONOREPO_CHILDREN = 256
 _ARGV_FIELDS = frozenset({
     ("runner", "launcher"), ("runner", "args"), ("runner", "full_args"),
-    ("setup", "argv"),
+    ("setup", "argv"), ("selection", "ambient_fingerprint"),
 })
 _CONTROL_CHARS = frozenset(
     chr(code) for code in range(0x20)
@@ -490,7 +490,8 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
     table = _table(data)
     _keys(table, {"enabled", "closed_inputs", "input_roots", "ignored_inputs",
                   "environment", "full_triggers", "always", "no_tests",
-                  "non_input_outputs", "full_ratio", "groups", "dynamic"})
+                  "non_input_outputs", "full_ratio", "groups", "dynamic",
+                  "observers", "ambient_fingerprint"})
     enabled = table.get("enabled", False)
     closed_inputs = table.get("closed_inputs", False)
     if not isinstance(enabled, bool) or not isinstance(closed_inputs, bool):
@@ -510,6 +511,9 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
                               allow_final_symlink=field == "non_input_outputs")
         for field in path_fields
     }
+    paths["observers"] = _path_sequence(table.get("observers", []), root)
+    ambient_fingerprint = (_argv(table["ambient_fingerprint"], allow_empty=False)
+                           if "ambient_fingerprint" in table else ())
     if sum(len(items) for items in paths.values()) > _MAX_PATH_ENTRIES:
         _fail()
     environment = _string_sequence(table.get("environment", []), max_entries=256,
@@ -536,11 +540,32 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
             always=paths["always"], no_tests=paths["no_tests"],
             non_input_outputs=paths["non_input_outputs"],
             full_ratio=ratio, groups=groups,
-            dynamic=dynamic,
+            dynamic=dynamic, observers=paths["observers"],
+            ambient_fingerprint=ambient_fingerprint,
         )
     except (TypeError, ValueError):
         _fail()
     raise AssertionError("unreachable")
+
+
+def _prevalidate_selection_keys(data: object, root: Path) -> None:
+    """Value rules of ``observers`` and ``ambient_fingerprint`` (R13, R41).
+
+    A violation is an ``invalid-config`` (``unsafe-path`` for a prefix that
+    crosses a symlink), not the ``policy-invalid`` fallback every other
+    ``[selection]`` violation keeps, so the error must escape ``_selection``.
+    """
+    if not isinstance(data, dict):
+        return
+    try:
+        if "observers" in data:
+            _path_sequence(data["observers"], root)
+        if "ambient_fingerprint" in data:
+            _argv(data["ambient_fingerprint"], allow_empty=False)
+    except C.Problem:
+        raise
+    except (TypeError, ValueError, _ConfigInvalid):
+        raise _problem("invalid-config", "project configuration is invalid")
 
 
 def _parse_config(raw: bytes, root: Path, path: Path) -> tuple[C.Config, tuple[C.Reason, ...]]:
@@ -575,6 +600,7 @@ def _parse_config(raw: bytes, root: Path, path: Path) -> tuple[C.Config, tuple[C
     except (TypeError, ValueError, _ConfigInvalid):
         raise _problem("invalid-config", "project configuration is invalid")
 
+    _prevalidate_selection_keys(table.get("selection"), root)
     warnings: tuple[C.Reason, ...] = ()
     try:
         selection = _selection(table.get("selection"), root)
@@ -1229,6 +1255,11 @@ def _serialize_fresh(config: C.Config) -> bytes:
         f"non_input_outputs = {_toml_array(config.selection.non_input_outputs)}",
         f"full_ratio = {config.selection.full_ratio:g}",
     ])
+    if config.selection.observers:
+        lines.append(f"observers = {_toml_array(config.selection.observers)}")
+    if config.selection.ambient_fingerprint:
+        lines.append("ambient_fingerprint = "
+                     f"{_toml_array(config.selection.ambient_fingerprint)}")
     if not config.selection.dynamic:
         lines.append("dynamic = false")
     return ("\n".join(lines) + "\n").encode("utf-8")

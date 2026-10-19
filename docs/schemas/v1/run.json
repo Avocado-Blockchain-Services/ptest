@@ -453,6 +453,189 @@
             "null"
           ]
         },
+        "selection": {
+          "properties": {
+            "deferred": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "deferred_files": {
+              "items": {
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  },
+                  "tests": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "file",
+                  "tests"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "deferred_files_truncated": {
+              "type": "boolean"
+            },
+            "deferred_reasons": {
+              "items": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "g-shared",
+                      "g-reach",
+                      "g-data",
+                      "b-static",
+                      "u-static"
+                    ],
+                    "type": "string"
+                  },
+                  "paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 3,
+                    "type": "array"
+                  },
+                  "tests": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "code",
+                  "tests",
+                  "paths"
+                ],
+                "type": "object"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "engine": {
+              "enum": [
+                "dynamic",
+                "static",
+                "vitest-changed",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "full_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gate": {
+              "properties": {
+                "demoted": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "failed": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "observers_evicted": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "observers_learned": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "previously_deferred": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "unlearned": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "previously_deferred",
+                "failed",
+                "observers_learned",
+                "observers_evicted",
+                "unlearned",
+                "demoted"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "iteration": {
+              "type": "boolean"
+            },
+            "observers": {
+              "properties": {
+                "deferred": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "fingerprint": {
+                  "enum": [
+                    "absent",
+                    "changed",
+                    "unchanged",
+                    null
+                  ],
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "promoted": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "promoted",
+                "deferred",
+                "fingerprint"
+              ],
+              "type": "object"
+            },
+            "run_now": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "engine",
+            "iteration",
+            "run_now",
+            "deferred",
+            "full_reason",
+            "deferred_reasons",
+            "deferred_files",
+            "deferred_files_truncated",
+            "observers",
+            "gate"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "signal": {
           "type": [
             "integer",

@@ -1395,3 +1395,206 @@ def test_selection_dynamic_leaves_policy_digest_unchanged():
                                      dynamic=True)):
         assert hashlib.sha256(repr(policy).encode()).hexdigest().startswith(
             "43bc98485c25")
+
+
+# --- tiered selection: [selection] observers / ambient_fingerprint (R13, R41) --
+
+def _selection_toml(extra: str) -> str:
+    return (
+        "version = 1\n"
+        'project_id = "ab1234567890ab1234567890ab123456"\n'
+        "\n[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["python"]\n'
+        'test_roots = ["tests"]\n'
+        "\n[resources]\n"
+        "\n[selection]\n"
+        "enabled = true\n"
+        f"{extra}")
+
+
+def _resolve_selection(root: Path, extra: str):
+    (root / ".ptest.toml").write_text(_selection_toml(extra), encoding="utf-8")
+    return resolve_config(root)
+
+
+def _toml_list(items) -> str:
+    return json.dumps(list(items))
+
+
+@pytest.mark.parametrize("value", [
+    '"tests"',
+    "[1]",
+    '[["tests"]]',
+    '[""]',
+    '["../outside"]',
+    '["tests/../x"]',
+    '["/abs/tests"]',
+    '["tests\\\\obs"]',
+    '["~/tests"]',
+    '["C:tests"]',
+    '["tests//obs"]',
+    '["./tests"]',
+    '["bad\\u0001path"]',
+    '["' + "x" * 4097 + '"]',
+    _toml_list(["tests"] * 4097),
+], ids=["string", "int", "nested", "empty", "traversal", "inner-dotdot",
+        "absolute", "backslash", "tilde", "drive", "empty-segment", "dot",
+        "control", "oversized", "entry-4097"])
+def test_observer_prefixes_reject_hostile_values(tmp_path, value):
+    resolution = _resolve_selection(tmp_path, f"observers = {value}\n")
+    assert resolution.config is None
+    assert resolution.problem is not None
+    assert resolution.problem.code == "invalid-config"
+
+
+def test_observer_prefix_through_symlink_is_unsafe_path(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "tests").symlink_to(outside, target_is_directory=True)
+    resolution = _resolve_selection(tmp_path, 'observers = ["tests/obs"]\n')
+    assert resolution.config is None
+    assert resolution.problem.code == "unsafe-path"
+
+
+def test_observer_budget_overflow_stays_policy_invalid(tmp_path):
+    extra = (f"input_roots = {_toml_list(['src'] * 4094)}\n"
+             f"observers = {_toml_list(['tests/a', 'tests/b', 'tests/c'])}\n")
+    resolution = _resolve_selection(tmp_path, extra)
+    assert resolution.problem is None
+    assert resolution.config.selection.enabled is False
+    assert [w.code for w in resolution.warnings] == ["policy-invalid"]
+
+
+def test_observer_prefixes_parse_and_match_literally(tmp_path):
+    from ptest.selection import _matches
+    resolution = _resolve_selection(
+        tmp_path, 'observers = ["tests/test_*", "tests/obs", "tests/a[b]"]\n')
+    assert resolution.problem is None
+    assert resolution.warnings == ()
+    observers = resolution.config.selection.observers
+    assert observers == ("tests/test_*", "tests/obs", "tests/a[b]")
+    # Entries are prefixes, never globs, and never leave the project.
+    assert not _matches("tests/test_a.py", ("tests/test_*",))
+    assert _matches("tests/test_*", ("tests/test_*",))
+    assert _matches("tests/test_*/x.py", ("tests/test_*",))
+    assert not _matches("tests/ab/x.py", ("tests/a[b]",))
+    assert _matches("tests/obs/x.py", ("tests/obs",))
+    assert not _matches("tests/observers.py", ("tests/obs",))
+    assert not _matches("../tests/obs/x.py", ("tests/obs",))
+
+
+def test_observers_default_empty_and_count_toward_path_budget(tmp_path):
+    resolution = _resolve_selection(tmp_path, "")
+    assert resolution.config.selection.observers == ()
+    assert resolution.config.selection.ambient_fingerprint == ()
+    ok = _resolve_selection(
+        tmp_path, f"input_roots = {_toml_list(['src'] * 4093)}\n"
+                  f"observers = {_toml_list(['tests/a', 'tests/b', 'tests/c'])}\n")
+    assert ok.problem is None and ok.warnings == ()
+    assert len(ok.config.selection.observers) == 3
+
+
+@pytest.mark.parametrize("value", [
+    '"python -m app.fp"',
+    "[]",
+    "[1]",
+    '["python", "a\\u0001b"]',
+    _toml_list(["x"] * 257),
+    '["' + "x" * 16385 + '"]',
+    _toml_list(["x" * 16384] * 9),
+], ids=["string", "empty", "int", "control", "token-257", "token-16385",
+        "bytes-131072"])
+def test_ambient_fingerprint_rejects_hostile_config(tmp_path, value):
+    resolution = _resolve_selection(
+        tmp_path, f"ambient_fingerprint = {value}\n")
+    assert resolution.config is None
+    assert resolution.problem is not None
+    assert resolution.problem.code == "invalid-config"
+
+
+@pytest.mark.parametrize("extra", [
+    'ambient_fingerprint = ["python"]\nambient_fingerprint_timeout = 5\n',
+    "ambient_fingerprint_timeout = 5\n",
+])
+def test_ambient_fingerprint_timeout_key_is_unknown(tmp_path, extra):
+    resolution = _resolve_selection(tmp_path, extra)
+    assert resolution.problem is None
+    assert resolution.config.selection.enabled is False
+    assert [w.code for w in resolution.warnings] == ["policy-invalid"]
+
+
+def test_ambient_fingerprint_accepts_maximum_token_and_parses(tmp_path):
+    resolution = _resolve_selection(
+        tmp_path, 'ambient_fingerprint = ["python", "-m", "app.fp"]\n')
+    assert resolution.problem is None
+    assert resolution.config.selection.ambient_fingerprint == (
+        "python", "-m", "app.fp")
+    big = _resolve_selection(
+        tmp_path, f'ambient_fingerprint = ["python", "{"y" * 16384}"]\n')
+    assert big.problem is None
+    assert big.warnings == ()
+    assert len(big.config.selection.ambient_fingerprint[1]) == 16384
+
+
+def test_selection_writer_renders_new_keys_only_when_set():
+    plain = _serialize_fresh(_dynamic_config()).decode("utf-8")
+    assert "observers" not in plain and "ambient_fingerprint" not in plain
+    both = _serialize_fresh(_dynamic_config(
+        observers=("tests/obs",), ambient_fingerprint=("python", "-m", "x"),
+        dynamic=False)).decode("utf-8")
+    assert ('full_ratio = 0.7\nobservers = ["tests/obs"]\n'
+            'ambient_fingerprint = ["python", "-m", "x"]\n'
+            "dynamic = false\n") in both
+    only = _serialize_fresh(_dynamic_config(
+        ambient_fingerprint=("fp",))).decode("utf-8")
+    assert "observers" not in only
+    assert 'full_ratio = 0.7\nambient_fingerprint = ["fp"]\n' in only
+
+
+def test_selection_writer_new_keys_round_trip(tmp_path):
+    text = _serialize_fresh(_dynamic_config(
+        observers=("tests/obs",),
+        ambient_fingerprint=("python", "-m", "x"))).decode("utf-8")
+    (tmp_path / ".ptest.toml").write_text(text, encoding="utf-8")
+    resolution = resolve_config(tmp_path)
+    assert resolution.problem is None
+    assert resolution.config.selection.observers == ("tests/obs",)
+    assert resolution.config.selection.ambient_fingerprint == (
+        "python", "-m", "x")
+
+
+# repr(SelectionPolicy) as 0.6.8 rendered it; the policy digest and the
+# compatibility fingerprint hash this string (R46: no re-seed for configs
+# that do not use the new keys).
+_POLICY_REPR_0_6_8 = (
+    "SelectionPolicy(enabled=True, closed_inputs=False, "
+    "input_roots=('src', 'tests'), ignored_inputs=(), "
+    "environment=('HOME',), full_triggers=('uv.lock',), always=(), "
+    "no_tests=(), non_input_outputs=(), full_ratio=0.7, groups=())")
+
+
+def test_policy_digest_and_compatibility_unchanged_for_same_config(tmp_path):
+    from ptest import selection_engine as engine
+    base = dict(enabled=True, closed_inputs=False,
+                input_roots=("src", "tests"), environment=("HOME",),
+                full_triggers=("uv.lock",))
+    plain = C.SelectionPolicy(**base)
+    declared = C.SelectionPolicy(
+        **base, observers=("tests/obs", "tests/obs2"),
+        ambient_fingerprint=("python", "-m", "app.fp"))
+    assert repr(plain) == _POLICY_REPR_0_6_8
+    assert repr(declared) == _POLICY_REPR_0_6_8
+
+    def config(policy):
+        return C.Config(
+            runner=C.RunnerConfig(
+                kind=C.RunnerKind.PYTEST, launcher=("python",), args=(),
+                full_args=(), test_roots=("tests",), workers=1,
+                lifecycle="cooperative-process-group"),
+            setup=None, resources=C.ResourceConfig(), selection=policy,
+            project_id="ab" * 16)
+
+    key = b"k" * 64
+    assert engine.compatibility_fingerprint(key, config(plain), tmp_path) == \
+        engine.compatibility_fingerprint(key, config(declared), tmp_path)
