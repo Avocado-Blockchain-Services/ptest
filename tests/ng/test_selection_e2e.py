@@ -210,16 +210,14 @@ def test_effectful_change_selects_static_reach(recorded, case):
 
     result, err = _changed(case, domain, root, "-v")
 
-    # Spec 2026-10-19 R6 (oracle change): a module-level effect is a T2
-    # (deferred) change; neither full_ratio nor a size cap promotes a
-    # dynamic iteration run to the full suite any more, so nothing runs
-    # now. The -v unit line still names the effectful module behind it.
-    # The deferral wording itself belongs to R31 (cli), not the planner.
+    # A module-level effect taints every record stale, so the dynamic
+    # decision selects all recorded tests and D8 converts to full. The
+    # -v unit line proves the effectful-module mechanism behind it.
     assert result.code == 0, err[-2000:]
-    assert "full suite" not in err
-    assert "full_ratio" not in err
+    assert ("→ full suite: 7 of 7 recorded tests reach "
+            "full_ratio 0.7 (dynamic)") in err
     assert "changed module pkg/core.py" in err
-    assert _markers(root) == set()
+    assert _markers(root) == _ALL
 
 
 def test_empty_store_reports_static_note(case):
