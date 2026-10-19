@@ -177,22 +177,23 @@ def test_fixture_records_replaced_per_run(domain_factory):
         store.close()
 
 
-def test_unreferenced_runs_pruned(domain_factory):
+def test_runs_with_no_rows_left_are_pruned(domain_factory):
+    """Oracle change (R21): a re-recorded node keeps one row per run up to
+    K, so a run is unreferenced only once K newer runs took its last row."""
     domain = domain_factory()
     store = _open(domain)
     try:
-        store.update(_run({"tests/test_a.py::test_one": _node(
-            "tests/test_a.py::test_one")}),
-            run_id=RUN_A, recorded_at=1.0, compatibility=COMPAT,
-            digests=_digests(), full=False)
-        assert set(store.snapshot().runs) == {RUN_A}
-        # Run B re-records the same node: run A's row is now unreferenced.
-        store.update(_run({"tests/test_a.py::test_one": _node(
-            "tests/test_a.py::test_one", "failed")}),
-            run_id=RUN_B, recorded_at=2.0, compatibility=COMPAT,
-            digests=_digests(), full=False)
+        runs = [RUN_A, RUN_B, "33" * 16, "44" * 16]
+        for index, run_id in enumerate(runs):
+            store.update(_run({"tests/test_a.py::test_one": _node(
+                "tests/test_a.py::test_one",
+                "failed" if index == 3 else "passed")}),
+                run_id=run_id, recorded_at=float(index + 1),
+                compatibility=COMPAT, digests=_digests(), full=False)
+            if index == 1:
+                assert set(store.snapshot().runs) == {RUN_A, RUN_B}
         snap = store.snapshot()
-        assert set(snap.runs) == {RUN_B}
+        assert set(snap.runs) == set(runs[1:])
         assert snap.nodes["tests/test_a.py::test_one"].outcome == "failed"
     finally:
         store.close()
@@ -393,8 +394,8 @@ def test_concurrent_updates_from_two_connections(domain_factory):
     store = S.open_store(domain, PROJ, create=False)
     try:
         snap = store.snapshot()
-        # Every row parses: nothing torn; the shared node has exactly one
-        # committed outcome (last writer wins).
+        # Every row parses: nothing torn; the shared node keeps rows from
+        # both writers (up to K), the newest one is the node's record.
         assert snap.nodes["tests/test_a.py::test_shared"].outcome in {
             "passed", "failed"}
         assert len(snap.nodes) == 51
@@ -403,21 +404,128 @@ def test_concurrent_updates_from_two_connections(domain_factory):
         store.close()
 
 
-def test_same_node_last_writer_wins_sequentially(domain_factory):
+NODE_ONE = "tests/test_a.py::test_one"
+
+
+def _record(store, run_id, recorded_at, nodes=(NODE_ONE,), outcome="passed",
+            **extra):
+    return store.update(
+        _run({nodeid: _node(nodeid, outcome) for nodeid in nodes}),
+        run_id=run_id, recorded_at=recorded_at, compatibility=COMPAT,
+        digests=_digests(), full=extra.pop("full", False), **extra)
+
+
+def test_same_node_keeps_one_row_per_run_up_to_k(domain_factory):
+    """R21, R26: two runs recording one node leave two rows (the old
+    last-writer-wins replaced the first); a fourth run trims the oldest."""
     domain = domain_factory()
     store = _open(domain)
     try:
-        store.update(_run({"tests/test_a.py::test_one": _node(
-            "tests/test_a.py::test_one", "passed")}),
-            run_id=RUN_A, recorded_at=1.0, compatibility=COMPAT,
-            digests=_digests(), full=False)
-        store.update(_run({"tests/test_a.py::test_one": _node(
-            "tests/test_a.py::test_one", "failed")}),
-            run_id=RUN_B, recorded_at=2.0, compatibility=COMPAT,
-            digests=_digests(), full=False)
+        _record(store, RUN_A, 1.0, outcome="passed")
+        _record(store, RUN_B, 2.0, outcome="failed")
         snap = store.snapshot()
-        assert snap.nodes["tests/test_a.py::test_one"].outcome == "failed"
-        assert snap.nodes["tests/test_a.py::test_one"].run_id == RUN_B
+        assert [r.run_id for r in snap.records[NODE_ONE]] == [RUN_B, RUN_A]
+        assert snap.nodes[NODE_ONE] is snap.records[NODE_ONE][0]
+        assert snap.nodes[NODE_ONE].outcome == "failed"
+        assert snap.records[NODE_ONE][1].outcome == "passed"
+        _record(store, "33" * 16, 3.0)
+        _record(store, "44" * 16, 4.0)
+        snap = store.snapshot()
+        assert [r.run_id for r in snap.records[NODE_ONE]] == [
+            "44" * 16, "33" * 16, RUN_B]
+        assert RUN_A not in snap.runs
+        assert S.SELECTION_RECORDS_PER_NODE == 3
+    finally:
+        store.close()
+
+
+def test_backdated_written_run_is_kept_and_the_oldest_other_row_goes(
+        domain_factory):
+    """R21: "never the row being written", even when its run is the oldest."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        for run_id, at in ((RUN_B, 2.0), ("33" * 16, 3.0), ("44" * 16, 4.0)):
+            _record(store, run_id, at)
+        _record(store, RUN_A, 0.5)
+        ids = [r.run_id for r in store.snapshot().records[NODE_ONE]]
+        assert ids == ["44" * 16, "33" * 16, RUN_A]
+    finally:
+        store.close()
+
+
+def test_store_concurrent_updates_keep_at_most_k_rows_per_node(
+        domain_factory):
+    domain = domain_factory()
+    errors: list[BaseException] = []
+    seed = _open(domain)
+    seed.close()
+
+    def worker(index: int):
+        try:
+            store = S.open_store(domain, PROJ, create=False)
+            try:
+                for round_no in range(12):
+                    _record(store, f"{index:02x}" + f"{round_no:02x}" * 15,
+                            float(round_no))
+            finally:
+                store.close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in (0, 1)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    store = S.open_store(domain, PROJ, create=False)
+    try:
+        rows = store._conn.execute(
+            "SELECT run_id FROM nodes WHERE nodeid = ?",
+            (NODE_ONE,)).fetchall()
+        assert len(rows) == S.SELECTION_RECORDS_PER_NODE
+        snap = store.snapshot()
+        assert {r.run_id for r in snap.records[NODE_ONE]} <= set(snap.runs)
+        assert len(snap.records[NODE_ONE]) == 3
+    finally:
+        store.close()
+
+
+def test_store_nodes_delete_keys_on_run_id(domain_factory):
+    """R21: re-recording run A without a node deletes only A's row of it."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        two = "tests/test_a.py::test_two"
+        _record(store, RUN_A, 1.0, nodes=(NODE_ONE, two))
+        _record(store, RUN_B, 2.0, nodes=(NODE_ONE, two))
+        _record(store, RUN_A, 3.0, nodes=(NODE_ONE,))
+        snap = store.snapshot()
+        assert [r.run_id for r in snap.records[two]] == [RUN_B]
+        assert {r.run_id for r in snap.records[NODE_ONE]} == {RUN_A, RUN_B}
+    finally:
+        store.close()
+
+
+def test_outcome_updates_cover_all_k_rows(domain_factory):
+    """R21: mark_outcomes and invalidate touch every record, not the newest."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        for index, run_id in enumerate((RUN_A, RUN_B, "33" * 16)):
+            _record(store, run_id, float(index + 1))
+        store.mark_outcomes({NODE_ONE: "failed"})
+        records = store.snapshot().records[NODE_ONE]
+        assert len(records) == 3
+        assert {r.outcome for r in records} == {"failed"}
+        store.invalidate(("tests/test_a.py",))
+        assert {r.outcome for r in store.snapshot().records[NODE_ONE]} == {
+            "unknown"}
+        store.mark_outcomes({NODE_ONE: "passed"})
+        store.invalidate(None)
+        assert {r.outcome for r in store.snapshot().records[NODE_ONE]} == {
+            "unknown"}
     finally:
         store.close()
 
@@ -676,16 +784,22 @@ def _big_run(count=20000, funcs_per_node=150, pool=1500):
 
 
 def test_store_holds_20k_nodes_under_cap(domain_factory):
+    """R25: 20k nodes x K=3 records stay under the 128 MiB hard cap."""
     domain = domain_factory()
     store = _open(domain)
     try:
-        store.update(_big_run(), run_id=RUN_A, recorded_at=1.0,
-                     compatibility=COMPAT,
-                     digests={"pkg/big.py": "aa" * 32,
-                              "tests/test_big.py": "bb" * 32},
-                     full=True)
+        for index, run_id in enumerate((RUN_A, RUN_B, "33" * 16)):
+            store.update(_big_run(), run_id=run_id,
+                         recorded_at=float(index + 1), compatibility=COMPAT,
+                         digests={"pkg/big.py": "aa" * 32,
+                                  "tests/test_big.py": "bb" * 32},
+                         full=True)
         size = _db_path(domain).stat().st_size
         assert size <= S.SELECTION_STORE_MAX_BYTES
+        rows = store._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        assert rows == 3 * 20000
+        assert S.SELECTION_STORE_MAX_BYTES == 128 * 1024 * 1024
+        assert S.SELECTION_STORE_TARGET_BYTES == 96 * 1024 * 1024
     finally:
         store.close()
 
@@ -1084,5 +1198,518 @@ def test_snapshot_unions_fixture_rows_across_runs(domain_factory):
         assert sorted(record.deps.functions) == [0, 1]
         assert record.run_id == RUN_B
         assert snap.nodes["tests/test_x.py::test_x[pg]"].run_id == RUN_A
+    finally:
+        store.close()
+
+
+# --- R24 eviction order ----------------------------------------------------
+
+def _wide(prefix, count=150, funcs=20):
+    vocab_funcs = tuple((1, f"f{n}") for n in range(funcs))
+    nodes = {f"tests/test_a.py::{prefix}_{n}": _node(
+        f"tests/test_a.py::{prefix}_{n}", deps=_ctx(funcs=range(funcs)))
+        for n in range(count)}
+    return S.RunDependencies(
+        vocabulary=_vocab(("tests/test_a.py", "pkg/a.py"), vocab_funcs),
+        nodes=nodes, fixtures={}, ambient=_ctx(), complete=True,
+        recording=True, python=(3, 12), inactive_reason=None, notes=())
+
+
+RUN_C = "33" * 16
+RUN_D = "44" * 16
+
+
+def _three_records_and_a_newcomer(store, **kw):
+    for index, run_id in enumerate((RUN_A, RUN_B, RUN_C)):
+        store.update(_wide("same"), run_id=run_id,
+                     recorded_at=float(index + 1), compatibility=COMPAT,
+                     digests=_digests(), full=False)
+    store.update(_wide("other", count=10), run_id=RUN_D, recorded_at=4.0,
+                 compatibility=COMPAT, digests=_digests(), full=False, **kw)
+
+
+def _rows_of(store, run_id):
+    return store._conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE run_id = ?",
+        (run_id,)).fetchone()[0]
+
+
+def test_eviction_never_drops_newest_row_or_written_run(domain_factory,
+                                                         monkeypatch):
+    """R24: under an unreachable target, surplus records go (oldest runs
+    first) while every node keeps its newest row and the written run keeps
+    all of its rows; whole-run eviction never trades the larger run."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _three_records_and_a_newcomer(store)
+        monkeypatch.setattr(S, "SELECTION_STORE_TARGET_BYTES", 1)
+        store.update(_wide("written", count=20), run_id="55" * 16,
+                     recorded_at=5.0, compatibility=COMPAT,
+                     digests=_digests(), full=False)
+        snap = store.snapshot()
+        same = [n for n in snap.nodes if "::same_" in n]
+        assert len(same) == 150
+        for nodeid in same:
+            assert [r.run_id for r in snap.records[nodeid]] == [RUN_C]
+        assert _rows_of(store, "55" * 16) == 20
+        assert RUN_A not in snap.runs and RUN_B not in snap.runs
+        assert "55" * 16 in snap.runs
+    finally:
+        store.close()
+
+
+def test_surplus_records_are_evicted_oldest_run_first(domain_factory,
+                                                       monkeypatch):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _three_records_and_a_newcomer(store)
+        order = S.SelectionStore._surplus_rows(store._conn, RUN_D)
+        runs = [run for _, run in order]
+        assert runs == [RUN_A] * 150 + [RUN_B] * 150
+        assert not any(run in (RUN_C, RUN_D) for run in runs)
+        calls = []
+        real = S.SelectionStore._drop_rows
+
+        def spy(conn, rowids):
+            calls.append(len(rowids))
+            real(conn, rowids)
+
+        monkeypatch.setattr(S.SelectionStore, "_drop_rows",
+                            staticmethod(spy))
+        monkeypatch.setattr(S, "_SURPLUS_BATCH", 100)
+        monkeypatch.setattr(
+            S.SelectionStore, "_db_size",
+            lambda self, conn: (S.SELECTION_STORE_TARGET_BYTES + 1
+                                if not calls else 0))
+        store.update(_wide("extra", count=2), run_id="55" * 16,
+                     recorded_at=5.0, compatibility=COMPAT,
+                     digests=_digests(), full=False)
+        assert calls == [100]
+        assert _rows_of(store, RUN_A) == 50
+        assert _rows_of(store, RUN_B) == 150
+        assert _rows_of(store, RUN_C) == 150
+    finally:
+        store.close()
+
+
+def test_hard_cap_retry_uses_the_same_order(domain_factory):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _three_records_and_a_newcomer(store)
+        conn = store._conn
+        store._evict_oldest(conn, exclude=RUN_D)
+        assert _rows_of(store, RUN_A) == 0 and _rows_of(store, RUN_B) == 150
+        store._evict_oldest(conn, exclude=RUN_D)
+        assert _rows_of(store, RUN_B) == 0 and _rows_of(store, RUN_C) == 150
+        # No surplus left: the fewest-records run goes, never the written one.
+        store._evict_oldest(conn, exclude=RUN_D)
+        assert _rows_of(store, RUN_D) == 10
+        assert _rows_of(store, RUN_C) == 0
+        assert set(store.snapshot().runs) == {RUN_D}
+    finally:
+        store.close()
+
+
+# --- schema v2: migration and old readers -----------------------------------
+
+_V1_SCHEMA = """
+CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE paths(id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL);
+CREATE TABLE funcs(id INTEGER PRIMARY KEY, path_id INTEGER NOT NULL
+    REFERENCES paths(id), qualname TEXT NOT NULL,
+    UNIQUE(path_id, qualname));
+CREATE TABLE fixtures(id INTEGER PRIMARY KEY, baseid TEXT NOT NULL,
+    argname TEXT NOT NULL, scope TEXT NOT NULL,
+    UNIQUE(baseid, argname, scope));
+CREATE TABLE cache(digest TEXT PRIMARY KEY, version INTEGER NOT NULL,
+    blob BLOB NOT NULL, used_at REAL NOT NULL);
+CREATE TABLE runs(run_id TEXT PRIMARY KEY, recorded_at REAL NOT NULL,
+    compatibility TEXT NOT NULL, ambient BLOB NOT NULL);
+CREATE TABLE run_digests(run_id TEXT NOT NULL REFERENCES runs(run_id)
+    ON DELETE CASCADE, path_id INTEGER NOT NULL REFERENCES paths(id),
+    digest TEXT NOT NULL, PRIMARY KEY(run_id, path_id));
+CREATE TABLE nodes(nodeid TEXT PRIMARY KEY, test_file TEXT NOT NULL,
+    outcome TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id),
+    deps BLOB NOT NULL, fixtures BLOB NOT NULL);
+CREATE TABLE fixture_deps(fixture_id INTEGER NOT NULL
+    REFERENCES fixtures(id), run_id TEXT NOT NULL REFERENCES runs(run_id)
+    ON DELETE CASCADE, deps BLOB NOT NULL,
+    PRIMARY KEY(fixture_id, run_id));
+CREATE TABLE demotions(nodeid TEXT PRIMARY KEY, digest TEXT NOT NULL);
+"""
+
+
+def _make_v1_store(domain, project_id=PROJ):
+    """A 0.6.x-shaped store written with the old DDL and real rows."""
+    project = S._project_dir(domain, project_id, create=True)
+    db = project / "selection.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_V1_SCHEMA)
+    ctx = S._pack_ctx(_ctx(funcs=(0,), modules=(1,)))
+    conn.executemany("INSERT INTO paths(id, path) VALUES(?, ?)",
+                     [(1, "pkg/a.py"), (2, "tests/test_a.py")])
+    conn.execute("INSERT INTO funcs(id, path_id, qualname) VALUES(1,1,'f')")
+    conn.execute("INSERT INTO fixtures(id, baseid, argname, scope)"
+                 " VALUES(1, 'tests/conftest.py::fx', 'fx', 'session')")
+    conn.executemany(
+        "INSERT INTO kv(key, value) VALUES(?, ?)",
+        [("schema_version", "1"), ("audit_checked", "7"),
+         ("audit_misses", "1"), ("last_full_inv", '["tests/test_a.py::t0"]')])
+    for run_id, at in ((RUN_A, 1.0), (RUN_B, 2.0)):
+        conn.execute("INSERT INTO runs(run_id, recorded_at, compatibility,"
+                     " ambient) VALUES(?, ?, ?, ?)",
+                     (run_id, at, COMPAT, ctx))
+        conn.execute("INSERT INTO run_digests(run_id, path_id, digest)"
+                     " VALUES(?, 1, ?)", (run_id, "aa" * 32))
+        conn.execute("INSERT INTO fixture_deps(fixture_id, run_id, deps)"
+                     " VALUES(1, ?, ?)", (run_id, ctx))
+    for index in range(5):
+        conn.execute(
+            "INSERT INTO nodes(nodeid, test_file, outcome, run_id, deps,"
+            " fixtures) VALUES(?, 'tests/test_a.py', ?, ?, ?, ?)",
+            (f"tests/test_a.py::t{index}", "failed" if index else "passed",
+             RUN_A if index % 2 else RUN_B, ctx, S._pack_fixture_ids((1,))))
+    conn.execute("INSERT INTO demotions(nodeid, digest) VALUES('x', 'dd')")
+    conn.commit()
+    conn.close()
+    os.chmod(db, 0o600)
+    return db
+
+
+def _dump(db):
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            "nodes": conn.execute(
+                "SELECT nodeid, test_file, outcome, run_id, deps, fixtures"
+                " FROM nodes ORDER BY nodeid, run_id").fetchall(),
+            "runs": conn.execute(
+                "SELECT run_id, recorded_at, compatibility, ambient"
+                " FROM runs ORDER BY run_id").fetchall(),
+            "digests": conn.execute(
+                "SELECT * FROM run_digests ORDER BY 1, 2").fetchall(),
+            "fixture_deps": conn.execute(
+                "SELECT * FROM fixture_deps ORDER BY 1, 2").fetchall(),
+            "paths": conn.execute("SELECT * FROM paths ORDER BY 1").fetchall(),
+            "demotions": conn.execute("SELECT * FROM demotions").fetchall(),
+            "kv": conn.execute(
+                "SELECT * FROM kv WHERE key != 'schema_version'"
+                " ORDER BY 1").fetchall(),
+        }
+    finally:
+        conn.close()
+
+
+def _schema_dump(db):
+    conn = sqlite3.connect(db)
+    try:
+        return (conn.execute("SELECT type, name, sql FROM sqlite_master"
+                             " ORDER BY name").fetchall(),
+                conn.execute("SELECT * FROM kv ORDER BY 1").fetchall(),
+                conn.execute("SELECT * FROM runs ORDER BY 1").fetchall())
+    finally:
+        conn.close()
+
+
+def test_v1_store_migrates_in_place_idempotently(domain_factory):
+    domain = domain_factory()
+    db = _make_v1_store(domain)
+    before = _dump(db)
+    ino = os.stat(db).st_ino
+    store = S.open_store(domain, PROJ, create=False)
+    try:
+        assert os.stat(db).st_ino == ino
+        after = _dump(db)
+        assert after == before          # no row lost or changed
+        conn = sqlite3.connect(db)
+        try:
+            assert conn.execute("SELECT value FROM kv WHERE key ="
+                                " 'schema_version'").fetchone() == ("2",)
+            pk = sorted(row[1] for row in conn.execute(
+                "PRAGMA table_info(nodes)") if row[5])
+            assert pk == ["nodeid", "run_id"]
+            assert "fingerprint" in [row[1] for row in conn.execute(
+                "PRAGMA table_info(runs)")]
+            assert conn.execute("SELECT COUNT(*) FROM runs WHERE fingerprint"
+                                " IS NOT NULL").fetchone() == (0,)
+            assert conn.execute("SELECT COUNT(*) FROM observers"
+                                ).fetchone() == (0,)
+            index_sql = [row[0] for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index'"
+                " AND tbl_name = 'nodes' AND sql IS NOT NULL")]
+            assert any("(nodeid)" in sql for sql in index_sql)
+            assert conn.execute("SELECT COUNT(*) FROM kv WHERE key LIKE"
+                                " 'last_gate_%'").fetchone() == (0,)
+        finally:
+            conn.close()
+        snap = store.snapshot()
+        assert len(snap.nodes) == 5 and snap.gate is None
+        assert snap.observers == {} and snap.runs[RUN_A].fingerprint is None
+        # The migrated store takes a second row for an existing node.
+        store.update(_run({"tests/test_a.py::t0": _node(
+            "tests/test_a.py::t0")}), run_id=RUN_C, recorded_at=3.0,
+            compatibility=COMPAT, digests=_digests(), full=False)
+        assert len(store.snapshot().records["tests/test_a.py::t0"]) == 2
+    finally:
+        store.close()
+    # Re-opening, and re-running the migration itself, change nothing.
+    settled = _schema_dump(db)
+    S.open_store(domain, PROJ, create=False).close()
+    assert _schema_dump(db) == settled
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        S._migrate_v1(conn)
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    assert _schema_dump(db) == settled
+
+
+def test_v1_reader_refuses_v2_store_without_touching_it(domain_factory,
+                                                         monkeypatch):
+    """Spec Rollout: a 0.6.x reader (schema "1") gets the unknown-schema
+    refusal and the v2 file stays byte-identical."""
+    domain = domain_factory()
+    store = _open(domain)
+    _record(store, RUN_A, 1.0)
+    store.close()
+    db = _db_path(domain)
+    before = db.read_bytes()
+    monkeypatch.setattr(S, "_SCHEMA_VERSION", "1")
+    with pytest.raises(C.Problem) as exc:
+        S.open_store(domain, PROJ, create=True)
+    assert exc.value.code == "coordinator-corrupt"
+    assert "unknown schema" in exc.value.message
+    assert db.read_bytes() == before
+    assert not db.with_name("selection.db-journal").exists()
+
+
+def test_v1_reader_leaves_large_v2_store_untouched(domain_factory,
+                                                    monkeypatch):
+    """An older reader's smaller cap refuses an over-cap v2 store with
+    capacity-exceeded; the engine plans static and never removes it."""
+    from ptest import selection_engine as E
+    domain = domain_factory()
+    store = _open(domain)
+    _record(store, RUN_A, 1.0)
+    store.close()
+    db = _db_path(domain)
+    old_cap = 1024 * 1024
+    with open(db, "r+b") as handle:
+        handle.truncate(old_cap + 4096)
+    before = (db.read_bytes(), os.stat(db).st_ino)
+    monkeypatch.setattr(S, "SELECTION_STORE_MAX_BYTES", old_cap)
+    with pytest.raises(C.Problem) as exc:
+        S.open_store(domain, PROJ, create=True)
+    assert exc.value.code == "capacity-exceeded"
+    assert E._open_store(domain, PROJ, create=True) is None
+    assert (db.read_bytes(), os.stat(db).st_ino) == before
+
+
+# --- observers, gate marker, fingerprint ------------------------------------
+
+GATE_COMMIT = "ab" * 20
+
+
+def _gate(dirty=None, at=50.0, commit=GATE_COMMIT):
+    return C.GateMarker(commit=commit, dirty=dict(dirty or {}),
+                        recorded_at=at)
+
+
+def test_observers_gate_and_fingerprint_round_trip(domain_factory):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        fingerprint = "ef" * 32
+        lost = _record(
+            store, RUN_A, 1.0, full=True, fingerprint=fingerprint,
+            observers={NODE_ONE: frozenset({"pkg/a.py", "data/x.json"})},
+            gate=_gate({"pkg/a.py": "aa" * 32, "gone.py": None,
+                        "big.bin": "?"}))
+        assert lost == 0
+        snap = store.snapshot()
+        assert snap.observers == {NODE_ONE: frozenset({"pkg/a.py",
+                                                       "data/x.json"})}
+        assert snap.runs[RUN_A].fingerprint == fingerprint
+        assert snap.gate == _gate({"pkg/a.py": "aa" * 32, "gone.py": None,
+                                   "big.bin": "?"})
+        assert snap.inventory == frozenset({NODE_ONE})
+        meta = store.meta()
+        assert (meta.nodes, meta.observers) == (1, 1)
+        # A later run without them keeps the learned rows and the marker.
+        _record(store, RUN_B, 2.0)
+        snap = store.snapshot()
+        assert snap.gate is not None and NODE_ONE in snap.observers
+        assert snap.runs[RUN_B].fingerprint is None
+    finally:
+        store.close()
+
+
+def test_observer_rows_merge_and_collapse_at_the_per_node_cap(
+        domain_factory):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _record(store, RUN_A, 1.0, observers={NODE_ONE: {"a.py"}})
+        _record(store, RUN_B, 2.0, observers={NODE_ONE: {"b.py", "a.py"}})
+        assert store.snapshot().observers[NODE_ONE] == {"a.py", "b.py"}
+        cap = S.SELECTION_OBSERVER_ROWS_PER_NODE
+        assert cap == 64
+        many = {f"p{n}.py" for n in range(cap - 2)}      # 62 + 2 = 64: fits
+        _record(store, RUN_C, 3.0, observers={NODE_ONE: many})
+        assert len(store.snapshot().observers[NODE_ONE]) == 64
+        lost = _record(store, RUN_D, 4.0, observers={NODE_ONE: {"extra.py"}})
+        assert store.snapshot().observers[NODE_ONE] == {"*"}
+        assert lost == 0                  # widening is not eviction
+        _record(store, "55" * 16, 5.0, observers={NODE_ONE: {"z.py"}})
+        assert store.snapshot().observers[NODE_ONE] == {"*"}
+    finally:
+        store.close()
+
+
+def test_observer_cap_eviction_is_reported_not_silent(domain_factory,
+                                                       monkeypatch):
+    """R14: the store cap drops oldest learned_at rows first, the count is
+    returned, and no node record is demoted or removed by it."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        monkeypatch.setattr(S, "SELECTION_OBSERVER_ROWS_MAX", 5)
+        nodes = [f"tests/test_a.py::t{n}" for n in range(4)]
+        _record(store, RUN_A, 1.0, nodes=nodes, observers={
+            nodes[0]: {"a.py", "b.py"}, nodes[1]: {"c.py"}})
+        assert store.snapshot().observers[nodes[0]] == {"a.py", "b.py"}
+        lost = _record(store, RUN_B, 2.0, nodes=nodes, observers={
+            nodes[2]: {"d.py", "e.py", "f.py"}, nodes[3]: {"g.py"}})
+        assert lost == 2                         # 7 rows, cap 5
+        snap = store.snapshot()
+        assert snap.observers == {nodes[1]: {"c.py"},
+                                  nodes[2]: {"d.py", "e.py", "f.py"},
+                                  nodes[3]: {"g.py"}}
+        assert set(snap.nodes) == set(nodes)
+        assert snap.demotions == {}
+        assert {n: snap.nodes[n].outcome for n in nodes} == {
+            n: "passed" for n in nodes}
+    finally:
+        store.close()
+
+
+def test_observer_rows_are_pruned_only_with_their_node(domain_factory):
+    """R17: dropped from neither scoped runs nor eviction; gone once the
+    node id is absent from the last two full inventories."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        keep, drop = NODE_ONE, "tests/test_a.py::test_old"
+        _record(store, RUN_A, 1.0, nodes=(keep, drop), full=True,
+                observers={keep: {"a.py"}, drop: {"b.py"}})
+        _record(store, RUN_B, 2.0, nodes=(keep,), full=False)
+        assert set(store.snapshot().observers) == {keep, drop}
+        _record(store, RUN_B, 3.0, nodes=(keep,), full=True)
+        assert set(store.snapshot().observers) == {keep, drop}  # one gen
+        _record(store, RUN_C, 4.0, nodes=(keep,), full=True)
+        assert set(store.snapshot().observers) == {keep}
+    finally:
+        store.close()
+
+
+def test_gate_marker_clears_or_validates(domain_factory):
+    from ptest import lastgreen
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _record(store, RUN_A, 1.0, gate=_gate({"a.py": "aa" * 32}))
+        assert store.snapshot().gate is not None
+        _record(store, RUN_B, 2.0, clear_gate=True)
+        assert store.snapshot().gate is None
+        _record(store, RUN_C, 3.0, gate=_gate({"a.py": "aa" * 32}))
+        over = {f"f{n}.py": "bb" * 32
+                for n in range(lastgreen.MAX_GREEN_FILES + 1)}
+        _record(store, RUN_D, 4.0, gate=_gate(over))
+        assert store.snapshot().gate is None
+        keys = store._conn.execute(
+            "SELECT COUNT(*) FROM kv WHERE key LIKE 'last_gate_%'"
+        ).fetchone()[0]
+        assert keys == 0
+        exactly = {f"f{n}.py": "bb" * 32
+                   for n in range(lastgreen.MAX_GREEN_FILES)}
+        _record(store, "55" * 16, 5.0, gate=_gate(exactly))
+        assert len(store.snapshot().gate.dirty) == lastgreen.MAX_GREEN_FILES
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"gate": _gate(), "clear_gate": True},
+    {"fingerprint": "xyz"},
+    {"fingerprint": "AB" * 32},
+    {"fingerprint": "ab" * 31},
+    {"observers": {"": {"a.py"}}},
+    {"observers": {NODE_ONE: {""}}},
+    {"observers": {NODE_ONE: "a.py"}},
+    {"observers": [NODE_ONE]},
+    {"gate": _gate(commit="not-hex")},
+    {"gate": _gate({"a.py": 5})},
+    {"gate": _gate({"": "aa"})},
+])
+def test_update_rejects_malformed_tier_state(domain_factory, kwargs):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        with pytest.raises(ValueError):
+            _record(store, RUN_A, 1.0, **kwargs)
+        assert store.snapshot().nodes == {}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("damage", [
+    ("DELETE FROM kv WHERE key = 'last_gate_dirty'"),
+    ("UPDATE kv SET value = 'nope' WHERE key = 'last_gate_commit'"),
+    ("UPDATE kv SET value = '[1]' WHERE key = 'last_gate_dirty'"),
+    ("UPDATE kv SET value = '{bad' WHERE key = 'last_gate_dirty'"),
+    ("UPDATE kv SET value = 'x' WHERE key = 'last_gate_recorded_at'"),
+])
+def test_unreadable_gate_marker_reads_as_none(domain_factory, damage):
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        _record(store, RUN_A, 1.0, gate=_gate({"a.py": "aa" * 32}))
+        assert store.snapshot().gate is not None
+        store._conn.execute(damage)
+        assert store.snapshot().gate is None
+    finally:
+        store.close()
+
+
+def test_rejected_or_incomplete_ingest_writes_no_observers_or_marker(
+        domain_factory):
+    """R14/R27 (store half): the observers, marker and fingerprint ride the
+    update transaction, so a rejected update leaves none of them."""
+    domain = domain_factory()
+    store = _open(domain)
+    try:
+        pages = store._conn.execute("PRAGMA page_count").fetchone()[0]
+        store._conn.execute(f"PRAGMA max_page_count={pages}")
+        nodes = {f"tests/test_a.py::test_{index}": _node(
+            f"tests/test_a.py::test_{index}",
+            deps=_ctx(funcs=(0,))) for index in range(300)}
+        with pytest.raises(C.Problem) as exc:
+            store.update(_run(nodes), run_id=RUN_A, recorded_at=1.0,
+                         compatibility=COMPAT, digests=_digests(),
+                         full=True, fingerprint="ab" * 32,
+                         observers={NODE_ONE: {"a.py"}},
+                         gate=_gate({"a.py": "aa" * 32}))
+        assert exc.value.code == "capacity-exceeded"
+        snap = store.snapshot()
+        assert snap.observers == {} and snap.gate is None
+        assert snap.runs == {} and snap.nodes == {}
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM kv WHERE key LIKE 'last_gate_%'"
+        ).fetchone()[0] == 0
     finally:
         store.close()

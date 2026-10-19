@@ -15,17 +15,23 @@ sets):
 * ``cache``: digest -> encoded ``FileIndex`` blob (the parse cache; only
   rows at the current ``SOURCE_INDEX_VERSION`` are served).
 * ``runs`` / ``run_digests``: one baseline per run (keyed digest of every
-  ``.py`` and recorded data path) plus the run's ambient deps.
-* ``nodes``: one row per recorded test (packed dep sets, outcome, run).
+  ``.py`` and recorded data path) plus the run's ambient deps and its
+  ambient fingerprint (keyed MAC, nullable).
+* ``nodes``: up to ``SELECTION_RECORDS_PER_NODE`` rows per test, one per
+  run (packed dep sets, outcome); primary key ``(nodeid, run_id)``.
 * ``fixture_deps``: per-(fixture, run) dep sets.
 * ``demotions``: audit-demoted node ids keyed by test-file digest.
+* ``observers``: learned ``(nodeid, path)`` rows; ``kv`` also holds the
+  gate marker (``last_gate_*``).
 
 ``update`` is a single ``BEGIN IMMEDIATE`` transaction that replaces
-exactly the tests that ran; concurrent upserts from two checkouts
-serialize on the RESERVED lock (busy_timeout) and the last committed
-writer wins. Eviction is oldest-first with the newest run always kept;
-hitting the hard cap raises ``capacity-exceeded`` after one evict-and-
-retry.
+exactly the tests that ran in that run and trims every touched node to its
+newest K rows; concurrent writers from two checkouts serialize on the
+RESERVED lock (busy_timeout) and neither replaces the other's row.
+Eviction order: unreferenced parse cache, surplus records (never a node's
+newest row, never the written run), then the runs holding the fewest
+records; hitting the hard cap raises ``capacity-exceeded`` after one
+evict-and-retry. Schema v1 stores migrate in place on open.
 
 The ``SELECTION_*`` constants, helpers and dataclasses come from
 ``contracts.py``, their single source of truth.
@@ -42,7 +48,7 @@ import time
 import zlib
 from array import array
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import contracts as C
@@ -51,7 +57,11 @@ from . import files, storage
 _PHASE = "selection-store"
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
+_V1 = "1"
+_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_SURPLUS_BATCH = 2000
 _CACHE_PRUNE_AFTER_S = 14 * 24 * 3600
 _CACHE_TOUCH_AFTER_S = 3600
 _INVENTORY_CHUNK = 5000
@@ -69,6 +79,7 @@ from .contracts import (  # noqa: E402  re-exported for callers
     NodeRecord,
     FixtureRecord,
     DependencySnapshot,
+    GateMarker,
     SelectionStoreMeta,
     RecordedNode,
     RunDependencies,
@@ -77,6 +88,10 @@ from .contracts import (  # noqa: E402  re-exported for callers
     selection_empty_context,
     SELECTION_STORE_MAX_BYTES,
     SELECTION_STORE_TARGET_BYTES,
+    SELECTION_RECORDS_PER_NODE,
+    SELECTION_OBSERVER_ROWS_PER_NODE,
+    SELECTION_OBSERVER_ROWS_MAX,
+    SELECTION_OBSERVER_ALL,
     SELECTION_MAX_RUNS,
     SELECTION_OUTCOMES,
     SELECTION_FIXTURE_SCOPES,
@@ -86,7 +101,7 @@ from .contracts import (  # noqa: E402  re-exported for callers
 
 __all__ = [
     "DepVocabulary", "ContextDeps", "RunBaseline", "NodeRecord",
-    "FixtureRecord", "DependencySnapshot", "SelectionStoreMeta",
+    "FixtureRecord", "DependencySnapshot", "GateMarker", "SelectionStoreMeta",
     "RecordedNode", "RunDependencies", "SelectionStore",
     "SELECTION_STORE_MAX_BYTES", "SELECTION_STORE_TARGET_BYTES",
     "open_store", "remove_store",
@@ -127,8 +142,10 @@ def _unpack_ctx(blob: bytes):
 
 # -- schema ------------------------------------------------------------------
 
-_TABLES = ("kv", "paths", "funcs", "fixtures", "cache", "runs",
-           "run_digests", "nodes", "fixture_deps", "demotions")
+_V1_TABLES = ("kv", "paths", "funcs", "fixtures", "cache", "runs",
+              "run_digests", "nodes", "fixture_deps", "demotions")
+_TABLES = (*_V1_TABLES, "observers")
+_GATE_KEYS = ("last_gate_commit", "last_gate_dirty", "last_gate_recorded_at")
 
 _SCHEMA_SQL = """
 CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -142,18 +159,22 @@ CREATE TABLE fixtures(id INTEGER PRIMARY KEY, baseid TEXT NOT NULL,
 CREATE TABLE cache(digest TEXT PRIMARY KEY, version INTEGER NOT NULL,
     blob BLOB NOT NULL, used_at REAL NOT NULL);
 CREATE TABLE runs(run_id TEXT PRIMARY KEY, recorded_at REAL NOT NULL,
-    compatibility TEXT NOT NULL, ambient BLOB NOT NULL);
+    compatibility TEXT NOT NULL, ambient BLOB NOT NULL, fingerprint TEXT);
 CREATE TABLE run_digests(run_id TEXT NOT NULL REFERENCES runs(run_id)
     ON DELETE CASCADE, path_id INTEGER NOT NULL REFERENCES paths(id),
     digest TEXT NOT NULL, PRIMARY KEY(run_id, path_id));
-CREATE TABLE nodes(nodeid TEXT PRIMARY KEY, test_file TEXT NOT NULL,
+CREATE TABLE nodes(nodeid TEXT NOT NULL, test_file TEXT NOT NULL,
     outcome TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id),
-    deps BLOB NOT NULL, fixtures BLOB NOT NULL);
+    deps BLOB NOT NULL, fixtures BLOB NOT NULL,
+    PRIMARY KEY(nodeid, run_id));
+CREATE INDEX IF NOT EXISTS nodes_by_nodeid ON nodes(nodeid);
 CREATE TABLE fixture_deps(fixture_id INTEGER NOT NULL
     REFERENCES fixtures(id), run_id TEXT NOT NULL REFERENCES runs(run_id)
     ON DELETE CASCADE, deps BLOB NOT NULL,
     PRIMARY KEY(fixture_id, run_id));
 CREATE TABLE demotions(nodeid TEXT PRIMARY KEY, digest TEXT NOT NULL);
+CREATE TABLE observers(nodeid TEXT NOT NULL, path TEXT NOT NULL,
+    learned_at REAL NOT NULL, PRIMARY KEY(nodeid, path));
 """
 
 
@@ -169,6 +190,45 @@ def _create_schema(conn: sqlite3.Connection) -> None:
                  " VALUES('audit_checked', '0')")
     conn.execute("INSERT OR IGNORE INTO kv(key, value)"
                  " VALUES('audit_misses', '0')")
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> list[tuple]:
+    return conn.execute(f"PRAGMA table_info({table})").fetchall()
+
+
+def _migrate_v1(conn: sqlite3.Connection) -> None:
+    """Upgrade a v1 store to v2 inside the caller's ``BEGIN IMMEDIATE``.
+
+    Idempotent and lossless: ``nodes`` is rebuilt with the ``(nodeid,
+    run_id)`` key and a ``nodeid`` index (every row copied unchanged),
+    ``runs`` gains a nullable ``fingerprint``, ``observers`` is created and
+    the version row is set last. The gate marker keys are written by the
+    next gate, never here.
+    """
+    if "fingerprint" not in {row[1] for row in _columns(conn, "runs")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN fingerprint TEXT")
+    pk = {row[1] for row in _columns(conn, "nodes") if row[5]}
+    if pk != {"nodeid", "run_id"}:
+        conn.execute("DROP TABLE IF EXISTS nodes_v2")
+        conn.execute(
+            "CREATE TABLE nodes_v2(nodeid TEXT NOT NULL, test_file TEXT NOT"
+            " NULL, outcome TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES"
+            " runs(run_id), deps BLOB NOT NULL, fixtures BLOB NOT NULL,"
+            " PRIMARY KEY(nodeid, run_id))")
+        conn.execute(
+            "INSERT INTO nodes_v2(nodeid, test_file, outcome, run_id, deps,"
+            " fixtures) SELECT nodeid, test_file, outcome, run_id, deps,"
+            " fixtures FROM nodes")
+        conn.execute("DROP TABLE nodes")
+        conn.execute("ALTER TABLE nodes_v2 RENAME TO nodes")
+    conn.execute("CREATE INDEX IF NOT EXISTS nodes_by_nodeid"
+                 " ON nodes(nodeid)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS observers(nodeid TEXT NOT NULL, path"
+        " TEXT NOT NULL, learned_at REAL NOT NULL,"
+        " PRIMARY KEY(nodeid, path))")
+    conn.execute("UPDATE kv SET value = ? WHERE key = 'schema_version'",
+                 (_SCHEMA_VERSION,))
 
 
 def _tables_present(conn: sqlite3.Connection) -> set[str]:
@@ -225,6 +285,22 @@ def _check_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.Error:
                 _fail("coordinator-corrupt",
                       "selection store cannot be initialised")
+                raise AssertionError("unreachable")
+        elif (_SCHEMA_VERSION == "2" and set(_V1_TABLES) <= tables
+                and _read_schema_version(conn) == _V1):
+            try:
+                _migrate_v1(conn)
+            except sqlite3.Error as exc:
+                if storage.is_transient_sqlite(exc):
+                    _fail_retryable("coordinator-unavailable",
+                                    "selection store is busy")
+                    raise AssertionError("unreachable")
+                if _is_io_error(exc):
+                    _fail("state-unavailable",
+                          "selection store is unavailable")
+                    raise AssertionError("unreachable")
+                _fail("coordinator-corrupt",
+                      "selection store cannot be migrated")
                 raise AssertionError("unreachable")
         elif not set(_TABLES) <= tables:
             _fail("coordinator-corrupt",
@@ -522,6 +598,33 @@ def _unpack_inv(text: str | None) -> frozenset[str]:
     return frozenset(item for item in data if isinstance(item, str))
 
 
+def _read_gate(kv: Mapping[str, str]) -> GateMarker | None:
+    """The gate marker from kv rows; any missing or malformed key means no
+    usable marker (the planner then reports "no gate recorded")."""
+    import json
+    commit = kv.get("last_gate_commit")
+    raw = kv.get("last_gate_dirty")
+    stamp = kv.get("last_gate_recorded_at")
+    if commit is None or raw is None or stamp is None:
+        return None
+    if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
+        return None
+    try:
+        dirty = json.loads(raw)
+        recorded_at = float(stamp)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(dirty, dict) or recorded_at != recorded_at:
+        return None
+    for path, digest in dirty.items():
+        if not isinstance(path, str) or not path:
+            return None
+        if digest is not None and not isinstance(digest, str):
+            return None
+    return GateMarker(commit=commit, dirty=dict(dirty),
+                      recorded_at=recorded_at)
+
+
 @dataclass(frozen=True, slots=True)
 class _PlannedUpdate:
     run_id: str
@@ -537,6 +640,10 @@ class _PlannedUpdate:
     fixtures: dict
     ambient: object
     bad: frozenset
+    fingerprint: str | None = None
+    observers: dict = field(default_factory=dict)
+    gate: object = None
+    clear_gate: bool = False
 
 
 class SelectionStore:
@@ -646,8 +753,8 @@ class SelectionStore:
                                   "SELECT id, baseid, argname, scope"
                                   " FROM fixtures")}
             run_rows = conn.execute(
-                "SELECT run_id, recorded_at, compatibility, ambient"
-                " FROM runs").fetchall()
+                "SELECT run_id, recorded_at, compatibility, ambient,"
+                " fingerprint FROM runs").fetchall()
             digest_rows = conn.execute(
                 "SELECT run_id, path_id, digest FROM run_digests").fetchall()
             node_rows = conn.execute(
@@ -662,6 +769,11 @@ class SelectionStore:
             for _, path_id, _ in digest_rows:
                 if path_id in path_of:
                     used_paths.add(path_of[path_id])
+            observer_rows = conn.execute(
+                "SELECT nodeid, path FROM observers").fetchall()
+            kv = {row[0]: row[1] for row in conn.execute(
+                "SELECT key, value FROM kv WHERE key IN (?, ?, ?, ?)",
+                (*_GATE_KEYS, "last_full_inv"))}
             raw_ctxs = ([_unpack_ctx(row[4]) for row in node_rows]
                         + [_unpack_ctx(row[2]) for row in fixture_rows]
                         + [_unpack_ctx(row[3]) for row in run_rows])
@@ -709,27 +821,45 @@ class SelectionStore:
                                    data=datas, opaque=ctx.opaque)
 
             runs: dict[str, RunBaseline] = {}
-            for run_id, recorded_at, compatibility, ambient in run_rows:
+            for run_id, recorded_at, compatibility, ambient, fingerprint \
+                    in run_rows:
                 runs[run_id] = RunBaseline(
                     run_id=run_id, recorded_at=recorded_at,
                     compatibility=compatibility, digests={},
-                    ambient=remap(_unpack_ctx(ambient)))
+                    ambient=remap(_unpack_ctx(ambient)),
+                    fingerprint=(
+                        fingerprint if isinstance(fingerprint, str)
+                        and _FINGERPRINT.fullmatch(fingerprint) else None))
             for run_id, path_id, digest in digest_rows:
                 if run_id in runs and path_id in path_of:
                     path = path_of[path_id]
                     if path in path_index:
                         runs[run_id].digests[path_index[path]] = digest
 
-            nodes: dict[str, NodeRecord] = {}
+            # Every kept record per node, newest first by (recorded_at
+            # desc, run_id asc); ``nodes`` holds the newest of each.
+            gathered: dict[str, list[tuple[float, str, NodeRecord]]] = {}
             for nodeid, test_file, outcome, run_id, deps, fixtures in \
                     node_rows:
-                nodes[nodeid] = NodeRecord(
+                record = NodeRecord(
                     nodeid=nodeid, test_file=test_file, outcome=outcome,
                     run_id=run_id, deps=remap(_unpack_ctx(deps)),
                     fixtures=selection_ids(
                         fixture_index[fixture_key_of[f]]
                         for f in _unpack_ids(fixtures)
                         if f in fixture_key_of))
+                at = runs[run_id].recorded_at if run_id in runs else 0.0
+                gathered.setdefault(nodeid, []).append((at, run_id, record))
+            records: dict[str, tuple[NodeRecord, ...]] = {}
+            nodes: dict[str, NodeRecord] = {}
+            for nodeid, rows in gathered.items():
+                rows.sort(key=lambda row: (-row[0], row[1]))
+                records[nodeid] = tuple(row[2] for row in rows)
+                nodes[nodeid] = records[nodeid][0]
+
+            learned: dict[str, set[str]] = {}
+            for nodeid, path in observer_rows:
+                learned.setdefault(nodeid, set()).add(path)
 
             # N1: fixture_deps holds one row per (fixture, run), and a
             # narrowed re-record must not drop deps other retained runs'
@@ -738,8 +868,7 @@ class SelectionStore:
             # retained run's record into one union per fixture; opaque is
             # sticky. Rows merge oldest-first so run_id names the newest
             # contributing run deterministically.
-            recorded_at_of = {run_id: recorded_at
-                              for run_id, recorded_at, _, _ in run_rows}
+            recorded_at_of = {row[0]: row[1] for row in run_rows}
             ordered = sorted(
                 fixture_rows,
                 key=lambda row: (recorded_at_of.get(row[1], float("-inf")),
@@ -775,13 +904,21 @@ class SelectionStore:
                     fixture_index.items(), key=lambda item: item[1])))
             return DependencySnapshot(
                 vocabulary=vocabulary, runs=runs, nodes=nodes,
-                fixtures=fixtures_out, demotions=dict(demotions))
+                fixtures=fixtures_out, demotions=dict(demotions),
+                records=records,
+                observers={key: frozenset(value)
+                           for key, value in learned.items()},
+                gate=_read_gate(kv),
+                inventory=_unpack_inv(kv.get("last_full_inv")))
 
     def meta(self) -> SelectionStoreMeta:
         """Store facts for status lines (human only)."""
         with self._lock:
             conn = self._guard()
-            nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            nodes = conn.execute(
+                "SELECT COUNT(DISTINCT nodeid) FROM nodes").fetchone()[0]
+            observing = conn.execute(
+                "SELECT COUNT(DISTINCT nodeid) FROM observers").fetchone()[0]
             runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             newest = conn.execute(
                 "SELECT MAX(recorded_at) FROM runs").fetchone()[0]
@@ -808,32 +945,48 @@ class SelectionStore:
                 inactive_reason=kv.get("inactive_reason"),
                 audit_checked=int(kv.get("audit_checked", "0") or "0"),
                 audit_misses=int(kv.get("audit_misses", "0") or "0"),
-                demoted=int(demoted))
+                demoted=int(demoted), observers=int(observing))
 
     # -- update ------------------------------------------------------------
 
     def update(self, run, *, run_id: str, recorded_at: float,
                compatibility: str, digests: Mapping[str, str | None],
-               full: bool) -> None:
+               full: bool, fingerprint: str | None = None,
+               observers: Mapping[str, frozenset[str]] | None = None,
+               gate: GateMarker | None = None,
+               clear_gate: bool = False) -> int:
         """Record one run: one transaction replacing only the tests it ran.
 
-        Never fails for size: unreferenced cache goes first, then the
-        runs holding the fewest records (the newest run is kept); raises
-        ``capacity-exceeded`` only when even that cannot fit, after one
-        evict-and-retry. A lock held past the wait budget raises
-        retryable ``coordinator-unavailable`` and an I/O failure raises
-        ``state-unavailable`` (never a raw sqlite error).
+        The run's rows are inserted under the ``(nodeid, run_id)`` key and
+        every touched node is trimmed to its newest ``K`` rows (never the
+        row just written). ``fingerprint`` lands on the run row,
+        ``observers`` (node id -> learned paths) in the ``observers``
+        table and ``gate`` (or, with ``clear_gate`` or more dirty files
+        than ``MAX_GREEN_FILES``, a cleared marker) in kv, all in this one
+        transaction: a rejected update writes none of them. Returns the
+        observer rows the store cap evicted in it.
+
+        Never fails for size: unreferenced cache goes first, then surplus
+        records, then the runs holding the fewest records (the newest run
+        is kept); raises ``capacity-exceeded`` only when even that cannot
+        fit, after one evict-and-retry. A lock held past the wait budget
+        raises retryable ``coordinator-unavailable`` and an I/O failure
+        raises ``state-unavailable`` (never a raw sqlite error).
         """
         planned = self._plan_update(run, run_id=run_id,
                                     recorded_at=recorded_at,
                                     compatibility=compatibility,
-                                    digests=digests, full=full)
+                                    digests=digests, full=full,
+                                    fingerprint=fingerprint,
+                                    observers=observers, gate=gate,
+                                    clear_gate=clear_gate)
         with self._lock:
             conn = self._guard()
             try:
-                if self._apply_update(conn, planned):
+                evicted, lost = self._apply_update(conn, planned)
+                if evicted:
                     self._vacuum(conn)
-                return
+                return lost
             except sqlite3.Error as exc:
                 if not _is_full(exc):
                     _map_update_error(exc)
@@ -845,9 +998,10 @@ class SelectionStore:
                 self._evict_oldest(conn, exclude=planned.run_id)
                 self._vacuum(conn)
                 try:
-                    if self._apply_update(conn, planned):
+                    evicted, lost = self._apply_update(conn, planned)
+                    if evicted:
                         self._vacuum(conn)
-                    return
+                    return lost
                 except sqlite3.Error as retry_exc:
                     try:
                         conn.execute("ROLLBACK")
@@ -860,7 +1014,8 @@ class SelectionStore:
                     raise
 
     def _plan_update(self, run, *, run_id, recorded_at, compatibility,
-                     digests, full) -> _PlannedUpdate:
+                     digests, full, fingerprint=None, observers=None,
+                     gate=None, clear_gate=False) -> _PlannedUpdate:
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("run_id must be a 32-hex string")
         if isinstance(recorded_at, bool) or not isinstance(
@@ -877,6 +1032,18 @@ class SelectionStore:
                 raise ValueError("digests must be str or None")
         if not isinstance(full, bool):
             raise ValueError("full must be bool")
+        if not isinstance(clear_gate, bool):
+            raise ValueError("clear_gate must be bool")
+        if gate is not None and clear_gate:
+            raise ValueError("gate and clear_gate are mutually exclusive")
+        if fingerprint is not None and (
+                not isinstance(fingerprint, str)
+                or not _FINGERPRINT.fullmatch(fingerprint)):
+            raise ValueError("fingerprint must be 64 lowercase hex or None")
+        learned = self._check_observers(observers)
+        clear_gate = self._check_gate(gate, clear_gate)
+        if clear_gate:
+            gate = None
         try:
             vocabulary = run.vocabulary
             nodes = dict(run.nodes)
@@ -944,7 +1111,57 @@ class SelectionStore:
             compatibility=compatibility, digests=dict(digests), full=full,
             vocab_paths=vocab_paths, vocab_funcs=vocab_funcs,
             vocab_fixtures=vocab_fixtures, fixture_keys=fixture_keys,
-            nodes=nodes, fixtures=fixtures, ambient=ambient, bad=bad)
+            nodes=nodes, fixtures=fixtures, ambient=ambient, bad=bad,
+            fingerprint=fingerprint, observers=learned, gate=gate,
+            clear_gate=clear_gate)
+
+    @staticmethod
+    def _check_observers(observers) -> dict[str, frozenset[str]]:
+        if observers is None:
+            return {}
+        if not isinstance(observers, Mapping):
+            raise ValueError("observers must be a mapping")
+        learned: dict[str, frozenset[str]] = {}
+        for nodeid, paths in observers.items():
+            if not isinstance(nodeid, str) or not nodeid:
+                raise ValueError("observer node ids must be nonempty str")
+            if isinstance(paths, (str, bytes)):
+                raise ValueError("observer paths must be a collection")
+            try:
+                values = frozenset(paths)
+            except TypeError:
+                raise ValueError("observer paths must be a collection")
+            for path in values:
+                if not isinstance(path, str) or not path:
+                    raise ValueError("observer paths must be nonempty str")
+            if values:
+                learned[nodeid] = values
+        return learned
+
+    @staticmethod
+    def _check_gate(gate, clear_gate: bool) -> bool:
+        """Validate the marker; True when the keys are to be cleared (an
+        explicit request, or a dirty set over ``MAX_GREEN_FILES``)."""
+        if gate is None:
+            return clear_gate
+        try:
+            commit, dirty, stamp = gate.commit, gate.dirty, gate.recorded_at
+        except AttributeError:
+            raise ValueError("gate must be a GateMarker")
+        if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
+            raise ValueError("gate commit must be 40 or 64 lowercase hex")
+        if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+                or stamp != stamp):
+            raise ValueError("gate recorded_at must be a number")
+        if not isinstance(dirty, Mapping):
+            raise ValueError("gate dirty must be a mapping")
+        for path, digest in dirty.items():
+            if not isinstance(path, str) or not path:
+                raise ValueError("gate dirty paths must be nonempty str")
+            if digest is not None and not isinstance(digest, str):
+                raise ValueError("gate digests must be str or None")
+        from .lastgreen import MAX_GREEN_FILES
+        return len(dirty) > MAX_GREEN_FILES
 
     @staticmethod
     def _check_ctx(ctx, n_funcs: int, n_paths: int) -> None:
@@ -985,8 +1202,9 @@ class SelectionStore:
         SelectionStore._check_ctx(node.deps, n_funcs, n_paths)
 
     def _apply_update(self, conn: sqlite3.Connection,
-                      planned: _PlannedUpdate) -> bool:
-        """Run the update transaction; True when rows were evicted."""
+                      planned: _PlannedUpdate) -> tuple[bool, int]:
+        """Run the update transaction; (rows were evicted, observer rows
+        the store cap evicted)."""
         _begin_immediate(conn)
         try:
             path_ids = self._intern_paths(conn, planned)
@@ -997,15 +1215,19 @@ class SelectionStore:
                               fixture_ids)
             self._store_fixtures(conn, planned, path_ids, func_ids,
                                  fixture_ids)
+            self._trim_records(conn, planned)
             if planned.full:
                 self._prune_full(conn, planned)
+            self._store_observers(conn, planned)
+            lost = self._cap_observers(conn)
+            self._store_gate(conn, planned)
             conn.execute(
                 "DELETE FROM runs WHERE run_id NOT IN"
                 " (SELECT DISTINCT run_id FROM nodes)")
             self._prune_cache(conn)
             evicted = self._evict_to_target(conn, exclude=planned.run_id)
             conn.execute("COMMIT")
-            return evicted
+            return evicted, lost
         except BaseException:
             try:
                 conn.execute("ROLLBACK")
@@ -1091,9 +1313,9 @@ class SelectionStore:
         ambient = self._opaque(planned.ambient, planned, path_ids, func_ids)
         conn.execute(
             "INSERT OR REPLACE INTO runs(run_id, recorded_at,"
-            " compatibility, ambient) VALUES(?, ?, ?, ?)",
+            " compatibility, ambient, fingerprint) VALUES(?, ?, ?, ?, ?)",
             (planned.run_id, planned.recorded_at, planned.compatibility,
-             _pack_ctx(ambient)))
+             _pack_ctx(ambient), planned.fingerprint))
         conn.execute("DELETE FROM run_digests WHERE run_id = ?",
                      (planned.run_id,))
         for path, digest in planned.digests.items():
@@ -1111,7 +1333,8 @@ class SelectionStore:
         old = {row[0] for row in conn.execute(
             "SELECT nodeid FROM nodes WHERE run_id = ?", (planned.run_id,))}
         for nodeid in old - fresh:
-            conn.execute("DELETE FROM nodes WHERE nodeid = ?", (nodeid,))
+            conn.execute("DELETE FROM nodes WHERE nodeid = ? AND run_id = ?",
+                         (nodeid, planned.run_id))
         for nodeid, node in planned.nodes.items():
             deps = self._opaque(node.deps, planned, path_ids, func_ids)
             refs = selection_ids(
@@ -1162,8 +1385,84 @@ class SelectionStore:
             conn.execute(
                 "DELETE FROM nodes WHERE nodeid NOT IN"
                 " (SELECT nodeid FROM keep_nodes)")
+            conn.execute(
+                "DELETE FROM observers WHERE nodeid NOT IN"
+                " (SELECT nodeid FROM keep_nodes)")
         finally:
             conn.execute("DROP TABLE keep_nodes")
+
+    @staticmethod
+    def _trim_records(conn: sqlite3.Connection,
+                      planned: _PlannedUpdate) -> None:
+        """Keep at most ``K`` rows for every node the run wrote: the oldest
+        by ``runs.recorded_at`` go, the row just written never does."""
+        conn.execute(
+            "DELETE FROM nodes WHERE rowid IN (SELECT rid FROM ("
+            " SELECT nodes.rowid AS rid, ROW_NUMBER() OVER ("
+            "  PARTITION BY nodes.nodeid ORDER BY nodes.run_id = ?1 DESC,"
+            "  runs.recorded_at DESC, nodes.run_id ASC) AS rn"
+            " FROM nodes JOIN runs ON runs.run_id = nodes.run_id"
+            " WHERE nodes.nodeid IN"
+            "  (SELECT nodeid FROM nodes WHERE run_id = ?1))"
+            " WHERE rn > ?2)",
+            (planned.run_id, SELECTION_RECORDS_PER_NODE))
+
+    @staticmethod
+    def _store_observers(conn: sqlite3.Connection,
+                         planned: _PlannedUpdate) -> None:
+        """Merge learned rows; a node past its per-node cap becomes the
+        single ``*`` row (it widens, so it is not eviction)."""
+        star = SELECTION_OBSERVER_ALL
+        for nodeid, paths in planned.observers.items():
+            have = {row[0] for row in conn.execute(
+                "SELECT path FROM observers WHERE nodeid = ?", (nodeid,))}
+            merged = have | set(paths)
+            if (star in merged
+                    or len(merged) > SELECTION_OBSERVER_ROWS_PER_NODE):
+                conn.execute("DELETE FROM observers WHERE nodeid = ?",
+                             (nodeid,))
+                have = set()
+                merged = {star}
+            for path in sorted(merged):
+                if path in have and path not in paths:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO observers(nodeid, path,"
+                    " learned_at) VALUES(?, ?, ?)",
+                    (nodeid, path, planned.recorded_at))
+
+    @staticmethod
+    def _cap_observers(conn: sqlite3.Connection) -> int:
+        """Enforce the store-wide row cap, oldest ``learned_at`` first;
+        returns how many rows went (reported, never silent)."""
+        total = conn.execute("SELECT COUNT(*) FROM observers").fetchone()[0]
+        excess = int(total) - SELECTION_OBSERVER_ROWS_MAX
+        if excess <= 0:
+            return 0
+        conn.execute(
+            "DELETE FROM observers WHERE rowid IN (SELECT rowid FROM"
+            " observers ORDER BY learned_at ASC, nodeid ASC, path ASC"
+            " LIMIT ?)", (excess,))
+        return excess
+
+    @staticmethod
+    def _store_gate(conn: sqlite3.Connection,
+                    planned: _PlannedUpdate) -> None:
+        import json
+        gate = planned.gate
+        if gate is not None:
+            rows = (
+                ("last_gate_commit", gate.commit),
+                ("last_gate_dirty", json.dumps(
+                    dict(sorted(dict(gate.dirty).items())),
+                    ensure_ascii=True, separators=(",", ":"))),
+                ("last_gate_recorded_at", repr(float(gate.recorded_at))))
+            conn.executemany(
+                "INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)", rows)
+        elif planned.clear_gate:
+            conn.execute(
+                "DELETE FROM kv WHERE key IN (%s)"
+                % ",".join("?" * len(_GATE_KEYS)), _GATE_KEYS)
 
     def _prune_cache(self, conn: sqlite3.Connection) -> None:
         cutoff = time.time() - _CACHE_PRUNE_AFTER_S
@@ -1210,6 +1509,51 @@ class SelectionStore:
             " ORDER BY kept ASC, runs.recorded_at ASC, runs.rowid ASC")]
 
     @staticmethod
+    def _surplus_rows(conn: sqlite3.Connection,
+                      exclude: str) -> list[tuple[int, str]]:
+        """``(rowid, run_id)`` of every surplus record, oldest run first:
+        rows of nodes holding at least two, never a node's newest row and
+        never a row of the run being written."""
+        return [(int(row[0]), row[1]) for row in conn.execute(
+            "SELECT rid, run_id FROM ("
+            " SELECT nodes.rowid AS rid, nodes.run_id AS run_id,"
+            "  runs.recorded_at AS at, ROW_NUMBER() OVER ("
+            "   PARTITION BY nodes.nodeid ORDER BY runs.recorded_at DESC,"
+            "   nodes.run_id ASC) AS rn"
+            "  FROM nodes JOIN runs ON runs.run_id = nodes.run_id)"
+            " WHERE rn > 1 AND run_id != ?"
+            " ORDER BY at ASC, run_id DESC, rid ASC", (exclude,))]
+
+    @staticmethod
+    def _drop_rows(conn: sqlite3.Connection, rowids: list[int]) -> None:
+        for chunk in _chunks(rowids, 500):
+            conn.execute("DELETE FROM nodes WHERE rowid IN (%s)"
+                         % ",".join("?" * len(chunk)), tuple(chunk))
+
+    def _drop_surplus(self, conn: sqlite3.Connection, *,
+                      exclude: str) -> bool:
+        """Evict surplus records oldest first until the size target is
+        met; True when any row went."""
+        if self._db_size(conn) <= SELECTION_STORE_TARGET_BYTES:
+            return False
+        rows = self._surplus_rows(conn, exclude)
+        dropped = False
+        for chunk in _chunks(rows, _SURPLUS_BATCH):
+            if self._db_size(conn) <= SELECTION_STORE_TARGET_BYTES:
+                break
+            self._drop_rows(conn, [rid for rid, _ in chunk])
+            dropped = True
+        if dropped:
+            conn.execute(
+                "DELETE FROM runs WHERE run_id NOT IN"
+                " (SELECT DISTINCT run_id FROM nodes)")
+            try:
+                conn.execute("PRAGMA incremental_vacuum").fetchall()
+            except sqlite3.Error:
+                pass
+        return dropped
+
+    @staticmethod
     def _delete_run(conn: sqlite3.Connection, run_id: str) -> None:
         conn.execute("DELETE FROM nodes WHERE run_id = ?", (run_id,))
         conn.execute(
@@ -1230,6 +1574,7 @@ class SelectionStore:
         cap still bounds it (SQLITE_FULL takes the update's retry path).
         """
         evicted = self._drop_unreferenced_cache(conn, to_target=True)
+        evicted = self._drop_surplus(conn, exclude=exclude) or evicted
         incoming = conn.execute(
             "SELECT COUNT(*) FROM nodes WHERE run_id = ?",
             (exclude,)).fetchone()[0]
@@ -1250,18 +1595,29 @@ class SelectionStore:
 
     def _evict_oldest(self, conn: sqlite3.Connection, *,
                       exclude: str) -> None:
-        """Make room after SQLITE_FULL: every unreferenced cache row, or,
-        when there is none, the run holding the fewest records."""
+        """Make room after SQLITE_FULL, in the eviction order: every
+        unreferenced cache row, else the surplus records of the oldest run
+        holding any, else the run holding the fewest records."""
         try:
             _begin_immediate(conn)
         except sqlite3.Error:
             return
         try:
             if not self._drop_unreferenced_cache(conn, to_target=False):
-                victim = next((rid for rid, _ in self._eviction_order(conn)
-                               if rid != exclude), None)
-                if victim is not None:
-                    self._delete_run(conn, victim)
+                surplus = self._surplus_rows(conn, exclude)
+                if surplus:
+                    oldest = surplus[0][1]
+                    self._drop_rows(conn, [rid for rid, run in surplus
+                                           if run == oldest])
+                    conn.execute(
+                        "DELETE FROM runs WHERE run_id NOT IN"
+                        " (SELECT DISTINCT run_id FROM nodes)")
+                else:
+                    victim = next((rid for rid, _ in
+                                   self._eviction_order(conn)
+                                   if rid != exclude), None)
+                    if victim is not None:
+                        self._delete_run(conn, victim)
             conn.execute("COMMIT")
         except BaseException:
             try:
