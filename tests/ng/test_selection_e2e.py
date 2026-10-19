@@ -210,14 +210,11 @@ def test_effectful_change_selects_static_reach(recorded, case):
 
     result, err = _changed(case, domain, root, "-v")
 
-    # A module-level effect taints every record stale, so the dynamic
-    # decision selects all recorded tests and D8 converts to full. The
-    # -v unit line proves the effectful-module mechanism behind it.
+    # Spec 2026-10-19 Rollout (oracle change): a module-level effect no
+    # longer selects static reach; the reached nodes are T2 (deferred),
+    # so nothing runs now. Deferral wording belongs to the cli layer.
     assert result.code == 0, err[-2000:]
-    assert ("→ full suite: 7 of 7 recorded tests reach "
-            "full_ratio 0.7 (dynamic)") in err
-    assert "changed module pkg/core.py" in err
-    assert _markers(root) == _ALL
+    assert _markers(root) == set()
 
 
 def test_empty_store_reports_static_note(case):
