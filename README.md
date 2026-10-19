@@ -27,7 +27,7 @@ ptest: server · changed since last green run (93843fe, 23s ago): tests/fullon_c
 ptest: passed · 7 tests · 6.6s
 ptest: api · no changes
 ptest: web · no changes
-ptest: total · passed · 6.6s · next: ptest --full before handoff
+ptest: total · passed · 6.6s · gate at spec end
 ```
 
 ---
@@ -111,15 +111,15 @@ See [docs/installation.md](docs/installation.md) for the offline
 cd your-repo
 ptest init          # detects runners, writes .ptest.toml, offers agent guidance
 ptest               # after each edit: runs the tests your change reaches
-ptest --full        # once, before you hand the change off
+ptest --full        # once, at the end of the spec or chain
 ```
 
 Bare `ptest` runs the tests your change reaches:
 changes since the last green run (or, before the first green run, since your
 branch left the default branch). No baseline or coverage step is needed.
-Run `ptest --full --cov` once before handoff.
+Run `ptest --full --cov` once, at the end of the spec or chain.
 
-Before merging, bring the base branch into your branch, run `ptest --full`,
+At the end of the spec or chain, before merging, bring the base branch into your branch, run `ptest --full`,
 fix and rerun until it is green, then fast-forward the base branch. For pytest
 projects a green full gate is shared by every checkout of the project, so
 `ptest --full` on the fast-forwarded base prints
@@ -172,7 +172,7 @@ Always run ptest from the repository root.
 | The changed tests under one folder only | `ptest api/tests` |
 | One file or one test — always runs it | `ptest api/tests/test_billing.py` · `ptest api/tests/test_billing.py::test_tax` |
 | Every test under one folder | `ptest --full api/tests` |
-| The integrated gate, once before handoff | `ptest --full --cov` |
+| The integrated gate, once at the end of the spec or chain | `ptest --full --cov` |
 
 Any path routes to the nearest `.ptest.toml`, so every sub-project works the
 same way: `ptest web/src`, `ptest --full launchpad`, `ptest server/tests/unit`.
@@ -189,7 +189,7 @@ coverage_args = ["--cov", "--cov-report", "term"]
 ```
 
 `--cov` adds them to one run, with the project's `fail_under` gate on a full
-run: `ptest --full --cov` is the handoff gate. `ptest` and `ptest <path>`
+run: `ptest --full --cov` is the gate, run once at the end of the spec or chain. `ptest` and `ptest <path>`
 never measure coverage unless you pass `--cov`; a partial run with `--cov`
 reports coverage but never applies the whole-suite gate. Only pytest-cov
 options are accepted there (`--cov`, `--cov-report`, `--cov-config`,
@@ -233,11 +233,11 @@ ptest
 
 # nothing changed since the last green run
 ptest
-# ptest: no changes vs HEAD — nothing to test · ptest --full runs everything
+# ptest: no changes vs HEAD — nothing to test
 
 # only look at one area
 ptest api/tests/unit
-# ptest: api · no changes under api/tests/unit — nothing to test · ptest --full api/tests/unit runs all of them
+# ptest: api · no changes under api/tests/unit — nothing to test
 
 # run one test, no matter what changed
 ptest api/tests/test_billing.py::test_tax
@@ -283,7 +283,7 @@ load. The agent guide tells coding agents never to add them on their own.
    them.
 4. **When to widen.** Lockfiles, `conftest.py`, pytest/ptest config and
    declared `full_triggers` run the whole project's suite, as does a change
-   that reaches more than 70% of the test files (`full_ratio`).
+   that reaches more than 70% of the test files (`full_ratio`; `full_ratio` and `MAX_SELECTED` apply only to the static engine).
 5. **Vitest** projects delegate to `vitest run --changed <base>`.
 
 Untouched projects in a monorepo print `<project> · no changes` and run
@@ -386,7 +386,11 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | `waiting for N slots …` / `waiting: <reason>` | queued behind other ptest runs (the reason names what holds it); it starts by itself |
 | `setup: uv sync --locked (first run)` | declared setup is running |
 | `passed · N tests` / `failed · …` | the verdict |
-| `next: ptest --full before handoff` / `next: ptest --full --cov before handoff` | the gate is still to do (with coverage when the project declares `coverage_args`) |
+| `deferred N (<reason>)` · `nothing to run now` · `no tests needed` | the change may reach N tests this iteration run did not run; they stay deferred until the gate runs them, so never run `ptest --full` during a task to clear the count |
+| `gate at spec end` / `gate at spec end (no gate recorded)` | the one gate runs once, at the end of the spec or chain |
+| `full suite (<reason>)` | this iteration run had to run everything |
+| `coverage gate still owed: ptest --full --cov` | the full run passed without `--cov`; run it once at the end of the spec or chain |
+| `selection gate: ran N previously deferred tests · F failed · O observers learned` | a full run ran tests earlier iteration runs deferred |
 | `coverage not configured — add [runner] coverage_args to …` | `--cov` had nothing to add there; the run went ahead without coverage |
 | `incomplete (exit 70)` + reason | ptest could not prove the result; rerun once, report if it repeats |
 | `post-test-stall: tests finished but runner processes stayed idle …` | tests finished, processes hung in teardown/shutdown (exit 70); stack dumps printed above — rerun once alone, report a repeat with the dump; lasting change: `[runner] stall_timeout` in `.ptest.toml` (default 120, `0` disables, `0` or `10..86400`, no CLI flag) |

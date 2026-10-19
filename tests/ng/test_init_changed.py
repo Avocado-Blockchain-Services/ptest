@@ -83,12 +83,12 @@ def test_repository_guide_default_loop_is_changed():
 
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    assert len(guide.splitlines()) <= 109
+    assert len(guide.splitlines()) <= 119
     assert "| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches |" in guide
     assert "| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |" in guide
     assert "| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |" in guide
     assert "| All tests under one folder | `ptest --full <folder>` |" in guide
-    assert ("| Before handoff or merge | bring the base branch in first, then "
+    assert ("| When the whole spec or chain is finished (the orchestrator, once) | bring the base branch in first, then "
             "`ptest --full --cov` (adds the project's coverage and its gate; never "
             "pass `--cov` while iterating); fix and rerun until green |") in guide
     lowered = guide.lower()
@@ -118,7 +118,7 @@ def test_skill_template_defaults_to_changed():
     assert "| `ptest <folder>` | changed tests under that folder |" in text
     assert "| `ptest <file>` | that file, always |" in text
     assert "| `ptest --full <folder>` | all tests under that folder |" in text
-    assert "| `ptest --full --cov` | integrated gate, once before handoff |" in text
+    assert "| `ptest --full --cov` | integrated gate, once at the end of the spec or chain, by the orchestrator |" in text
     assert "docs/ptest-agent.md" in text
 
 
@@ -173,4 +173,4 @@ def test_getting_started_shows_changed():
               / "README.md").read_text(encoding="utf-8")
     assert "`ptest` runs the tests your change reaches" in readme
     assert "changes since the last green run" in readme
-    assert "`ptest --full --cov` once before handoff" in readme
+    assert "`ptest --full --cov` once, at the end of the spec or chain" in readme

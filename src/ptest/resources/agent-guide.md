@@ -30,7 +30,7 @@ time-network.
 Preserve assertions, test inventory, test semantics and the existing coverage
 gate; never add tests only to raise coverage. During repair,
 run the scoped `ptest` command for the affected behavior. After the repairs
-are integrated, run one `ptest --full --cov` final gate. A text-pattern change alone
+are integrated, run one `ptest --full --cov` final gate, once at the end of the spec or chain. A text-pattern change alone
 is not proof that isolation works.
 
 When validated test timings are available, under 0.5 seconds is healthy;
@@ -60,6 +60,18 @@ Dependency-recorded selection narrows a changed run to the tests whose recorded
 dependencies changed (`… (dynamic · …)`); without usable records the static fallback
 (`… (static: <reason> · …)`) selects by imports instead, and a full run prints a
 `ptest: selection audit: …` line when it pins misses to static reach. A changed green,
-dynamic or static, is iteration only; the `ptest --full --cov` final gate still applies.
-`--cov` adds the project's coverage (`[runner] coverage_args`) and its gate to that one
-run; iteration runs never measure coverage.
+dynamic or static, is iteration only; only the spec's one `ptest --full --cov` gate
+completes it. It runs once, at the end of the spec or chain, by the orchestrator, never per
+task or handoff. `--cov` adds the project's coverage (`[runner] coverage_args`) and its gate to
+that one run; iteration runs never measure coverage.
+
+An end line `deferred N (<reason>) · gate at spec end` (also `nothing to run now · deferred N`,
+`no tests needed · deferred N`, and `gate at spec end (no gate recorded)` when no gate has been
+recorded) means ptest proved nothing about those N tests: they stay deferred until the gate runs
+them. Never run `ptest --full` during a task to clear a deferred count. `full suite (<reason>)`
+means that iteration run had to run everything; nothing to do. `coverage gate still owed: ptest
+--full --cov` is for the end of the spec. After integrating task commits onto the chain, the
+chain owner runs one bare `ptest` at the chain tip; it is an iteration run, never a gate, and it
+never clears deferred tests. A run that prints a no-run line writes no `--result-json` and leaves
+an existing file at that path untouched. Exit code 0 means done for the task; the spec's one
+`--full --cov` gate completes it.

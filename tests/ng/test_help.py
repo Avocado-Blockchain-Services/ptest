@@ -179,7 +179,10 @@ def test_user_facing_text_has_no_banned_terms():
     bodies.append((root / "README.md").read_text(encoding="utf-8"))
     for body in bodies:
         assert body is not None
-        lowered = body.lower()
+        # The doctor-era word stays banned; the 0.7 `ambient_fingerprint`
+        # setting and the `-v fingerprint:` line are documented by name (R35).
+        lowered = body.lower().replace("ambient_fingerprint", "").replace(
+            "-v fingerprint:", "")
         assert "fingerprint" not in lowered
         assert "ready with caveats" not in lowered
         assert "expected:" not in lowered

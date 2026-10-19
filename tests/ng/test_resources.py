@@ -51,7 +51,7 @@ def test_agent_guide_describes_sampled_review_first():
 def test_repository_guide_is_short_structured_and_links_internals_out():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    assert len(guide.splitlines()) <= 109
+    assert len(guide.splitlines()) <= 119
     for section in ("## The loop", "## Monorepo",
                     "## Reading ptest output", "## Exit codes",
                     "## Test-quality rules", "## Reporting"):
@@ -69,7 +69,10 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
                 "no tests affected", "tests reach these changes",
                 "selection audit:", "nothing to test",
                 "no changes under <folder>",
-                "next: ptest --full before handoff",
+                "deferred N (<reason>)", "nothing to run now",
+                "gate at spec end (no gate recorded)", "full suite (<reason>)",
+                "no tests needed", "coverage gate still owed",
+                "selection gate:", "-v fingerprint:",
                 "<project> · no changes", "waiting for N slots",
                 "setup failed", "passed · N tests",
                 "incomplete (exit 70)",
@@ -141,7 +144,7 @@ def test_repository_guide_documents_post_test_stall():
     assert "[runner] stall_timeout" in flat
     assert "default 120" in flat
     assert "0 disables" in flat
-    assert len(guide.splitlines()) <= 109
+    assert len(guide.splitlines()) <= 119
 
 
 def test_shipped_guides_never_mention_repo_internal_workflow():

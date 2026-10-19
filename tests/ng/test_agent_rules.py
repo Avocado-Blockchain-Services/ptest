@@ -177,7 +177,7 @@ def test_repository_guide_states_assessment_only_authority():
     assert "It uses requested models Codex `gpt-6-sol` and Claude `opus` by default" in flat
     assert "Timing, selection, and parallel-execution items use ptest's own facts" in flat
     assert "omitted decisive callers or failure paths remain unknown" in flat
-    assert len(guide.splitlines()) <= 109
+    assert len(guide.splitlines()) <= 119
 
 
 def test_local_repair_guide_has_no_repo_internal_workflow():
@@ -1338,3 +1338,103 @@ def test_released_f478189_guide_upgrades_in_place(tmp_path):
     (guide_dir / "ptest-agent.md").write_bytes(old + b"\n# user note\n")
     with pytest.raises(Problem, match="already exists"):
         apply(tmp_path)
+
+
+def test_released_eec56bd_guide_upgrades_in_place(tmp_path):
+    """Oracle: D13. The 0.6.8 guide (sha fe34d675…) upgrades, not conflicts.
+
+    The fixture is the exact committed bytes of 5bf685a; it is registered
+    in the real `_PREVIOUS_GUIDE_SHA256S` (no monkeypatch).
+    """
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+    from ptest.contracts import Problem
+
+    fixture = (Path(__file__).resolve().parent / "fixtures" / "previous-guides"
+               / "eec56bd-ptest-agent.md")
+    old = fixture.read_bytes()
+    assert hashlib.sha256(old).hexdigest() == (
+        "fe34d675cd084be355eed5e5f71dc7c8f42a4fe1029e1c2d02802352dc165938")
+    assert old != rules_module._guide()
+    assert rules_module._guide_kind(
+        old.decode("utf-8"), rules_module._guide()) == "previous"
+
+    guide_dir = tmp_path / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+
+    result = apply(tmp_path)
+
+    assert result.changed is True
+    assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
+
+    (guide_dir / "ptest-agent.md").write_bytes(old + b"\n# user note\n")
+    with pytest.raises(Problem, match="already exists"):
+        apply(tmp_path)
+
+
+def test_init_upgrades_every_shipped_skill_version_in_place(tmp_path):
+    """Oracle: R35. Every recognised previous skill, including 0.6.8, upgrades.
+
+    Walks `_previous_skill_bytes` for every provider: each version is
+    written at the canonical skill path and `apply` must rewrite it to the
+    current `_provider_text`, never raise already-exists. The 0.6.8 bytes
+    are pinned by their gate row so a no-op `_pre_one_gate` would fail.
+    """
+    import ptest.agent_rules as rules_module
+
+    providers = {
+        "claude": ".claude/skills/ptest/SKILL.md",
+        "codex": ".agents/skills/ptest/SKILL.md",
+        "opencode": ".opencode/skills/ptest/SKILL.md",
+        "gemini": ".gemini/skills/ptest/SKILL.md",
+    }
+    for provider, relative in providers.items():
+        previous = rules_module._previous_skill_bytes(provider)
+        assert rules_module._pre_one_gate_provider_text(provider) in previous
+        assert b"integrated gate, once before handoff |\n" in (
+            rules_module._pre_one_gate_provider_text(provider))
+        assert rules_module._pre_one_gate_provider_text(provider) != (
+            rules_module._provider_text(provider))
+        for index, old in enumerate(previous):
+            root = tmp_path / f"{provider}-{index}"
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(old)
+            result = apply(root, agents=(provider,))
+            assert result.changed is True, (provider, index)
+            assert target.read_bytes() == rules_module._provider_text(provider)
+
+
+def test_current_skill_names_the_end_of_spec_gate():
+    """Oracle: R35. The current skill says the gate runs once, at the end."""
+    import ptest.agent_rules as rules_module
+
+    for provider in ("claude", "codex", "opencode", "gemini"):
+        text = rules_module._provider_text(provider).decode("utf-8")
+        assert ("| `ptest --full --cov` | integrated gate, once at the end of "
+                "the spec or chain, by the orchestrator |") in text
+        assert "Never run `ptest --full` during a task" in text
+        assert "once before handoff" not in text
+
+
+def test_repository_guides_are_byte_identical_and_state_one_gate():
+    """Oracle: R35. docs and resource guide match; the one-gate wording is in both."""
+    root = Path(__file__).resolve().parent.parent.parent
+    docs = (root / "docs" / "ptest-agent.md").read_bytes()
+    resource = (root / "src" / "ptest" / "resources"
+                / "repository-agent-guide.md").read_bytes()
+    assert docs == resource
+    text = docs.decode("utf-8")
+    flat = " ".join(text.split())
+    assert "| When the whole spec or chain is finished (the orchestrator, once) |" in text
+    assert "Before handoff or merge" not in text
+    assert ("only the spec's one `ptest --full --cov` gate completes it; it runs "
+            "once, at the end of the chain, by the orchestrator, never per task "
+            "or handoff") in flat
+    assert "Never run `ptest --full` during a task to clear a deferred count" in flat
+    assert "chain owner runs one bare `ptest` at the chain tip" in flat
+    assert "| 0 | pass | Done; the spec's one `--full --cov` gate completes it. |" in text
+    assert "writes no result document and leaves any existing file at that path untouched" in flat
+    assert "next: ptest --full" not in text
