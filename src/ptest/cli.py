@@ -3259,10 +3259,12 @@ def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | No
 
     Skipped children (an unchanged full gate) are reported as a note,
     never as freshly run tests. ``deferred`` is the one summed note of the
-    children's deferred tests (R31, Decision 10).
+    children's deferred tests (R31, Decision 10). A child that ran nothing
+    (no counts) adds no tests, so it never hides the others' counts.
     """
     total_counts = _summed_counts(
-        [counts for _, _, counts in child_outcomes])
+        [counts for _, status, counts in child_outcomes
+         if not (counts is None and status is C.Status.NO_TESTS_NEEDED)])
     status = _worst_status(
         [outcome for _, outcome, _ in child_outcomes])
     hint = (next_step is None

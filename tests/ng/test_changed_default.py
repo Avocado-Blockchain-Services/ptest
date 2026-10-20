@@ -1337,3 +1337,30 @@ def test_monorepo_conditional_child_executes_and_total_uses_its_result(
     (total,) = [line for line in lines if line.startswith("ptest: total")]
     assert "deferred 3 across 1 children" in total
     assert total.endswith("gate at spec end")
+
+
+def test_monorepo_total_keeps_counts_when_a_child_runs_nothing(
+        tmp_path, monkeypatch, capsys, monorepo):
+    # Bug (persea trial of 0.7.0): R10 plans every clean child, and a child
+    # that runs nothing has no counts, which made the total line drop the
+    # executed child's "N tests". A child that ran nothing adds no tests.
+    api = _tiered("selected", changed=("api/x.py",),
+                  files=("tests/test_a.py",),
+                  selection=_tier_report(deferred=5, run_now=2))
+    web = _tiered("none", selection=_tier_report(deferred=0))
+    _tiered_monorepo(tmp_path, monkeypatch, monorepo, {"api": api, "web": web})
+
+    def fake_execute(domain, config, request):
+        return types.SimpleNamespace(
+            reasons=(), exit_code=0, status=C.Status.PASSED,
+            counts=C.Counts(collected=2, executed=2, passed=2),
+            selection=_tier_report(deferred=5, run_now=2))
+
+    monkeypatch.setattr("ptest.operations.execute", fake_execute)
+
+    assert main(()) == 0
+
+    lines = capsys.readouterr().err.splitlines()
+    (total,) = [line for line in lines if line.startswith("ptest: total")]
+    assert total.startswith("ptest: total · passed · 2 tests · "), total
+    assert "deferred 5 across 1 children" in total
