@@ -950,20 +950,36 @@ def _store_files_bytes(project: Project) -> bytes:
     return b"".join(parts)
 
 
-def test_writing_fingerprint_command_fails_closed(recorded):
-    """A fingerprint command that writes an input (`app/settings.py`)
-    changes the checkout under the run: the run ends `incomplete` with
-    `changed-during-run` (exit 70), never `no tests needed` or green."""
+def test_writing_fingerprint_command_fails_closed(recorded, tmp_path):
+    """R43 (named negative contract): a fingerprint command that writes an
+    input (`app/settings.py`) changes the checkout under the run: the run
+    ends `incomplete` with `changed-during-run` (exit 70), never
+    `no tests needed` or green.
+
+    The selective path with a kept-deferred conditional observer, where
+    the R44 no-launch stop would otherwise end the run at exit 0 and no
+    runner-side guard can trip. The writer is committed by the reseed (an
+    uncommitted `.ptest.toml` is a full trigger, R46) and only writes once
+    its flag, outside the checkout, exists; its stdout is constant, so the
+    fingerprint stays unchanged and the stop is reached."""
     recorded.learned()
+    flag = tmp_path / "fp-write.flag"
     writer = [sys.executable, "-c",
+              "import os, sys; sys.stdout.write('fp\\n'); "
+              f"os.path.exists({str(flag)!r}) and "
               "open('app/settings.py', 'a').write('# touched\\n')"]
-    recorded.reseed(["age", "email", "name"], None)
-    recorded.set_fingerprint(writer)  # first used by the run below
+    recorded.reseed(["age", "email", "name"], writer)  # flag absent: green
+    assert "# touched" not in (
+        recorded.root / "app" / "settings.py").read_text()
+    flag.write_text("")
     recorded.add_static_norm()
 
     run = recorded.run("--result-json", "r.json", "-v", "--changed",
                        timeout=CHANGED_TIMEOUT)
 
+    assert "full suite" not in run.err, run.err[-2000:]
+    assert "fingerprint: unchanged · 1 observer kept deferred" in run.err, (
+        run.err[-2000:])  # the R44 stop path was reached
     assert run.code == 70, run.err[-2000:]
     assert "changed-during-run" in run.err, run.err[-2000:]
     assert re.search(r"^ptest: incomplete\b", run.err, re.M), run.err[-2000:]

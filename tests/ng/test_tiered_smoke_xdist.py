@@ -161,7 +161,7 @@ def test_deferred_tests_never_counted_as_passed(recorded):
     selection = run.selection
     assert selection["run_now"] == 2
     assert selection["deferred"] == 18
-    counted = [value for key, value in run.data.items()
-               if re.search(r"passed|tests|count", key)
-               and isinstance(value, int)]
-    assert all(value <= 2 for value in counted), run.data
+    counts = run.data["counts"]
+    assert counts is not None, run.data
+    assert counts["passed"] == 2, counts
+    assert counts["executed"] == 2, counts
