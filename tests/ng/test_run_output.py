@@ -1115,7 +1115,7 @@ def test_gate_runs_every_deferred_test(case, recorded_project):
     # deferred tests, clears the deferral, and the next iteration line is clean.
     domain, root = recorded_project
     core = root / "pkg" / "core.py"
-    core.write_text(_CORE + "\nprint('effect-marker')\n")
+    core.write_text(_CORE + "\nEFFECT_MARKER = 1\n")
 
     iteration = case.invoke(domain, root, "--changed",
                             timeout=_CHANGED_TIMEOUT)
