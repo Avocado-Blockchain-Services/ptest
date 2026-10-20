@@ -993,6 +993,8 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 6f3ac15 (0.7.0 branch, T5): one-gate guide before the R44 fingerprint row fix.
+    "163c9d0b41d75ce124142e5a3ed1edc62a9d942c3630616a5473bcbf59c58495",
     # 5bf685a (0.6.8; shipped since eec56bd 0.6.0): guide before one-gate wording.
     "fe34d675cd084be355eed5e5f71dc7c8f42a4fe1029e1c2d02802352dc165938",
     # 0.5.3: guide before coverage on request (handoff was plain --full).
