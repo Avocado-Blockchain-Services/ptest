@@ -20,11 +20,8 @@ def main() -> int:
     failure = os.environ.pop("GUARD_FAILURE", "")
     stats_path = os.environ.pop("GUARD_STATS", "")
     advance = float(os.environ.pop("GUARD_ADVANCE_AFTER_FACTS", "0"))
-    decision_timeout = os.environ.pop("GUARD_DECISION_TIMEOUT", "")
     scan_limit_after_phase = os.environ.pop(
         "GUARD_SCAN_LIMIT_AFTER_PHASE", "")
-    if decision_timeout:
-        guard.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = float(decision_timeout)
     stall_poll = os.environ.pop("GUARD_STALL_POLL", "")
     dump_wait = os.environ.pop("GUARD_DUMP_WAIT", "")
     stall_timeout = os.environ.pop("GUARD_STALL_TIMEOUT", "")

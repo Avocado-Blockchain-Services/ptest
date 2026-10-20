@@ -165,15 +165,13 @@ class Harness:
         return prepared
 
     def start(self, *, stage="", raw=None, queued=None, failure="", stats=False,
-              advance=0, decision_timeout=None,
+              advance=0,
               scan_limit_after_phase=None, stall_poll=None, dump_wait=None,
               stall_timeout=None):
         env = dict(os.environ, GUARD_CONTROL_FD=str(self.control_guard.fileno()),
                    GUARD_MANIFEST_FD=str(self.manifest_read),
                    GUARD_FAILURE=failure,
                    GUARD_ADVANCE_AFTER_FACTS=str(advance),
-                   GUARD_DECISION_TIMEOUT=("" if decision_timeout is None
-                                           else str(decision_timeout)),
                    GUARD_STALL_POLL=("" if stall_poll is None
                                      else str(stall_poll)),
                    GUARD_DUMP_WAIT=("" if dump_wait is None
