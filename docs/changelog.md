@@ -7,9 +7,10 @@
   matter (tier T1) and defers the rest (tier T2: shared-file, data and
   static-reach guesses). Vitest changed delegation is unchanged. Five parts,
   numbered as in the spec:
-  - P1: evidence tiers. Iteration runs never widen to a large static or
-    ratio-driven set; the old `full_reason` widening is gone, and what was
-    deferred is reported by reason and by file.
+  - P1: evidence tiers. Dynamic iteration runs never widen to a large static
+    or ratio-driven set (the static fallback still widens by `full_ratio`);
+    the old `full_reason` widening is gone, and what was deferred is
+    reported by reason and by file.
   - P2: observers. The gate (`ptest --full`) runs the deferred tests, learns
     which of them really depend on the change (learned observers), and
     unlearns demoted ones. `[selection] observers` declares paths whose
@@ -45,6 +46,14 @@
   median of 3.13 s, against 2.99 s before this release (about 0.14 s added).
   The 1.5 s warm budget from the 0.5 spec is not met on that synthetic
   project, before or after this release. No real repository was used.
+  With empty-diff planning (R10) a bare `ptest` at a monorepo root now plans
+  each clean pytest child, so it can take a few seconds per child where
+  0.6.8 printed `no changes` at once.
+- Under pytest-cov (the advanced bridge path) selection now records real test
+  outcomes; before, every node was recorded `unknown`. One-time upgrade cost:
+  the first bare `ptest` after upgrading such a project reruns those
+  previously-`unknown` nodes once (once per clean monorepo child); later runs
+  are normal.
 - Not run: the bounded real-repository step (fullon2 `api` child) is pending
   the user's approval of each `ptest --full`; this release was verified on
   fixture repositories only.
