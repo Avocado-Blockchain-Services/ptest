@@ -1203,10 +1203,17 @@ def test_monorepo_total_sums_deferred_across_children(
     assert calls == []
     err = capsys.readouterr().err
     lines = err.splitlines()
-    assert ("ptest: api · no changes · deferred 3 (static reach via "
-            "api/m.py)") in lines
-    assert ("ptest: web · no changes · deferred 4 (static reach via "
-            "web/m.py)") in lines
+    # Oracle: R31 bullet 1 / R39: a non-empty changed set prints the
+    # "nothing to run now" form; "no changes" is for an empty changed set.
+    assert not any("no changes" in line for line in lines)
+    assert any(line.startswith("ptest: api · ")
+               and "nothing to run now · deferred 3 (static reach via "
+                   "api/m.py)" in line and "gate at spec end" not in line
+               for line in lines)
+    assert any(line.startswith("ptest: web · ")
+               and "nothing to run now · deferred 4 (static reach via "
+                   "web/m.py)" in line and "gate at spec end" not in line
+               for line in lines)
     total = [line for line in lines if line.startswith("ptest: total")]
     assert len(total) == 1
     assert "deferred 7 across 2 children" in total[0]
@@ -1228,7 +1235,8 @@ def test_monorepo_nothing_anywhere_only_when_no_child_defers(
 
     err = capsys.readouterr().err
     assert "ptest: no changes —" not in err
-    assert "ptest: web · no changes · deferred 5" in err
+    assert "nothing to run now · deferred 5 (static reach via web/m.py)" in err
+    assert "ptest: web · no changes" not in err
 
 
 # --- R40: folder scopes ---------------------------------------------------------

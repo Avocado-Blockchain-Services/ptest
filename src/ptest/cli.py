@@ -4182,7 +4182,15 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         request = _impact_run_request(parsed, impact, child_base,
                                       next_hint=False, reference=reference)
         if request is None:
-            if not parsed.quiet:
+            if not parsed.quiet and impact.changed:
+                # R31 bullet 1: a non-empty changed set whose tests are all
+                # deferred. The hint stays on the total line (Decision 10).
+                print(progress.format_impact(
+                    render.terminal_text(child.declaration),
+                    _impact_note(impact, child_base.label,
+                                 reference=reference),
+                    color=sys.stderr.isatty()), file=sys.stderr)
+            elif not parsed.quiet:
                 print(progress.format_no_changes(
                     render.terminal_text(child.declaration),
                     color=sys.stderr.isatty(),

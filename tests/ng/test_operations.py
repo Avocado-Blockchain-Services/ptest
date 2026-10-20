@@ -1926,6 +1926,26 @@ def test_unchanged_fingerprint_stops_with_no_tests_needed(case, monkeypatch, cap
     assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
 
 
+def test_unchanged_fingerprint_still_runs_an_explicit_file(case, monkeypatch, capfd):
+    # Oracle: spec R40 / guide "ptest <file> always runs it": a literal file
+    # beside a conditional-only plan is never a no-tests-needed stop (R44
+    # stops only when nothing is left to run).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    (root / "tests" / "test_extra.py").write_text(
+        "def test_extra():\n    assert True\n")
+    support.init_git_repo(root)
+    config = _fingerprint_config(root)
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_A, None, ()))
+
+    result = operations.execute(domain, config, _conditional_request(
+        argv=("tests/test_native.py", "tests/test_extra.py")))
+
+    assert result.status is not C.Status.NO_TESTS_NEEDED
+    assert result.status is C.Status.PASSED
+    assert "1 passed" in capfd.readouterr().out   # test_extra ran
+
+
 @pytest.mark.parametrize("outcome,word", [
     (ambient_fingerprint.Outcome(_FP_B, None, ()), "changed"),
     (ambient_fingerprint.Outcome(None, "exit 3", ("boom",)), "absent"),

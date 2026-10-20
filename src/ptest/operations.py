@@ -571,8 +571,12 @@ def _decide_ambient(state: _Ambient, *, domain: C.DomainPaths,
                               len(conditional) - len(promoted),
                               len(promoted))
     report = request.selection
+    observed = {C.selection_test_file(nodeid) for nodeid, _ in conditional}
+    # A literal file the user named runs whole: it is never a no-tests stop.
+    only_observers = all(C.selection_test_file(str(item)) in observed
+                         for item in request.argv)
     state.stop = bool(conditional and not promoted and report is not None
-                      and report.run_now == 0)
+                      and report.run_now == 0 and only_observers)
     return None
 
 
