@@ -2242,3 +2242,28 @@ def test_no_tests_needed_stop_is_completed_decision(
         assert result.runner_exit_code == 0
         assert after == []
         assert not any(r.code == "protocol-mismatch" for r in result.reasons)
+
+
+def test_no_tests_needed_stop_on_the_advanced_tier(case, monkeypatch):
+    # Oracle: spec R44 - the completed decision also holds for a project on
+    # the advanced (coverage) tier, whose result is published to history; the
+    # existing advanced no-tests-needed path is the precedent.
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config_path = root / ".ptest.toml"
+    config_path.write_text(config_path.read_text().replace(
+        'args = ["-q", "-p", "no:xdist"]',
+        'args = ["-q", "-p", "no:xdist", "--cov", "--cov-report", "term"]'))
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "advanced"],
+                   check=True)
+    config = _fingerprint_config(root)
+    assert operations.adapter_for(config.runner.kind).qualified_profile(
+        config) is not None
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_A, None, ()))
+    after = _spy_after_run(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request())
+
+    assert (result.status, result.exit_code) == (C.Status.NO_TESTS_NEEDED, 0)
+    assert after == []
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED

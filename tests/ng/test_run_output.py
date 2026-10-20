@@ -1275,3 +1275,33 @@ def test_deferred_always_reported_on_end_line(case, capsys, status, exit_code):
 
     operations._emit_end(replace(request, quiet=True), result, 0.0)
     assert capsys.readouterr().err == ""
+
+
+def _normalised(completed, root):
+    """ptest's own stderr lines with durations and the project name masked."""
+    out = []
+    for line in completed.stderr.decode().splitlines():
+        if not line.startswith("ptest:"):
+            continue
+        line = line.replace(root.name, "<project>")
+        line = re.sub(r"\d+(\.\d+)?(ms|s|min|h)\b", "<t>", line)
+        out.append(line)
+    return out
+
+
+def test_full_run_output_byte_identical_when_nothing_deferred(case):
+    # Oracle: spec "Rollout and compatibility" - a plain `--full` run on a
+    # project with nothing deferred prints exactly what 0.6.8 printed (ptest's
+    # own lines, durations masked); only the coverage wording changed.
+    domain = case.domain()
+    root = _make_project(case, domain)
+
+    full = case.invoke(domain, root, "--full", timeout=_FULL_TIMEOUT)
+
+    assert full.code == 0, full.stderr.decode()[-2000:]
+    assert _normalised(full, root) == [
+        "ptest: <project> · pytest · full suite",
+        "ptest: full gate runs: source evidence is limited: fingerprint key "
+        "is absent or unsafe",
+        "ptest: passed · <t>",
+    ]
