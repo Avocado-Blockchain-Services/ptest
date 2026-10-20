@@ -713,6 +713,57 @@ def test_dynamic_selected_routes_scoped_with_deselect(tmp_path, monkeypatch):
         "3 tests in 1 of 8 files (dynamic · 1 function changed)")
 
 
+def _overflowing_plan():
+    """A dynamic plan whose run-now files exceed the 256-token request argv.
+
+    Bug report (0.7.0, persea): ``ptest --base <branch>`` crashed with
+    ``request.argv exceeds 256 tokens`` once T1 spanned more files than
+    that; 0.6.8 never got there because it widened past 200 files.
+    """
+    files = tuple(f"tests/{d}/test_{i:03d}.py" for d in ("a", "b")
+                  for i in range(150))
+    unrelated = "tests/b/test_unrelated.py"
+    plan = _dynamic(files=files, deselect=("tests/a/test_000.py::test_t2",),
+                    tests=300, total=301)
+    plan.project_index = types.SimpleNamespace(
+        test_files=frozenset(files + (unrelated,)))
+    plan.decision = types.SimpleNamespace(chosen={
+        f"{unrelated}::test_x": "r1", "tests/a/test_000.py::test_t1": "r1"})
+    return plan
+
+
+def test_dynamic_selection_over_argv_limit_runs_directories(tmp_path,
+                                                            monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    _route_dynamic(monkeypatch, tmp_path.name, _overflowing_plan())
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    (request,) = calls
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests/a", "tests/b")
+    # The covering directories hold one unselected file: its recorded
+    # tests are deselected, so the run is the plan's run-now set again.
+    assert request.deselect == ("tests/a/test_000.py::test_t2",
+                                "tests/b/test_unrelated.py::test_x")
+
+
+def test_folder_selection_over_argv_limit_runs_directories(tmp_path,
+                                                           monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    for d in ("a", "b"):
+        (tmp_path / "tests" / d).mkdir(parents=True)
+    _route_dynamic(monkeypatch, tmp_path.name, _overflowing_plan())
+    calls = _capture(monkeypatch)
+
+    assert main(("tests",)) == 0
+
+    (request,) = calls
+    assert request.argv == ("tests/a", "tests/b")
+    assert "tests/b/test_unrelated.py::test_x" in request.deselect
+
+
 def test_dynamic_selected_singular_counts(tmp_path, monkeypatch):
     _pytest_project(tmp_path, monkeypatch)
     single = _dynamic(files=("tests/test_a.py",),
@@ -1364,3 +1415,19 @@ def test_monorepo_total_keeps_counts_when_a_child_runs_nothing(
     (total,) = [line for line in lines if line.startswith("ptest: total")]
     assert total.startswith("ptest: total · passed · 2 tests · "), total
     assert "deferred 5 across 1 children" in total
+
+
+@pytest.mark.parametrize("files, expected", [
+    # Invariant: the collapsed argv covers every file and fits the budget.
+    (tuple(f"tests/a/x/test_{i}.py" for i in range(201)), ("tests/a/x",)),
+    (tuple(f"tests/{i}/test_x.py" for i in range(201))
+     + ("test_root.py",), ("test_root.py", "tests")),
+    (tuple(f"d{i}/test_x.py" for i in range(201)), ("",)),
+])
+def test_covering_dirs_fit_and_cover(files, expected):
+    from ptest import cli
+
+    dirs = cli._covering_dirs(files)
+
+    assert dirs == expected
+    assert all(cli._under_any(path, dirs) for path in files)

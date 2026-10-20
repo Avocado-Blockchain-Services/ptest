@@ -3402,6 +3402,73 @@ _VITEST_REPORT = C.SelectionReport(
     engine="vitest-changed", iteration=True, run_now=None, deferred=None)
 
 
+# A run request carries at most 256 argv tokens (128 KiB). Dynamic iteration
+# runs no longer widen a large run-now set to the full suite (0.7.0 R6), so
+# a file list past this budget is collapsed to the directories covering it.
+_ARGV_FILES_MAX = 200
+_ARGV_FILES_BYTES = 65536
+
+
+def _argv_fits(paths: Sequence[str]) -> bool:
+    return (len(paths) <= _ARGV_FILES_MAX
+            and sum(len(path.encode("utf-8")) for path in paths)
+            <= _ARGV_FILES_BYTES)
+
+
+def _covering_dirs(files: tuple[str, ...]) -> tuple[str, ...]:
+    """The fewest-levels-up directories covering ``files`` that fit argv.
+
+    A file at the project root stays itself; ``""`` (the project root) is
+    the last resort.
+    """
+    parents = [tuple(path.split("/")[:-1]) for path in files]
+    for depth in range(max(map(len, parents), default=0), 0, -1):
+        picked = {"/".join(parts[:depth]) if parts else path
+                  for parts, path in zip(parents, files)}
+        dirs = tuple(sorted(
+            item for item in picked
+            if not any(other != item and item.startswith(other + "/")
+                       for other in picked)))
+        if _argv_fits(dirs):
+            return dirs
+    return ("",)
+
+
+def _fit_argv(impact, files: Sequence[str], deselect: Sequence[str], *,
+              keep: Sequence[str] = ()) -> tuple[tuple[str, ...],
+                                                 tuple[str, ...]]:
+    """Request argv paths and deselect ids for a scoped run that fits.
+
+    Over the budget, the files collapse to their covering directories and
+    the recorded tests of covered files the plan did not select are
+    deselected, so the run stays the plan's run-now set. Unrecorded tests
+    there, and ids that cannot be bound, run: that only widens the run.
+    ``keep`` files were named explicitly and run whole.
+    """
+    files, deselect = tuple(files), tuple(deselect)
+    if _argv_fits(files):
+        return files, deselect
+    dirs = _covering_dirs(files)
+    argv = tuple(item or "." for item in dirs)
+    try:
+        test_files = frozenset(impact.project_index.test_files)
+        recorded = tuple(impact.decision.chosen)
+    except (AttributeError, TypeError):
+        return argv, deselect
+    planned = frozenset(files) | frozenset(keep)
+    known = frozenset(deselect)
+    extra = sorted(
+        nodeid for nodeid in recorded
+        if nodeid not in known and C.selection_nodeid_safe(nodeid)
+        and C.selection_test_file(nodeid) in test_files
+        and C.selection_test_file(nodeid) not in planned
+        and _under_any(C.selection_test_file(nodeid), dirs))
+    combined = deselect + tuple(extra)
+    if len(combined) > C.SELECTION_DESELECT_MAX_IDS:
+        return argv, deselect
+    return argv, combined
+
+
 def _impact_run_request(parsed: ParsedArgs, impact, base,
                         *, next_hint: bool,
                         reference: str) -> C.RunRequest | None:
@@ -3429,6 +3496,8 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         deselect = ()
     if mode is not C.Mode.SCOPED:
         deselect, conditional = (), ()
+    elif impact.kind in ("none", "selected"):
+        argv, deselect = _fit_argv(impact, argv, deselect)
     return C.RunRequest(
         mode=mode, argv=argv, base=None,
         workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
@@ -3823,6 +3892,25 @@ _AGAIN_WITH_SCOPE = ("--again reruns the whole gate, so it takes no path "
                      "(use bare `ptest --full --again`)")
 
 
+def _fit_folder_argv(impact, selected: list[str], always: list[str]
+                     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Argv and deselect ids for a folder run, collapsed when too long.
+
+    The named ``always`` files run whole and stay literal arguments.
+    """
+    deselect = _filter_folder_deselect(
+        tuple(getattr(impact, "deselect", ()) or ()),
+        tuple(selected), tuple(always))
+    argv = tuple(selected)
+    if _argv_fits(argv):
+        return argv, deselect
+    paths, deselect = _fit_argv(
+        impact, [item for item in selected if item not in always], deselect,
+        keep=always)
+    return paths + tuple(item for item in always if item not in paths), \
+        deselect
+
+
 def _under_any(path: str, folders: tuple[str, ...]) -> bool:
     """Whether a child-relative file sits under any folder scope."""
     return any(path == folder or folder == ""
@@ -3905,13 +3993,11 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 color=sys.stderr.isatty(), deferred=deferred, hint=hint),
                 quiet=parsed.quiet)
         return 0
+    argv, deselect = _fit_folder_argv(impact, selected, always)
     request = _run_scoped_request(
-        parsed, tuple(selected),
+        parsed, argv,
         note=_folder_note(typeds, len(selected), impact.total),
-        next_hint=True,
-        deselect=_filter_folder_deselect(
-            tuple(getattr(impact, "deselect", ()) or ()),
-            tuple(selected), tuple(always)),
+        next_hint=True, deselect=deselect,
         conditional=_filter_folder_conditional(
             _conditional_entries(impact), tuple(selected), tuple(always)),
         selection=_selection_report(impact))
@@ -4007,13 +4093,11 @@ def _run_folder_standalone(parsed: ParsedArgs,
                 color=sys.stderr.isatty(), deferred=deferred, hint=hint),
                 quiet=parsed.quiet)
         return 0
+    argv, deselect = _fit_folder_argv(impact, selected, always)
     request = _run_scoped_request(
-        parsed, tuple(selected),
+        parsed, argv,
         note=_folder_note(typeds, len(selected), impact.total),
-        next_hint=True,
-        deselect=_filter_folder_deselect(
-            tuple(getattr(impact, "deselect", ()) or ()),
-            tuple(selected), tuple(always)),
+        next_hint=True, deselect=deselect,
         conditional=_filter_folder_conditional(
             _conditional_entries(impact), tuple(selected), tuple(always)),
         selection=_selection_report(impact))

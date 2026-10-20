@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1
+
+- Fix: `ptest` / `ptest --base <branch>` crashed with `request.argv exceeds
+  256 tokens` when the tests to run now spanned more than 256 test files.
+  0.7.0 no longer widens a large run-now set to the full suite, so a change
+  to a widely used class (in persea, a `User` column: 530 test files) put
+  every file on the command line. Past 200 files the run now passes the
+  directories that cover them and deselects the recorded tests of the
+  covered files the plan did not select, so the same tests run. Folder runs
+  (`ptest <folder>`) collapse the same way.
+
 ## 0.7.0
 
 - Tiered iteration selection, one gate per spec (spec 2026-10-19). For
