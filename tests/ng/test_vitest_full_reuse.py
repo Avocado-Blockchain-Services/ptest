@@ -263,3 +263,31 @@ def test_incomplete_controller_boundaries_withdraw_green(case, fake_exec_node, m
     assert verified.find(domain, project_id) == ()
     assert operations._full_verified_elsewhere(domain, config, operations._checkout(config),
                                                C.RunRequest(mode=C.Mode.FULL)) is None
+
+
+def test_vitest_changed_run_reports_engine_and_bare_gate_hint(case, fake_exec_node):
+    """R12/R34: a Vitest `--changed` run proves nothing about the tests it
+    leaves out and keeps no gate marker, so its end line ends with the bare
+    gate hint and its JSON selection names the engine with no counts."""
+    domain = case.domain()
+    root = _project(case, domain, fake_exec_node)
+    first = _invoke(case, domain, root, '--full', timeout=20)
+    assert first.code == 0, first.stderr.decode()
+    # A full run is not an iteration run: no selection block for Vitest.
+    assert _run_data(first)['selection'] is None
+    (root / 'sample.test.ts').write_text('test("one", () => { /* edit */ })\n')
+
+    changed = _invoke(case, domain, root, timeout=20)
+
+    assert changed.code == 0, changed.stderr.decode()
+    selection = _run_data(changed)['selection']
+    assert selection['engine'] == 'vitest-changed'
+    assert selection['iteration'] is True
+    assert selection['run_now'] is None and selection['deferred'] is None
+    assert selection['deferred_reasons'] == []
+    assert selection['gate'] is None
+    ends = [line for line in changed.stderr.decode().splitlines()
+            if line.startswith('ptest: passed')]
+    assert len(ends) == 1 and ends[0].endswith(' · gate at spec end')
+    assert 'no gate recorded' not in ends[0]
+    assert 'deferred' not in ends[0]

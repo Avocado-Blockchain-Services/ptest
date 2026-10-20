@@ -1081,3 +1081,197 @@ def test_total_note_and_step_sum_children():
     assert progress.total_next_step(C.Status.PASSED, [_report(deferred=0)]) is None
     assert progress.total_next_step(C.Status.FAILED, [api]) == progress.NEXT_FIX
     assert progress.total_next_step(C.Status.PASSED, [None, None]) is None
+
+
+# --- 0.7.0 end to end through the CLI (T6) ------------------------------------
+#
+# A real pytest project through the bridge, built by the T4a e2e helpers, to
+# pin what the user reads: the end-line note and hint of a deferral, the gate
+# that clears it, and a forced full suite (spec R8a, R29, R30, R33).
+
+from test_selection_e2e import (  # noqa: E402
+    _ALL, _CHANGED_TIMEOUT, _CORE, _FULL_TIMEOUT, _make_project, _markers)
+
+
+@pytest.fixture
+def recorded_project(case):
+    """A git project with a green `--full` run (dependencies recorded)."""
+    domain = case.domain()
+    root = _make_project(case, domain)
+    full = case.invoke(domain, root, "--full", timeout=_FULL_TIMEOUT)
+    assert full.code == 0, full.stderr.decode()[-2000:]
+    (root / "ran.txt").unlink()
+    return domain, root
+
+
+def _end_lines(completed):
+    return [line for line in completed.stderr.decode().splitlines()
+            if re.match(r"ptest: (passed|failed|incomplete|no tests needed)",
+                        line)]
+
+
+def test_gate_runs_every_deferred_test(case, recorded_project):
+    # Oracle: spec R15/R30/R33 - the gate that follows a deferral executes the
+    # deferred tests, clears the deferral, and the next iteration line is clean.
+    domain, root = recorded_project
+    core = root / "pkg" / "core.py"
+    core.write_text(_CORE + "\nprint('effect-marker')\n")
+
+    iteration = case.invoke(domain, root, "--changed",
+                            timeout=_CHANGED_TIMEOUT)
+
+    assert iteration.code == 0, iteration.stderr.decode()[-2000:]
+    assert _markers(root) == set()
+    err = iteration.stderr.decode()
+    # Nothing ran, so the line says so and names what waits for the gate.
+    assert re.search(r"nothing to run now · deferred \d+ \(", err), err
+    assert "no tests affected" not in err
+    assert err.rstrip().endswith("· gate at spec end")
+
+    gate = case.invoke(domain, root, "--full", "--result-json", "gate.json",
+                       timeout=_FULL_TIMEOUT)
+
+    gate_err = gate.stderr.decode()
+    assert gate.code == 0, gate_err[-2000:]
+    assert _markers(root) == _ALL
+    assert re.search(r"ptest: selection gate: ran \d+ previously deferred "
+                     r"tests? · 0 failed · 0 observers learned", gate_err)
+    block = json.loads((root / "gate.json").read_text())["data"]["selection"]
+    assert block["iteration"] is False and block["engine"] is None
+    assert block["deferred"] == 0 and block["run_now"] is None
+    assert block["gate"]["previously_deferred"] >= 1
+    assert block["gate"]["failed"] == 0
+
+    after = case.invoke(domain, root, "--changed", timeout=_CHANGED_TIMEOUT)
+
+    after_err = after.stderr.decode()
+    assert after.code == 0, after_err[-2000:]
+    assert "deferred" not in after_err
+    assert "gate at spec end" not in after_err
+
+
+def test_forced_full_suite_names_reason_on_end_line(case, recorded_project):
+    # Oracle: spec R8a - a trigger in the diff forces a full suite; its end
+    # line names the start-line reason, its JSON carries full_reason, it is a
+    # gate (report filled) and it owes no hint and no coverage line.
+    domain, root = recorded_project
+    (root / "pyproject.toml").write_text("[tool.fixture]\nname = 'x'\n")
+
+    forced = case.invoke(domain, root, "--changed", "--result-json",
+                         "forced.json", timeout=_FULL_TIMEOUT)
+
+    err = forced.stderr.decode()
+    assert forced.code == 0, err[-2000:]
+    assert _markers(root) == _ALL
+    assert "→ full suite: pyproject.toml is a full trigger" in err
+    (end,) = _end_lines(forced)
+    assert "full suite (pyproject.toml is a full trigger)" in end
+    assert "gate at spec end" not in end
+    assert "coverage gate" not in err
+    block = json.loads((root / "forced.json").read_text())["data"]["selection"]
+    assert block["full_reason"] == "pyproject.toml is a full trigger"
+    assert block["iteration"] is True
+    assert block["deferred"] == 0 and block["run_now"] is None
+    assert block["gate"] is not None
+
+
+def test_iteration_green_publishes_no_full_proof(case, recorded_project):
+    # Oracle: spec R38/Vocabulary - an iteration pass is not a gate: it may
+    # not make the tree "already verified" for a later `--full`.
+    domain, root = recorded_project
+    (root / "pkg" / "core.py").write_text(
+        _CORE.replace("return n + 1", "return 1 + n"))
+
+    iteration = case.invoke(domain, root, "--changed", "--result-json",
+                            "iteration.json", timeout=_CHANGED_TIMEOUT)
+
+    assert iteration.code == 0, iteration.stderr.decode()[-2000:]
+    data = json.loads((root / "iteration.json").read_text())["data"]
+    assert data["full_gate_eligible"] is False
+    assert data["baseline_published"] is False
+    assert data["selection"]["iteration"] is True
+    (root / "ran.txt").unlink(missing_ok=True)
+
+    gate = case.invoke(domain, root, "--full", timeout=_FULL_TIMEOUT)
+
+    gate_err = gate.stderr.decode()
+    assert gate.code == 0, gate_err[-2000:]
+    assert "already verified" not in gate_err
+    assert _markers(root) == _ALL
+
+
+def test_json_caps_and_terminal_escaping(case, capsys):
+    # Oracle: spec R34 (at most 5 reasons x 3 paths, 50 files, scalars only)
+    # and R30 (paths reach the terminal escaped).
+    from dataclasses import replace
+
+    codes = ("g-shared", "g-reach", "g-data", "b-static", "u-static")
+    by_reason = tuple((code, f"pkg/mod_{index}.py", 10 + index)
+                      for code in codes for index in range(7))
+    total = sum(item[2] for item in by_reason)
+    by_file = tuple((f"tests/test_{index:03d}.py", 1) for index in range(120))
+    # The file aggregate must sum to the same total as the reason aggregate.
+    by_file += (("tests/test_big.py", total - 120),)
+    report = C.SelectionReport(
+        engine="dynamic", iteration=True, run_now=3, deferred=total,
+        deferred_by_reason=by_reason, deferred_by_file=by_file,
+        gate_recorded=True)
+    result = replace(case.result(status=C.Status.PASSED, exit_code=0,
+                                 counts=C.Counts(passed=3)), selection=report)
+
+    block = C.serialize_run_result(result)["selection"]
+
+    assert len(block["deferred_reasons"]) == 5
+    assert all(len(item["paths"]) == 3 for item in block["deferred_reasons"])
+    assert len(block["deferred_files"]) == 50
+    assert block["deferred_files_truncated"] is True
+    assert block["deferred_files"] == sorted(
+        block["deferred_files"], key=lambda item: item["file"])
+    assert block["observers"] == {"promoted": 0, "deferred": 0,
+                                  "fingerprint": None}
+    assert set(block) == {
+        "engine", "iteration", "run_now", "deferred", "full_reason",
+        "deferred_reasons", "deferred_files", "deferred_files_truncated",
+        "observers", "gate"}
+
+    from ptest import operations
+
+    hostile = C.SelectionReport(
+        engine="dynamic", iteration=True, run_now=1, deferred=2,
+        deferred_by_reason=(("b-static", "pkg/\x1b[31mred\x1b[0m.py", 2),),
+        deferred_by_file=(("tests/test_a.py", 2),), gate_recorded=True)
+    operations._emit_end(
+        C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_a.py",),
+                     next_hint=True),
+        replace(case.result(status=C.Status.PASSED, exit_code=0,
+                            counts=C.Counts(passed=1)), selection=hostile),
+        0.0)
+    err = capsys.readouterr().err
+    assert "\x1b" not in err
+    assert "deferred 2 (static reach via pkg/" in err
+
+
+@pytest.mark.parametrize("status,exit_code", [
+    (C.Status.PASSED, 0), (C.Status.FAILED, 1), (C.Status.INCOMPLETE, 70)])
+def test_deferred_always_reported_on_end_line(case, capsys, status, exit_code):
+    # Oracle: spec R30 - an iteration run that deferred anything says so on
+    # its end line whatever the verdict; -q silences it like every line.
+    from dataclasses import replace
+
+    from ptest import operations
+
+    report = C.SelectionReport(
+        engine="dynamic", iteration=True, run_now=1, deferred=5,
+        deferred_by_reason=(("g-data", "data/seed.json", 5),),
+        deferred_by_file=(("tests/test_a.py", 5),), gate_recorded=True)
+    result = replace(case.result(status=status, exit_code=exit_code,
+                                 counts=C.Counts(passed=1)), selection=report)
+    request = C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_a.py",),
+                           next_hint=True)
+
+    operations._emit_end(request, result, 0.0)
+    err = capsys.readouterr().err
+    assert "deferred 5 (ambient data data/seed.json)" in err
+
+    operations._emit_end(replace(request, quiet=True), result, 0.0)
+    assert capsys.readouterr().err == ""

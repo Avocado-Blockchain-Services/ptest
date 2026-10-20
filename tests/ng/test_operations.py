@@ -2159,3 +2159,86 @@ def _report_for_end(*, deferred):
         deferred_by_file=(() if not deferred
                           else (("tests/test_m.py", deferred),)),
         gate_recorded=True)
+
+
+@pytest.mark.parametrize("command", [
+    ("plan",), ("status",), ("doctor", "--offline"), ("--changed",)])
+def test_fingerprint_never_runs_outside_execute(case, command):
+    # Oracle: spec R42 - planning stays pure: `plan`, `status`, `doctor` and a
+    # changed run that executes nothing never run the declared command. The
+    # command writes a marker file only when it runs.
+    domain = case.domain()
+    root = _conditional_project(case, domain, fingerprint=False)
+    config_path = root / ".ptest.toml"
+    marker = root.parent / f"{root.name}-fingerprint-ran"
+    config_path.write_text(config_path.read_text() + (
+        "ambient_fingerprint = [" + json.dumps(sys.executable) + ', "-c", '
+        + json.dumps(f"open({str(marker)!r}, 'w').close()") + "]\n"))
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "declare"],
+                   check=True)
+
+    done = subprocess.run(
+        [sys.executable, "-m", "ptest", "--fixture-domain", str(domain.root),
+         *command],
+        cwd=root, capture_output=True, timeout=60,
+        env={name: value for name, value in os.environ.items()
+             if name not in support.CONTROL_VARS})
+
+    assert not marker.exists(), (command, done.returncode,
+                                 done.stderr.decode()[-1500:])
+
+
+def test_fingerprint_never_runs_in_refine_or_preview(case, monkeypatch):
+    # Oracle: spec R42/N11 - planning (`refine`, `preview`) is pure.
+    from ptest import selection_engine
+
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("planning must never run the fingerprint command")
+
+    monkeypatch.setattr(ambient_fingerprint, "compute", boom)
+    from ptest import impact
+
+    top = impact.git_top(root)
+    static = impact.plan(top, root, config, ("tests/test_native.py",))
+    selection_engine.refine(domain, top, root, config,
+                            ("tests/test_native.py",), static)
+    selection_engine.preview(domain, top, root, config,
+                             ("tests/test_native.py",))
+
+
+@pytest.mark.parametrize("code,stop,status,exit_code", [
+    ("no-tests-needed", True, C.Status.NO_TESTS_NEEDED, 0),
+    ("no-tests-needed", False, C.Status.INCOMPLETE, 70),
+    ("state-unavailable", False, C.Status.INCOMPLETE, 70),
+    ("changed-during-run", False, C.Status.INCOMPLETE, 70),
+    ("unknown-input", False, C.Status.INCOMPLETE, 70),
+])
+def test_no_tests_needed_stop_is_completed_decision(
+        case, monkeypatch, code, stop, status, exit_code):
+    # Oracle: spec R44 - only a stopped handoff whose reason is
+    # no-tests-needed AND that the controller decided (nothing left to run)
+    # is a completed policy decision; every other stop stays incomplete.
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+    after = _spy_after_run(monkeypatch)
+
+    def decide(state, **kwargs):
+        state.ran = True
+        state.stop = stop
+        return operations._reason(code, "table row")
+
+    monkeypatch.setattr(operations, "_decide_ambient", decide)
+
+    result = operations.execute(domain, config, _conditional_request())
+
+    assert (result.status, result.exit_code) == (status, exit_code)
+    assert result.full_gate_eligible is False
+    if status is C.Status.NO_TESTS_NEEDED:
+        assert result.runner_exit_code == 0
+        assert after == []
+        assert not any(r.code == "protocol-mismatch" for r in result.reasons)
