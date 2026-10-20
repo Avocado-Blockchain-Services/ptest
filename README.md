@@ -300,6 +300,29 @@ tests whose dependencies changed — down to single tests inside a file:
 dynamic = false  # opt out of dependency-recorded selection (default true)
 ```
 
+For pytest projects an iteration run (bare `ptest`, `ptest --changed`) splits
+the reached tests into two tiers. Tests the change is certain to matter for
+run now; tests reached only through a guess (shared import-time state, data
+files, static reach) are deferred to the gate, the one `ptest --full` at the
+end of a spec or chain. The end line names them, for example
+`ptest: passed · 2 tests · deferred 18 (shared import-time state via
+app/models.py) · <t> · gate at spec end`. The gate runs the deferred tests and
+learns which of them really depend on a change (learned observers), so later
+iteration runs promote exactly those.
+
+Two optional `[selection]` keys tune this:
+
+- `observers`: literal test-path prefixes (no globs). Every test in a
+  matching file is an observer of every path: an iteration run whose change
+  touches import-time state runs it now instead of deferring it.
+- `ambient_fingerprint`: an argv list (no shell) for a read-only, hermetic
+  command whose output says whether ambient state changed. It runs once per
+  recorded run with a fixed 60 s timeout and capped output. Observer
+  promotion then becomes conditional: an unchanged output keeps those tests
+  deferred, a changed or absent output (failure, timeout) runs them.
+
+Adding either key changes `.ptest.toml`, which costs one full re-seed.
+
 ## Monorepos
 
 The root `.ptest.toml` declares the children; each child has its own config:
@@ -339,6 +362,8 @@ enabled = true                  # graph selection for bare `ptest`
 full_triggers = []              # extra files that force the whole suite
 non_input_outputs = [".venv"]   # outputs that never count as source changes
 full_ratio = 0.7
+# observers = ["tests/test_snapshot.py"]          # pytest: literal prefixes; their tests run on import-time changes
+# ambient_fingerprint = ["python", "-m", "app.fp"] # pytest: argv, no shell, 60 s; unchanged output keeps observers deferred
 ```
 
 `ptest init` writes these; `ptest doctor --fix` updates older configs (turns
