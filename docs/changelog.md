@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.7.0
+
+- Tiered iteration selection, one gate per spec (spec 2026-10-19). A bare
+  `ptest` now runs only the tests that are certain to matter (tier T1) and
+  defers the rest (tier T2: shared-file, data and static-reach guesses).
+  Five parts:
+  - P1: iteration runs never widen to a large static or ratio-driven set;
+    the old `full_reason` widening is gone, and what was deferred is reported
+    by reason and by file.
+  - P2: the gate (`ptest --full`) runs the deferred tests, learns which of
+    them really depend on the change (observers), and unlearns demoted ones.
+  - P3: `[selection] observers` lists paths whose dependents are always
+    checked in iteration; learned observers are kept per node (64 per node,
+    100000 per store).
+  - P4: `[selection] ambient_fingerprint` is a command whose output digest
+    says whether ambient state changed; unchanged means the deferred tests
+    need not run, a changed or absent digest promotes them. It runs with no
+    shell, a 60 s limit and capped output.
+  - P5: the end lines, `run.json` `data.selection` (nullable, additive) and
+    the agent guide describe the loop: iterate with `ptest`, gate once at
+    spec end. The guard manifest gains `attempt_decision_timeout_s`; guard
+    protocol version stays 2.
+- Selection store v2. A v1 store is migrated in place in one transaction
+  (nodes keyed by node id and run, `runs.fingerprint`, an `observers` table,
+  gate marker keys); the migration is idempotent and loses no row. Each node
+  keeps up to K = 3 records. The store target is 96 MiB with a 128 MiB cap.
+  Dependency records and the policy digest are unchanged for an unchanged
+  `.ptest.toml`, so existing records keep matching. A 0.6.x ptest opening a
+  v2 store plans statically and records nothing (`coordinator-corrupt:
+  selection store has an unknown schema`, or `capacity-exceeded` over its
+  smaller cap); it never deletes the store.
+- Config compatibility. 0.6.x treats `observers` and `ambient_fingerprint`
+  as unknown `[selection]` keys, so a config carrying either gets the
+  `policy-invalid` warning and automatic selection is disabled there (it is
+  not an error in 0.6.x). In 0.7.0 a bad value of either key is
+  `invalid-config` (exit 2). Adding either key costs one full re-seed; a
+  config without them keeps its 0.6.8 records.
+- Planning latency. On a synthetic project (200 modules, 20000 recorded
+  nodes with 3 records each, one function body edited) planning took a warm
+  median of 3.13 s, against 2.99 s before this release (about 0.14 s added).
+  The 1.5 s warm budget from the 0.5 spec is not met on that synthetic
+  project, before or after this release. No real repository was used.
+- Not run: the bounded real-repository step (fullon2 `api` child) is pending
+  the user's approval of each `ptest --full`; this release was verified on
+  fixture repositories only.
+
 ## 0.6.8
 
 - Test selection keeps a full run's dependency records. Before, the next
