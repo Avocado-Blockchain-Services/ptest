@@ -1162,8 +1162,7 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
               execution: str, valid_handoff: bool, unchanged_inputs: bool,
               cancelled: bool, guard_failed: bool, setup_failed: bool,
               argv_files, verbose: bool = False,
-              quiet: bool = False, fingerprint=None,
-              ambient_fingerprint=None):
+              quiet: bool = False, fingerprint=None):
     """Ingest one attempt's dependency files into the selection store.
 
     Records are written only for a valid handoff of a consumed report
@@ -1173,13 +1172,10 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
     ``invalidate``. Full runs self-audit before updating (design D11) and
     are gates: they learn observers and write the gate marker in the same
     transaction (R15, R27), and the gate report is returned (None for
-    iteration runs and for anything not ingested). ``fingerprint`` (also
-    accepted as ``ambient_fingerprint``) is the run's ambient fingerprint,
-    recorded on the run row (R43). Prints the audit, gate and ``-v`` lines.
+    iteration runs and for anything not ingested). ``fingerprint`` is the
+    run's ambient fingerprint, recorded on the run row (R43). Prints the audit, gate and ``-v`` lines.
     Never raises.
     """
-    if fingerprint is None:
-        fingerprint = ambient_fingerprint
     try:
         return _after_run(
             domain=domain, config=config, project_id=project_id,

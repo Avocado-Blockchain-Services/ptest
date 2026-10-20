@@ -2067,12 +2067,14 @@ def test_fingerprint_is_recorded_on_every_ingest_when_valid(
     assert fakes.store.updates[0]["fingerprint"] == expected
 
 
-def test_ambient_fingerprint_is_an_accepted_alias_of_fingerprint(fakes,
-                                                                 tmp_path):
+def test_after_run_takes_only_the_frozen_fingerprint_keyword(fakes,
+                                                             tmp_path):
+    """Design 3.8: ``fingerprint=`` is the one keyword; no alias."""
     fakes.ingest_mod._run = _run_deps(
         nodes=[("tests/test_a.py::t0", "passed")])
-    _after(fakes, tmp_path, ambient_fingerprint="cd" * 32)
-    assert fakes.store.updates[0]["fingerprint"] == "cd" * 32
+    with pytest.raises(TypeError):
+        _after(fakes, tmp_path, ambient_fingerprint="cd" * 32)
+    assert fakes.store.updates == []
 
 
 def test_iteration_ingest_writes_no_observers_and_no_marker(fakes, tmp_path):
