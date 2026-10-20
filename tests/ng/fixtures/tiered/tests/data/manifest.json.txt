@@ -1,0 +1,1 @@
+{"routes": ["/audit", "/users"], "schemas": {"User": ["email", "name"]}}

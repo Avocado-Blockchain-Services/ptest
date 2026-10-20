@@ -1,0 +1,9 @@
+from app.svc import users
+
+
+def test_users_listed():
+    assert "ada" in users.list_users()
+
+
+def test_users_count():
+    assert len(users.list_users()) == 2

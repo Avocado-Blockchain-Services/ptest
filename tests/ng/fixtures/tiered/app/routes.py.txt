@@ -1,0 +1,13 @@
+ROUTES = {}
+
+
+def route(path):
+    def register(fn):
+        ROUTES[path] = fn
+        return fn
+    return register
+
+
+@route("/users")
+def users():
+    return []

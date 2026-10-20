@@ -1,0 +1,6 @@
+from app.routes import route
+
+
+@route("/audit")
+def audit():
+    return {"ok": True}

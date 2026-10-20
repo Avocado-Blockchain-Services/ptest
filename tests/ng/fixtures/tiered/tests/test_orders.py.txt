@@ -1,0 +1,9 @@
+from app.svc import orders
+
+
+def test_orders_total():
+    assert orders.total([1, 2, 3]) == 6
+
+
+def test_orders_empty():
+    assert orders.total([]) == 0

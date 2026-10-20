@@ -1,0 +1,9 @@
+import app
+
+
+def test_hub_2_a():
+    assert app is not None
+
+
+def test_hub_2_b():
+    assert app is not None

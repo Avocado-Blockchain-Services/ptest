@@ -1,0 +1,15 @@
+import json
+
+from app import models, routes
+
+
+def manifest():
+    return {
+        "routes": sorted(routes.ROUTES),
+        "schemas": {c.__name__: sorted(c.__annotations__)
+                    for c in models.SCHEMAS},
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(manifest(), sort_keys=True))

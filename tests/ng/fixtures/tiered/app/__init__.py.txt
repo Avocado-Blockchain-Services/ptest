@@ -1,0 +1,5 @@
+"""Hub module: importing it pulls the import-time registries in."""
+import app.settings  # noqa: F401
+import app.models  # noqa: F401
+import app.routes  # noqa: F401
+import app.loader  # noqa: F401

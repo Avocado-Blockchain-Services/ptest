@@ -1,0 +1,10 @@
+import app
+from app.svc import users
+
+
+def test_mixed_users():
+    assert users.list_users()
+
+
+def test_mixed_hub():
+    assert app is not None

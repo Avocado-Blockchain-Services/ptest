@@ -1,0 +1,14 @@
+import json
+from pathlib import Path
+
+from app.manifest import manifest
+
+DATA = Path(__file__).resolve().parent / "data" / "manifest.json"
+
+
+def test_manifest_snapshot():
+    assert manifest() == json.loads(DATA.read_text())
+
+
+def test_manifest_file_is_json():
+    assert isinstance(json.loads(DATA.read_text()), dict)

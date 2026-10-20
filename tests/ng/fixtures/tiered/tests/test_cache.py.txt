@@ -1,0 +1,11 @@
+from app import cache
+
+
+def test_cache_engine_is_shared(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    assert cache.engine() is cache.engine()
+
+
+def test_cache_engine_kind(tmp_path):
+    (tmp_path / "b.txt").write_text("b")
+    assert cache.engine()["kind"] == "memory"

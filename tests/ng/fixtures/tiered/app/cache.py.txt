@@ -1,0 +1,8 @@
+_ENGINE = None
+
+
+def engine():
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = {"kind": "memory", "pool": []}
+    return _ENGINE

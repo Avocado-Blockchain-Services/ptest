@@ -1,0 +1,3 @@
+import importlib
+
+ROUTER = importlib.import_module("app.plugins.audit")

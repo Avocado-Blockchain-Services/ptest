@@ -1,0 +1,12 @@
+SCHEMAS = []
+
+
+def schema(cls):
+    SCHEMAS.append(cls)
+    return cls
+
+
+@schema
+class User:
+    name: str
+    email: str

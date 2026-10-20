@@ -1,0 +1,35 @@
+import signal
+import time
+from pathlib import Path
+
+import pytest
+
+import app  # noqa: F401  collection-time import of the hub
+
+_ROOT = Path(__file__).resolve().parent.parent
+_RAN = _ROOT / "ran.txt"
+_HOLD = _ROOT / "hold.flag"
+
+
+def _hold():
+    """Block while hold.flag exists (smoke S13): the cancel row signals
+    the run here; "stuck" content makes the test ignore SIGINT."""
+    if not _HOLD.exists():
+        return
+    stuck = _HOLD.read_text().strip() == "stuck"
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN) if stuck else None
+    try:
+        deadline = time.monotonic() + 60
+        while _HOLD.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        if stuck:
+            signal.signal(signal.SIGINT, previous)
+
+
+@pytest.fixture(autouse=True)
+def _record_ran(request):
+    with open(_RAN, "a") as fh:
+        fh.write(request.node.nodeid + "\n")
+    _hold()
+    yield
