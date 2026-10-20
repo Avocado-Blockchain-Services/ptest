@@ -2,26 +2,29 @@
 
 ## 0.7.0
 
-- Tiered iteration selection, one gate per spec (spec 2026-10-19). A bare
-  `ptest` now runs only the tests that are certain to matter (tier T1) and
-  defers the rest (tier T2: shared-file, data and static-reach guesses).
-  Five parts:
-  - P1: iteration runs never widen to a large static or ratio-driven set;
-    the old `full_reason` widening is gone, and what was deferred is reported
-    by reason and by file.
-  - P2: the gate (`ptest --full`) runs the deferred tests, learns which of
-    them really depend on the change (observers), and unlearns demoted ones.
-  - P3: `[selection] observers` lists paths whose dependents are always
-    checked in iteration; learned observers are kept per node (64 per node,
-    100000 per store).
-  - P4: `[selection] ambient_fingerprint` is a command whose output digest
+- Tiered iteration selection, one gate per spec (spec 2026-10-19). For
+  pytest projects, a bare `ptest` now runs only the tests that are certain to
+  matter (tier T1) and defers the rest (tier T2: shared-file, data and
+  static-reach guesses). Vitest changed delegation is unchanged. Five parts,
+  numbered as in the spec:
+  - P1: evidence tiers. Iteration runs never widen to a large static or
+    ratio-driven set; the old `full_reason` widening is gone, and what was
+    deferred is reported by reason and by file.
+  - P2: observers. The gate (`ptest --full`) runs the deferred tests, learns
+    which of them really depend on the change (learned observers), and
+    unlearns demoted ones. `[selection] observers` declares paths whose
+    dependents are always checked in iteration; learned observers are kept
+    per node (64 per node, 100000 per store).
+  - P3: records chosen by tree distance. A node keeps up to K = 3 records,
+    and planning uses the record closest to the current tree.
+  - P4: hint, guide and JSON. The end lines, `run.json` `data.selection`
+    (nullable, additive) and the agent guide describe the loop: iterate with
+    `ptest`, gate once at spec end.
+  - P5: `[selection] ambient_fingerprint` is a command whose output digest
     says whether ambient state changed; unchanged means the deferred tests
     need not run, a changed or absent digest promotes them. It runs with no
-    shell, a 60 s limit and capped output.
-  - P5: the end lines, `run.json` `data.selection` (nullable, additive) and
-    the agent guide describe the loop: iterate with `ptest`, gate once at
-    spec end. The guard manifest gains `attempt_decision_timeout_s`; guard
-    protocol version stays 2.
+    shell, a 60 s limit and capped output. The guard manifest gains
+    `attempt_decision_timeout_s`; guard protocol version stays 2.
 - Selection store v2. A v1 store is migrated in place in one transaction
   (nodes keyed by node id and run, `runs.fingerprint`, an `observers` table,
   gate marker keys); the migration is idempotent and loses no row. Each node
