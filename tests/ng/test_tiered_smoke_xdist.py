@@ -18,6 +18,7 @@ import pytest
 
 from test_tiered_smoke import (
     ALL_TESTS, CHANGED_TIMEOUT, GATE_HINT, MODELS, NEIGHBOUR, OBSERVER,
+    ORDERS_TESTS,
     SHARED_MODELS, USERS_TESTS, Project,
 )
 
@@ -139,3 +140,28 @@ def test_x8_changed_fingerprint_promotes_the_observer_under_two_workers(
     assert recorded.ran() == {OBSERVER}  # binding rewritten for this id
     assert run.selection["observers"]["promoted"] == 1
     assert GATE_HINT not in run.end  # a failing run keeps the fix hint
+
+
+def test_deferred_tests_never_counted_as_passed(recorded):
+    """18 deferred tests are not run: the counted end line, the result
+    JSON and the run counts report the 2 that ran, never 20."""
+    recorded.edit_total_body()
+    recorded.add_field("age: int")
+
+    run = recorded.run("--changed", "--result-json", "r.json",
+                       timeout=CHANGED_TIMEOUT)
+
+    assert run.code == 0, run.err[-2000:]
+    assert re.fullmatch(
+        rf"ptest: passed · 2 tests · deferred 18 \({SHARED_MODELS}\) · "
+        rf"[\d.]+m?s · {GATE_HINT}", run.end), run.end
+    assert not re.search(r"\b(20|19|18) (tests|passed)\b",
+                         run.end.split(" · deferred")[0])
+    assert recorded.ran() == ORDERS_TESTS
+    selection = run.selection
+    assert selection["run_now"] == 2
+    assert selection["deferred"] == 18
+    counted = [value for key, value in run.data.items()
+               if re.search(r"passed|tests|count", key)
+               and isinstance(value, int)]
+    assert all(value <= 2 for value in counted), run.data

@@ -69,6 +69,8 @@ MODELS = "app/models.py"
 SHARED_MODELS = "shared import-time state via app/models.py"
 GATE_HINT = "gate at spec end"
 HOLD_FLAG = "hold.flag"
+SPEC_DELTA = ("spec/product delta awaiting an orchestrator decision "
+              "(amend the spec row or close the product gap); ")
 
 _GITIGNORE = ("__pycache__/\n.pytest_cache/\nran.txt\n" + HOLD_FLAG
               + "\nptest-result-*.json\nr.json\n")
@@ -534,7 +536,10 @@ def test_s6c_second_worktree_after_the_bump_defers_honestly(case):
     assert selection["deferred"] == 18
 
 
-def test_s7_unchanged_fingerprint_keeps_the_observer_deferred(recorded):
+def test_skipped_launch_leaves_store_untouched(recorded):
+    """S7 (spec row and named negative contract): a no-tests-needed stop
+    changes no state row (D9) and, once the parse cache is warm, an
+    immediate repeat leaves the whole store file byte-identical."""
     recorded.learned()
     recorded.reseed(["age", "email", "name"],
                     [sys.executable, "-m", "app.manifest"])
@@ -632,11 +637,10 @@ def _spawn(project: Project, *args: str) -> subprocess.Popen:
         start_new_session=True)
 
 
-@pytest.mark.parametrize("mode", ["stuck", "cooperative"])
-def test_s13_cancelled_run_leaves_the_store_alone(recorded, mode):
-    """A runner that ignores SIGINT is killed after the grace: ptest's own
-    `cancelled` (exit 130). A cooperative pytest leaves on its own with its
-    exit 2 (the runner's status wins); neither run may touch the records."""
+def _cancel_run(recorded: Project, mode: str) -> tuple:
+    """S13 setup: S1 and S2 edits, ``ptest --changed`` held in its first
+    test (``hold.flag`` mode), SIGINT once ``ran.txt`` shows it started.
+    Returns ``(returncode, stderr, store state before)``."""
     recorded.edit_users_body()
     recorded.add_field("age: int")
     hold = recorded.root / HOLD_FLAG
@@ -655,13 +659,10 @@ def test_s13_cancelled_run_leaves_the_store_alone(recorded, mode):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate(timeout=30)
         hold.unlink(missing_ok=True)
-    err = stderr.decode("utf-8", "replace")
+    return proc.returncode, stderr.decode("utf-8", "replace"), before
 
-    if mode == "stuck":
-        assert proc.returncode == 130, err[-2000:]
-        assert "ptest: cancelled" in err
-    else:
-        assert proc.returncode == 2, err[-2000:]
+
+def _next_changed_run_is_intact(recorded: Project, before: dict) -> None:
     recorded.assert_state_unchanged(before)
     recorded.clear_ran()
 
@@ -671,6 +672,40 @@ def test_s13_cancelled_run_leaves_the_store_alone(recorded, mode):
     assert recorded.ran() == USERS_TESTS
     assert again.selection["run_now"] == 3
     assert again.selection["deferred"] == 17
+
+
+def test_s13_cancelled_run_leaves_the_store_alone_runner_ignoring_sigint(
+        recorded):
+    """A runner that ignores SIGINT is killed after the grace: ptest's own
+    `cancelled` (exit 130); the records stay untouched."""
+    code, err, before = _cancel_run(recorded, "stuck")
+
+    assert code == 130, err[-2000:]
+    assert "ptest: cancelled" in err
+    _next_changed_run_is_intact(recorded, before)
+
+
+def test_s13_cancelled_run_leaves_the_store_alone_cooperative_runner(
+        recorded):
+    """Pinned existing behaviour, not the spec's row: a pytest that leaves
+    on its own KeyboardInterrupt ends with its runner status (exit 2,
+    `test_real_cancellation_reaps_guard_and_releases_checkout`); the
+    records stay untouched. The spec's `cancelled (exit 130)` for this
+    plain run is the xfail row below."""
+    code, err, before = _cancel_run(recorded, "cooperative")
+
+    assert code == 2, err[-2000:]
+    _next_changed_run_is_intact(recorded, before)
+
+
+@pytest.mark.xfail(strict=True, reason=SPEC_DELTA + "S13: the spec ends an "
+                   "ordinary SIGINT'd run `cancelled` (exit 130); the "
+                   "product lets the runner's own exit 2 win")
+def test_s13_spec_plain_sigint_run_ends_cancelled_130(recorded):
+    code, err, _ = _cancel_run(recorded, "cooperative")
+
+    assert code == 130, err[-2000:]
+    assert "ptest: cancelled" in err
 
 
 def test_s14_unknown_schema_falls_back_to_static_and_never_writes(recorded):
@@ -770,3 +805,195 @@ def test_s17_deferral_since_the_gate_survives_a_moved_green_point(recorded):
     assert (f"ptest: no changes since last green run — nothing to run now "
             f"· {note} · {GATE_HINT}" in second.lines), second.lines
     assert recorded.ran() == set()
+
+
+# ------------------------------------------- spec end-line wording (S rows)
+# The spec writes counted serial end lines (`passed · 3 tests`, `1 failed,
+# 19 passed`). The product's serial line carries no counts (pinned by
+# test_run_output), so the rows above assert what it prints. Each spec
+# wording is asserted here exactly and expected to fail until the
+# orchestrator amends the spec or the product prints the counts; strict
+# xfail turns the day it starts passing into a visible failure.
+
+def _row_s1(case):
+    project = Project.recorded(case)
+    project.edit_users_body()
+    return project.run("--changed", timeout=CHANGED_TIMEOUT)
+
+
+def _row_s3(case):
+    project = Project.recorded(case)
+    project.after_s2()
+    return project.run("--full")
+
+
+def _row_s4(case):
+    project = Project.recorded(case)
+    project.learned()
+    project.reseed(["age", "email", "name"], None)
+    project.add_field("phone: str")
+    return project.run("--changed", timeout=CHANGED_TIMEOUT)
+
+
+def _row_s5(case):
+    project = Project.recorded(case)
+    tree_a = project.worktree("wt-a", "branch-a")
+    project.add_field("age: int", tree_a)
+    project.edit_users_body(tree_a)
+    project.run("--base", "main", root=tree_a, timeout=CHANGED_TIMEOUT)
+    tree_b = project.worktree("wt-b", "branch-b")
+    project.edit_total_body(tree_b)
+    return project.run("--base", "main", root=tree_b,
+                       timeout=CHANGED_TIMEOUT)
+
+
+def _row_s6a(case):
+    project = Project.recorded(case)
+    project.git("checkout", "-q", "-b", "bump")
+    (project.root / "uv.lock").write_text(
+        (project.root / "uv.lock").read_text() + "# bump\n")
+    project.commit("bump the lockfile")
+    return project.run("--base", "main", timeout=FULL_TIMEOUT)
+
+
+def _row_s6c(case):
+    project, tree = _bumped_on_main(case)
+    project.run("--base", "main", root=tree, timeout=FULL_TIMEOUT)
+    other = project.worktree("wt-total", "branch-total")
+    project.edit_total_body(other)
+    return project.run("--base", "main", root=other,
+                       timeout=CHANGED_TIMEOUT)
+
+
+def _row_s8(case):
+    project = Project.recorded(case)
+    project.learned()
+    project.reseed(["age", "email", "name"],
+                   [sys.executable, "-m", "app.manifest"])
+    project.add_field("phone: str")
+    return project.run("-v", "--changed", timeout=CHANGED_TIMEOUT)
+
+
+def _row_s9(case):
+    project = Project.recorded(case)
+    project.learned()
+    project.reseed(["age", "email", "name"],
+                   [sys.executable, "-c", "import sys; sys.exit(3)"])
+    project.add_static_norm()
+    return project.run("-v", "--changed", timeout=CHANGED_TIMEOUT)
+
+
+def _row_s11(case):
+    project = Project.recorded(case)
+    project.edit("app/plugins/audit.py", '@route("/audit")',
+                 '@route("/audit/v2")')
+    project.edit_engine_body()
+    return project.run("--changed", timeout=CHANGED_TIMEOUT)
+
+
+def _row_s17(case):
+    project = Project.recorded(case)
+    project.sql_write("DELETE FROM nodes WHERE test_file = ?",
+                      ("tests/test_orders.py",))
+    project.edit_total_body()
+    project.edit_users_body()
+    return project.run(timeout=CHANGED_TIMEOUT)
+
+
+_T = r"[\d.]+m?s"
+_SPEC_END_LINES = {
+    "S1": (_row_s1, rf"ptest: passed · 3 tests · {_T}"),
+    "S3": (_row_s3, r"ptest: failed · 1 failed, 19 passed\b.*"),
+    "S4": (_row_s4, rf"ptest: failed · 1 failed, 0 passed · deferred 19 "
+                    rf"\({SHARED_MODELS}\) · {_T} \(exit 1\) · fix the code "
+                    rf"under test, then rerun ptest"),
+    "S5": (_row_s5, rf"ptest: passed · 2 tests · {_T}"),
+    "S6a": (_row_s6a, rf"ptest: passed · 20 tests · full suite "
+                      rf"\(uv\.lock is a full trigger\) · {_T}"),
+    "S6c": (_row_s6c, rf"ptest: passed · 2 tests · deferred 18 "
+                      rf"\({SHARED_MODELS}\) · {_T} · {GATE_HINT}"),
+    "S8": (_row_s8, rf"ptest: failed · 1 failed, 0 passed · deferred 19 "
+                    rf"\({SHARED_MODELS}\).*"),
+    "S9": (_row_s9, rf"ptest: passed · 1 test · deferred 19 "
+                    rf"\({SHARED_MODELS}\) · {_T} · {GATE_HINT}"),
+    "S11": (_row_s11, rf"ptest: passed · 2 tests · deferred 18 \(shared "
+                      rf"import-time state via app/plugins/audit\.py\) · "
+                      rf"{_T} · {GATE_HINT}"),
+    "S17": (_row_s17, rf"ptest: passed · 3 tests · deferred 2 \(unrecorded "
+                      rf"since gate via app/svc/orders\.py\) · {_T} · "
+                      rf"{GATE_HINT}"),
+}
+
+
+@pytest.mark.xfail(strict=True, reason=SPEC_DELTA + "the serial end line "
+                   "carries no test counts")
+@pytest.mark.parametrize("row", sorted(_SPEC_END_LINES))
+def test_spec_counted_end_line(case, row):
+    setup, pattern = _SPEC_END_LINES[row]
+
+    run = setup(case)
+
+    assert re.fullmatch(pattern, run.end), (row, run.end)
+
+
+# ------------------------------------------------- named negative contracts
+
+MARKER = "FPMARKER-5c1e9a"
+
+
+def _store_files_bytes(project: Project) -> bytes:
+    """Every byte of the project's store directory (db, journal, wal)."""
+    parts = []
+    for path in sorted(project.store_path.parent.rglob("*")):
+        if path.is_file():
+            parts.append(path.read_bytes())
+    return b"".join(parts)
+
+
+def test_writing_fingerprint_command_fails_closed(recorded):
+    """A fingerprint command that writes an input (`app/settings.py`)
+    changes the checkout under the run: the run ends `incomplete` with
+    `changed-during-run` (exit 70), never `no tests needed` or green."""
+    recorded.learned()
+    writer = [sys.executable, "-c",
+              "open('app/settings.py', 'a').write('# touched\\n')"]
+    recorded.reseed(["age", "email", "name"], None)
+    recorded.set_fingerprint(writer)  # first used by the run below
+    recorded.add_static_norm()
+
+    run = recorded.run("--result-json", "r.json", "-v", "--changed",
+                       timeout=CHANGED_TIMEOUT)
+
+    assert run.code == 70, run.err[-2000:]
+    assert "changed-during-run" in run.err, run.err[-2000:]
+    assert re.search(r"^ptest: incomplete\b", run.err, re.M), run.err[-2000:]
+    assert "ptest: no tests needed" not in run.err
+    assert not re.search(r"^ptest: passed\b", run.err, re.M)
+    assert "# touched" in (
+        recorded.root / "app" / "settings.py").read_text()  # it wrote
+    result = json.loads((recorded.root / "r.json").read_text())
+    assert result["data"]["status"] == "incomplete", result["data"]["status"]
+    assert any(reason["code"] == "changed-during-run"
+               for reason in result["data"]["reasons"]), result["data"]
+
+
+def test_fingerprint_output_never_printed_or_stored(recorded):
+    """The fingerprint command's stdout and stderr are digested, never
+    echoed: a marker it prints appears in no CLI stream, no result JSON
+    and no stored byte."""
+    recorded.learned()
+    emitter = [sys.executable, "-c",
+               f"import sys; print('{MARKER}-out'); "
+               f"print('{MARKER}-err', file=sys.stderr)"]
+    recorded.reseed(["age", "email", "name"], emitter)
+    recorded.add_static_norm()
+
+    run = recorded.run("--result-json", "r.json", "-v", "--changed",
+                       timeout=CHANGED_TIMEOUT)
+
+    assert "fingerprint:" in run.err, run.err[-2000:]  # it did run
+    assert MARKER not in run.err
+    assert MARKER not in run.out
+    result_bytes = (recorded.root / "r.json").read_bytes()
+    assert MARKER.encode() not in result_bytes
+    assert MARKER.encode() not in _store_files_bytes(recorded)
