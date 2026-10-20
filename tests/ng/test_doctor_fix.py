@@ -213,8 +213,9 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert '+args = []' in verbose_out
     assert '+coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in verbose_out
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert '"-n", "0"' not in raw
     assert 'coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in raw
@@ -227,8 +228,9 @@ def test_fix_leaves_default_dev_group_out_of_setup_argv(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked"]' in raw
     assert "--group" not in raw
@@ -248,8 +250,9 @@ def test_fix_adds_extra_for_ptest_shaped_pyproject(tmp_path, monkeypatch, capsys
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
     assert "--group" not in raw
@@ -267,8 +270,9 @@ def test_fix_adds_group_for_plugin_in_non_default_group(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--group", "testdeps"]' in raw
 
@@ -281,8 +285,9 @@ def test_fix_never_invents_a_missing_extra(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked"]' in raw
     assert "--group" not in raw
@@ -300,8 +305,9 @@ def test_fix_adds_extra_for_xdist_when_n_is_used(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
 
@@ -406,7 +412,8 @@ def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):
     assert "closed_inputs = true" in raw
     out = capsys.readouterr().out
     assert ("selection enabled: bare ptest now runs the tests your change "
-            "reaches (no baseline needed); run ptest --full once before handoff") in out
+            "reaches (no baseline needed); run ptest --full once at the end "
+            "of the spec or chain") in out
     assert "record a baseline" not in out
 
 
@@ -417,8 +424,9 @@ def test_fix_appends_missing_selection_table_at_eof(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert "\n[selection]\nenabled = true\nclosed_inputs = true\n" in raw
     assert main(("doctor", "--fix")) == 0
@@ -456,8 +464,9 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
     assert '"libs/mylib"' in verbose_out
     assert '"src/core"' in verbose_out
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     parsed = tomllib.loads(raw)
     assert parsed["selection"]["enabled"] is True
@@ -731,8 +740,9 @@ def test_fix_handles_quoted_table_header_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
     assert '["selection"]' in raw
@@ -750,8 +760,9 @@ def test_fix_handles_quoted_key_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
     assert "args" in raw
@@ -767,16 +778,44 @@ def test_fix_preserves_unmanaged_settings_byte_for_byte(
         "[selection]",
         "enabled = false",
         "full_ratio = 0.5",
+        # 0.7.0 keys: multi-line arrays doctor must leave untouched.
+        "observers = [",
+        '    "src/shared",',
+        '    "src/models/base.py",',
+        "]",
+        "ambient_fingerprint = [",
+        '    "git",',
+        '    "ls-files",',
+        '    "--",',
+        '    "fixtures",',
+        "]",
     ))
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
+    import tomllib
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
-    lines = (root / ".ptest.toml").read_text(encoding="utf-8").splitlines()
+    before = tomllib.loads(
+        (root / ".ptest.toml").read_text(encoding="utf-8"))["selection"]
+
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    lines = raw.splitlines()
     assert "# a user comment" in lines
     assert "enabled = false" in lines
     assert "full_ratio = 0.5" in lines
+    block = ["observers = [", '    "src/shared",',
+             '    "src/models/base.py",', "]",
+             "ambient_fingerprint = [", '    "git",', '    "ls-files",',
+             '    "--",', '    "fixtures",', "]"]
+    start = lines.index(block[0])
+    assert lines[start:start + len(block)] == block
+    after = tomllib.loads(raw)["selection"]
+    assert after["observers"] == before["observers"] == [
+        "src/shared", "src/models/base.py"]
+    assert after["ambient_fingerprint"] == before["ambient_fingerprint"] == [
+        "git", "ls-files", "--", "fixtures"]
 
 
 def test_fix_refuses_symlinked_config(tmp_path, monkeypatch, capsys):
@@ -1019,8 +1058,9 @@ def test_fix_adds_node_modules_to_vitest_config_and_is_idempotent(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 0
-    capsys.readouterr()
+    code = main(("doctor", "--fix"))
+    captured = capsys.readouterr()
+    assert code == 0, captured.err + captured.out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'non_input_outputs = ["node_modules"]' in raw
 

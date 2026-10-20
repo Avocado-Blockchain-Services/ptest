@@ -192,8 +192,9 @@ def test_monorepo_root_bare_runs_changed_loop(tmp_path, monkeypatch, capsys, mon
     assert main(()) == 0
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
-            "ptest --full runs everything") in err
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test"
+            "\n") in err
+    assert "runs everything" not in err
     assert "ptest: total" not in err
 
 

@@ -2495,7 +2495,8 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
         print(f"updated {rel}")
     if doctor_fix.selection_enabled_by(plan):
         print("selection enabled: bare ptest now runs the tests your change "
-              "reaches (no baseline needed); run ptest --full once before handoff")
+              "reaches (no baseline needed); run ptest --full once at the end of "
+              "the spec or chain")
     return 0
 
 
@@ -3252,11 +3253,13 @@ def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
 def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | None]],
                           started: float, code: int, *, quiet: bool,
                           next_step: str | None = None,
-                          skipped: int = 0) -> None:
+                          skipped: int = 0,
+                          deferred: str | None = None) -> None:
     """Emit the existing total line over per-child outcomes.
 
     Skipped children (an unchanged full gate) are reported as a note,
-    never as freshly run tests.
+    never as freshly run tests. ``deferred`` is the one summed note of the
+    children's deferred tests (R31, Decision 10).
     """
     total_counts = _summed_counts(
         [counts for _, _, counts in child_outcomes])
@@ -3266,13 +3269,15 @@ def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | No
             and status in (C.Status.FAILED, C.Status.INCOMPLETE,
                            C.Status.NOT_RUN)
             and progress.claim_hint())
-    note = (progress.format_skipped_children(skipped)
-            if skipped else None)
+    notes = [item for item in (
+        progress.format_skipped_children(skipped) if skipped else None,
+        deferred) if item]
     progress.emit(progress.format_end(
         status, counts=total_counts,
         duration_s=time.monotonic() - started, exit_code=code,
         hint=hint, lead="total", color=sys.stderr.isatty(),
-        next_step=next_step, note=note), quiet=quiet)
+        next_step=next_step,
+        note=" · ".join(notes) if notes else None), quiet=quiet)
 
 
 def _impact_api():
@@ -3288,14 +3293,43 @@ def _selection_api():
 
 
 def _impact_head(impact, *, reference: str) -> str:
-    """The ``{reference}: {first} (+N files)`` head shared by start lines."""
+    """The ``{reference}: {first} (+N files)`` head shared by start lines.
+
+    An empty changed set (R10: the plan still runs T1 nodes) reads
+    ``{reference}: no changes``.
+    """
     changed = tuple(getattr(impact, "changed", ()) or ())
     if changed:
         first = render.terminal_text(changed[0])
         extra = len(changed) - 1
         count = "" if extra == 0 else f" (+{extra} file{'s' if extra > 1 else ''})"
         return f"{reference}: {first}{count}"
-    return reference
+    return f"{reference}: no changes"
+
+
+def _selection_report(impact) -> C.SelectionReport | None:
+    """The verdict's selection report, if it carries a real one.
+
+    Read with ``getattr``: verdict stubs in tests predate the field.
+    """
+    report = getattr(impact, "selection", None)
+    return report if isinstance(report, C.SelectionReport) else None
+
+
+def _conditional_entries(impact) -> tuple[tuple[str, str | None], ...]:
+    """Conditional observers of a verdict as ``(node id, expected)`` pairs."""
+    try:
+        entries = tuple(getattr(impact, "conditional", ()) or ())
+        return tuple((str(nodeid), expected) for nodeid, expected in entries)
+    except (TypeError, ValueError):
+        return ()
+
+
+def _no_run_parts(impact) -> tuple[str | None, str | None]:
+    """The R31 deferred segment and R29 hint of a line that runs nothing."""
+    report = _selection_report(impact)
+    return (progress.format_deferred(report),
+            progress.next_step(C.Status.PASSED, report))
 
 
 def _impact_note(impact, label: str, *, reference: str) -> str:
@@ -3318,13 +3352,22 @@ def _impact_note(impact, label: str, *, reference: str) -> str:
                     f"{C.plural(getattr(impact, 'total', 0), 'file')} "
                     f"(dynamic · {summary})")
         if impact.kind == "none":
+            deferred = progress.format_deferred(_selection_report(impact))
+            conditional = _conditional_entries(impact)
+            if deferred and conditional:
+                # R44 / D8: a run that only checks the conditional observers.
+                return (f"{head} → checking "
+                        f"{C.plural(len(conditional), 'observer')} · "
+                        f"{deferred}")
+            if deferred:
+                return f"{head} → nothing to run now · {deferred}"
             reached = int(getattr(impact, "reached", 0) or 0)
             if reached > 0:
                 tests = ("1 test reaches"
                          if reached == 1 else f"{reached} tests reach")
                 return (f"{head} → no tests affected: {tests} these changes "
                         f"and already passed on this code")
-        return f"{head} → no tests affected · ptest --full runs everything"
+        return f"{head} → no tests affected"
     if (engine == "static" and impact.kind == "selected"
             and getattr(impact, "static_reason", "")):
         return (f"{head} → {len(impact.files)} of {impact.total} test files "
@@ -3343,19 +3386,39 @@ def _impact_note(impact, label: str, *, reference: str) -> str:
                 f"({impact.direct} direct · {impact.via} via importers)")
     if impact.kind == "vitest":
         return f"{head} → vitest --changed {render.terminal_text(label)}"
-    return f"{head} → no tests affected · ptest --full runs everything"
+    return f"{head} → no tests affected"
+
+
+def _no_run_note(impact, label: str, *, reference: str) -> str:
+    """The R31 line for a changed set that runs nothing: note plus hint."""
+    note = _impact_note(impact, label, reference=reference)
+    _deferred, hint = _no_run_parts(impact)
+    return f"{note} · {hint}" if hint else note
+
+
+_VITEST_REPORT = C.SelectionReport(
+    engine="vitest-changed", iteration=True, run_now=None, deferred=None)
 
 
 def _impact_run_request(parsed: ParsedArgs, impact, base,
                         *, next_hint: bool,
                         reference: str) -> C.RunRequest | None:
-    """Map one impact verdict to its run request; None means skip the run."""
+    """Map one impact verdict to its run request; None means skip the run.
+
+    A plan with conditional observers runs even without a T1 node (R44):
+    the controller computes the ambient fingerprint and decides.
+    """
+    conditional = _conditional_entries(impact)
+    selection = _selection_report(impact)
     if impact.kind == "none":
-        return None
-    if impact.kind == "selected":
+        if not conditional or not tuple(getattr(impact, "files", ()) or ()):
+            return None
+        mode, argv = C.Mode.SCOPED, tuple(impact.files)
+    elif impact.kind == "selected":
         mode, argv = C.Mode.SCOPED, tuple(impact.files)
     elif impact.kind == "vitest":
         mode, argv = C.Mode.SCOPED, ("--changed", base.sha or "HEAD")
+        selection, conditional = _VITEST_REPORT, ()
     else:
         mode, argv = C.Mode.FULL, ()
     try:
@@ -3363,7 +3426,7 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
     except (TypeError, ValueError):
         deselect = ()
     if mode is not C.Mode.SCOPED:
-        deselect = ()
+        deselect, conditional = (), ()
     return C.RunRequest(
         mode=mode, argv=argv, base=None,
         workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
@@ -3372,7 +3435,8 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
         changed_note=_impact_note(impact, base.label, reference=reference),
-        next_hint=next_hint, deselect=deselect, coverage=parsed.coverage)
+        next_hint=next_hint, deselect=deselect, coverage=parsed.coverage,
+        conditional=conditional, selection=selection)
 
 
 def _consult_reference(parsed: ParsedArgs, domain: C.DomainPaths, top,
@@ -3559,7 +3623,10 @@ def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
                         note: str | None = None,
                         display: tuple[str, ...] | None = None,
                         next_hint: bool = False,
-                        deselect: tuple[str, ...] = ()) -> C.RunRequest:
+                        deselect: tuple[str, ...] = (),
+                        conditional: tuple = (),
+                        selection: C.SelectionReport | None = None
+                        ) -> C.RunRequest:
     """Build one literal scoped request (an explicitly narrowed run)."""
     return C.RunRequest(
         mode=C.Mode.SCOPED, argv=argv,
@@ -3570,7 +3637,8 @@ def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
         changed_note=note, display_argv=display, next_hint=next_hint,
-        deselect=tuple(deselect), coverage=parsed.coverage)
+        deselect=tuple(deselect), coverage=parsed.coverage,
+        conditional=tuple(conditional), selection=selection)
 
 
 def _note_run(domain: C.DomainPaths, root: Path, project: str,
@@ -3668,6 +3736,32 @@ def _filter_folder_deselect(deselect: tuple[str, ...],
     return tuple(kept)
 
 
+def _filter_folder_conditional(conditional: tuple, selected: tuple[str, ...],
+                               explicit: tuple[str, ...]) -> tuple:
+    """Conditional entries of the folder files; explicit files run whole."""
+    wanted = {C.selection_test_file(item) for item in selected}
+    named = {C.selection_test_file(item) for item in explicit}
+    return tuple(item for item in conditional
+                 if C.selection_test_file(item[0]) in wanted
+                 and C.selection_test_file(item[0]) not in named)
+
+
+def _narrow_impact(impact, folders: tuple[str, ...]):
+    """Restrict a refined verdict to the folders' part of the plan (R40).
+
+    Deferred nodes outside the folders are neither run nor counted. A
+    selection API without ``narrow`` (or a failing one) keeps the verdict.
+    """
+    try:
+        narrow = _selection_api().narrow
+    except (ImportError, AttributeError):
+        return impact
+    try:
+        return narrow(impact, tuple(folders))
+    except Exception:
+        return impact
+
+
 def _emit_ignored_count(parsed: ParsedArgs, impact) -> None:
     """Verbose-only note for changed files excluded as build output or as
     non-code outside the project's source and test areas. Never printed
@@ -3695,19 +3789,22 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
                                   reference=reference)
     if request is None:
         project = render.terminal_text(resolution.root.name)
+        deferred, hint = _no_run_parts(impact)
         if impact.changed:
             progress.emit(progress.format_impact(
-                project, _impact_note(impact, base.label,
+                project, _no_run_note(impact, base.label,
                                       reference=reference),
                 color=sys.stderr.isatty()), quiet=parsed.quiet)
         elif green:
             progress.emit(progress.format_no_green_changes(
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(), deferred=deferred, hint=hint),
+                quiet=parsed.quiet)
         else:
             progress.emit(progress.format_nothing_changed(
                 render.terminal_text(base.label),
                 color=sys.stderr.isatty(),
-                no_green_run=parsed.base is None), quiet=parsed.quiet)
+                no_green_run=parsed.base is None, deferred=deferred,
+                hint=hint), quiet=parsed.quiet)
         return 0
     result = operations.execute(domain, resolution.config, request)
     _note_run(domain, resolution.root, "", request, result,
@@ -3751,6 +3848,7 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     always = [item.local for item in split.files]
     folders = tuple(item.local for item in split.folders)
     typeds = tuple(item.typed for item in split.folders)
+    impact = _narrow_impact(impact, folders)
     if impact.kind == "vitest":
         argv = (("--changed", child_base.sha or "HEAD")
                 + tuple(local for local in folders if local)
@@ -3758,7 +3856,8 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         note = (f"{' '.join(render.terminal_text(item) for item in typeds)}"
                 f" → vitest --changed "
                 f"{render.terminal_text(child_base.label)}")
-        request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
+        request = _run_scoped_request(parsed, argv, note=note, next_hint=True,
+                                      selection=_VITEST_REPORT)
         result = operations.execute(domain, target.config, request)
         _note_run(domain, resolution.root, target.declaration, request,
                   result, covers_project=whole)
@@ -3784,7 +3883,8 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                   result, covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
-    if impact.kind == "selected":
+    if impact.kind in ("selected", "none"):
+        # A "none" plan keeps the files of its conditional observers (R44).
         under = [path for path in impact.files
                  if _under_any(path, folders)]
         selected = list(under) + [item for item in always
@@ -3793,10 +3893,12 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         selected = list(always)
     if not selected:
         project = render.terminal_text(target.declaration)
+        deferred, hint = _no_run_parts(impact)
         for item in split.folders:
             progress.emit(progress.format_no_changes_under(
                 project, render.terminal_text(item.typed),
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(), deferred=deferred, hint=hint),
+                quiet=parsed.quiet)
         return 0
     request = _run_scoped_request(
         parsed, tuple(selected),
@@ -3804,7 +3906,10 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         next_hint=True,
         deselect=_filter_folder_deselect(
             tuple(getattr(impact, "deselect", ()) or ()),
-            tuple(selected), tuple(always)))
+            tuple(selected), tuple(always)),
+        conditional=_filter_folder_conditional(
+            _conditional_entries(impact), tuple(selected), tuple(always)),
+        selection=_selection_report(impact))
     result = operations.execute(domain, target.config, request)
     _note_run(domain, resolution.root, target.declaration, request, result,
               covers_project=whole)
@@ -3853,12 +3958,14 @@ def _run_folder_standalone(parsed: ParsedArgs,
     always = [local for _, local in files]
     under_roots = tuple(local for _, local in folders)
     typeds = tuple(typed for typed, _ in folders)
+    impact = _narrow_impact(impact, under_roots)
     if impact.kind == "vitest":
         argv = (("--changed", base.sha or "HEAD")
                 + under_roots + tuple(always))
         note = (f"{' '.join(render.terminal_text(item) for item in typeds)}"
                 f" → vitest --changed {render.terminal_text(base.label)}")
-        request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
+        request = _run_scoped_request(parsed, argv, note=note, next_hint=True,
+                                      selection=_VITEST_REPORT)
         result = operations.execute(domain, resolution.config, request)
         _note_run(domain, resolution.root, "", request, result,
                   covers_project=whole)
@@ -3879,7 +3986,7 @@ def _run_folder_standalone(parsed: ParsedArgs,
                   covers_project=whole)
         _emit_reasons(result)
         return result.exit_code
-    if impact.kind == "selected":
+    if impact.kind in ("selected", "none"):
         under = [path for path in impact.files
                  if _under_any(path, under_roots)]
         selected = list(under) + [item for item in always
@@ -3888,10 +3995,12 @@ def _run_folder_standalone(parsed: ParsedArgs,
         selected = list(always)
     if not selected:
         project = render.terminal_text(resolution.root.name)
+        deferred, hint = _no_run_parts(impact)
         for typed, _ in folders:
             progress.emit(progress.format_no_changes_under(
                 project, render.terminal_text(typed),
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(), deferred=deferred, hint=hint),
+                quiet=parsed.quiet)
         return 0
     request = _run_scoped_request(
         parsed, tuple(selected),
@@ -3899,7 +4008,10 @@ def _run_folder_standalone(parsed: ParsedArgs,
         next_hint=True,
         deselect=_filter_folder_deselect(
             tuple(getattr(impact, "deselect", ()) or ()),
-            tuple(selected), tuple(always)))
+            tuple(selected), tuple(always)),
+        conditional=_filter_folder_conditional(
+            _conditional_entries(impact), tuple(selected), tuple(always)),
+        selection=_selection_report(impact))
     result = operations.execute(domain, resolution.config, request)
     _note_run(domain, resolution.root, "", request, result,
               covers_project=whole)
@@ -4037,28 +4149,32 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                for child, child_base, child_changed, reference, green
                in consulted]
     if all(impact.kind == "none" and not impact.changed
-           for _, _, impact, _ in planned):
+           and not _has_deferred(impact) for _, _, impact, _ in planned):
         for _, _, impact, _ in planned:
             _emit_ignored_count(parsed, impact)
         greens = [green for _, _, _, _, green in consulted]
+        hint = progress.total_next_step(
+            C.Status.PASSED, [_selection_report(impact)
+                              for _, _, impact, _ in planned])
         if all(greens):
             progress.emit(progress.format_no_green_changes(
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(), hint=hint), quiet=parsed.quiet)
         elif any(greens):
             # Children compare against different references (some have a
             # green run, some not): make no claim about a single reference.
             progress.emit(progress.format_no_changes_anywhere(
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(), hint=hint), quiet=parsed.quiet)
         else:
             progress.emit(progress.format_nothing_changed(
                 render.terminal_text(base.label),
                 color=sys.stderr.isatty(),
-                no_green_run=parsed.base is None), quiet=parsed.quiet)
+                no_green_run=parsed.base is None, hint=hint),
+                quiet=parsed.quiet)
         return 0
     started = time.monotonic()
     outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+    reports: list[C.SelectionReport | None] = []
     first_failure = 0
-    narrowed = False
     cancelled = False
     for child, child_base, impact, reference in planned:
         _emit_ignored_count(parsed, impact)
@@ -4066,16 +4182,15 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         request = _impact_run_request(parsed, impact, child_base,
                                       next_hint=False, reference=reference)
         if request is None:
-            if impact.changed:
-                narrowed = True
             if not parsed.quiet:
                 print(progress.format_no_changes(
                     render.terminal_text(child.declaration),
-                    color=sys.stderr.isatty()), file=sys.stderr)
+                    color=sys.stderr.isatty(),
+                    deferred=progress.format_deferred(
+                        _selection_report(impact))), file=sys.stderr)
             outcomes.append((0, C.Status.NO_TESTS_NEEDED, None))
+            reports.append(_selection_report(impact))
             continue
-        if request.mode is C.Mode.SCOPED:
-            narrowed = True
         result = operations.execute(domain, child.config, request)
         _note_run(domain, resolution.root, child.declaration, request,
                   result, covers_project=True)
@@ -4083,14 +4198,32 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         if getattr(result, "signal", None) == signal.SIGINT:
             cancelled = True
         outcomes.append((result.exit_code, result.status, result.counts))
+        reports.append(_result_selection(result, request))
         if result.exit_code and not first_failure:
             first_failure = result.exit_code
     worst = _worst_status([status for _, status, _ in outcomes])
     if not cancelled:
         _emit_monorepo_total(outcomes, started, first_failure,
                              quiet=parsed.quiet,
-                             next_step=progress.next_step(worst, narrowed))
+                             next_step=progress.total_next_step(worst, reports),
+                             deferred=progress.format_total_deferred(reports))
     return first_failure
+
+
+def _has_deferred(impact) -> bool:
+    """Whether a verdict deferred tests or holds conditional observers."""
+    report = _selection_report(impact)
+    return bool((report is not None and report.deferred)
+                or _conditional_entries(impact))
+
+
+def _result_selection(result, request) -> C.SelectionReport | None:
+    """The selection block of an executed child, else its request's."""
+    report = getattr(result, "selection", None)
+    if isinstance(report, C.SelectionReport):
+        return report
+    report = getattr(request, "selection", None)
+    return report if isinstance(report, C.SelectionReport) else None
 
 
 def _lease(item: C.LeaseView) -> dict:

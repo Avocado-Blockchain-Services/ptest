@@ -104,8 +104,8 @@ def test_green_run_then_no_changes(tmp_path, monkeypatch, capsys):
     assert main(()) == 0
     assert len(calls) == 1
     err = capsys.readouterr().err
-    assert ("no changes since last green run — nothing to test · "
-            "ptest --full runs everything") in err
+    assert ("no changes since last green run — nothing to test\n") in err
+    assert "runs everything" not in err
 
 
 def test_committing_the_green_dirty_state_unchanged_is_not_a_change(

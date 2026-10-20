@@ -220,7 +220,11 @@ def test_bare_none_with_changes_prints_no_tests_line(tmp_path, monkeypatch, caps
     assert calls == []
     err = capsys.readouterr().err
     assert (f"ptest: {tmp_path.name} · changed vs origin/dev (no green run yet): README.md → "
-            "no tests affected · ptest --full runs everything") in err
+            "no tests affected\n") in err
+    # R31: the "ptest --full runs everything" suffix is gone, and a verdict
+    # without a selection report owes no gate hint (D11).
+    assert "runs everything" not in err
+    assert "gate at spec end" not in err
 
 
 def test_bare_nothing_changed_prints_nothing_line(tmp_path, monkeypatch, capsys):
@@ -234,8 +238,9 @@ def test_bare_nothing_changed_prints_nothing_line(tmp_path, monkeypatch, capsys)
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
-            "ptest --full runs everything") in err
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test"
+            "\n") in err
+    assert "runs everything" not in err
 
 
 def test_bare_verbose_reports_ignored_count(tmp_path, monkeypatch, capsys):
@@ -362,7 +367,10 @@ def test_monorepo_selected_child_runs_scoped_without_hint(
     err = capsys.readouterr().err
     assert "ptest: web · no changes" in err
     assert "ptest: total" in err
-    assert "next: ptest --full before handoff" in err
+    # D11 / R29: command runners carry no selection report, so the total
+    # line owes no hint (the old `next:` hint is gone with NEXT_FULL).
+    assert "next: ptest --full" not in err
+    assert "gate at spec end" not in err
     assert seen["explicit"] is None
 
 
@@ -413,8 +421,8 @@ def test_monorepo_nothing_changed_has_no_total(
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
-            "ptest --full runs everything") in err
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test"
+            "\n") in err
     assert "ptest: total" not in err
     assert "ptest: api ·" not in err
     assert "ptest: web ·" not in err
@@ -463,30 +471,39 @@ def test_monorepo_refinement_uses_child_project_id(
 
 # --- progress + operations hint wiring ---------------------------------------
 
+def _gate_report(**fields):
+    base = dict(engine="dynamic", iteration=True, run_now=2, deferred=4,
+                deferred_by_reason=(("b-static", "pkg/core.py", 4),),
+                deferred_by_file=(("tests/test_a.py", 4),),
+                gate_recorded=True)
+    base.update(fields)
+    return C.SelectionReport(**base)
+
+
 def test_next_step_matrix():
-    assert progress.next_step(C.Status.FAILED, False) == progress.NEXT_FIX
-    assert progress.next_step(C.Status.FAILED, True) == progress.NEXT_FIX
-    assert progress.next_step(C.Status.PASSED, True) == progress.NEXT_FULL
-    assert progress.next_step(C.Status.NO_TESTS_NEEDED, True) == progress.NEXT_FULL
-    assert progress.next_step(C.Status.PASSED, False) is None
-    assert progress.next_step(C.Status.CANCELLED, True) is None
-    assert progress.next_step(C.Status.INCOMPLETE, True) is None
-    assert progress.next_step(C.Status.NOT_RUN, True) is None
+    deferred = _gate_report()
+    assert progress.next_step(C.Status.FAILED, None) == progress.NEXT_FIX
+    assert progress.next_step(C.Status.FAILED, deferred) == progress.NEXT_FIX
+    assert progress.next_step(C.Status.PASSED, deferred) == progress.GATE_HINT
+    assert progress.next_step(C.Status.NO_TESTS_NEEDED, deferred) == progress.GATE_HINT
+    assert progress.next_step(C.Status.PASSED, _gate_report(
+        gate_recorded=False)) == progress.GATE_HINT_NO_GATE
+    assert progress.next_step(C.Status.PASSED, None) is None
+    assert progress.next_step(C.Status.CANCELLED, deferred) is None
+    assert progress.next_step(C.Status.INCOMPLETE, deferred) is None
+    assert progress.next_step(C.Status.NOT_RUN, deferred) is None
 
 
 def test_format_impact_and_nothing_changed():
     assert progress.format_impact("api", "changed: a.py → 1 of 2 test files") == (
         "ptest: api · changed: a.py → 1 of 2 test files")
     assert progress.format_nothing_changed("origin/dev") == (
-        "ptest: no changes vs origin/dev — nothing to test · "
-        "ptest --full runs everything")
+        "ptest: no changes vs origin/dev — nothing to test")
     assert progress.format_nothing_changed(
         "origin/dev", no_green_run=True) == (
-        "ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
-        "ptest --full runs everything")
+        "ptest: no changes vs origin/dev (no green run yet) — nothing to test")
     assert progress.format_no_green_changes() == (
-        "ptest: no changes since last green run — nothing to test · "
-        "ptest --full runs everything")
+        "ptest: no changes since last green run — nothing to test")
 
 
 def test_format_impact_styles_on_tty():
@@ -498,8 +515,8 @@ def test_format_impact_styles_on_tty():
 def test_format_end_next_step_suppresses_verbosity_hint():
     line = progress.format_end(
         C.Status.PASSED, counts=C.Counts(passed=12), duration_s=1.2,
-        exit_code=0, hint=True, next_step="next: ptest --full before handoff")
-    assert "next: ptest --full before handoff" in line
+        exit_code=0, hint=True, next_step=progress.GATE_HINT)
+    assert progress.GATE_HINT in line
     assert progress.HINT not in line
 
 
@@ -510,15 +527,19 @@ def test_format_end_without_next_step_keeps_hint():
     assert progress.HINT in line
 
 
-def test_emit_end_changed_pass_carries_next_full(case, capsys):
+def test_emit_end_changed_pass_carries_gate_hint(case, capsys):
+    from dataclasses import replace
+
     request = C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/test_a.py",),
                            changed_note="changed: a.py → 1 of 2 test files",
                            next_hint=True)
-    result = case.result(status=C.Status.PASSED, exit_code=0,
-                         counts=C.Counts(passed=12))
+    result = replace(case.result(status=C.Status.PASSED, exit_code=0,
+                                 counts=C.Counts(passed=12)),
+                     selection=_gate_report())
     operations._emit_end(request, result, 0.0)
     err = capsys.readouterr().err
-    assert "next: ptest --full before handoff" in err
+    assert "gate at spec end" in err
+    assert "next: ptest --full" not in err
     assert progress.HINT not in err
 
 
@@ -542,6 +563,7 @@ def test_emit_end_changed_full_pass_has_no_hint(case, capsys):
     operations._emit_end(request, result, 0.0)
     err = capsys.readouterr().err
     assert "next:" not in err
+    assert "gate at spec end" not in err
 
 
 def test_emit_end_without_next_hint_has_no_next_step(case, capsys):
@@ -601,7 +623,8 @@ def test_doctor_fix_prints_graph_next_step(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert ("selection enabled: bare ptest now runs the tests your change reaches "
-            "(no baseline needed); run ptest --full once before handoff") in out
+            "(no baseline needed); run ptest --full once at the end of the spec "
+            "or chain") in out
     assert "record a baseline" not in out
 
 
@@ -736,7 +759,8 @@ def test_dynamic_none_without_reach_keeps_static_text(tmp_path, monkeypatch,
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("no tests affected · ptest --full runs everything") in err
+    assert "no tests affected\n" in err
+    assert "runs everything" not in err
 
 
 def test_dynamic_none_singular_reach(tmp_path, monkeypatch, capsys):
@@ -866,3 +890,375 @@ def test_folder_run_filters_deselect_to_folder(tmp_path, monkeypatch):
     # Deselected ids survive only under the folder files, never inside
     # explicitly named files.
     assert request.deselect == ("tests/test_a.py::test_skip",)
+
+
+# --- 0.7.0 tiered selection: CLI lines, routing, totals (T6) ------------------
+#
+# Oracle: docs/specs/2026-10-19-tiered-iteration-selection.md R10, R12, R29,
+# R31, R39, R40, R44 and Decision 10. The refinement is stubbed through
+# ``cli._selection_api`` so these pin the CLI, not the planner.
+
+_CONDITIONAL_ID = "tests/test_a.py::test_observer"
+_FP = "c" * 64
+
+
+def _tier_report(*, deferred=7, run_now=0, gate_recorded=True,
+                 code="b-static", path="pkg/models.py", conditional=(),
+                 engine="dynamic"):
+    rows = (((code, path, deferred),) if deferred else ())
+    files = ((("tests/test_a.py", deferred),) if deferred else ())
+    return C.SelectionReport(
+        engine=engine, iteration=True, run_now=run_now, deferred=deferred,
+        deferred_by_reason=rows, deferred_by_file=files,
+        gate_recorded=gate_recorded, conditional=tuple(conditional),
+        observers_deferred=len(conditional))
+
+
+def _tiered(kind="none", *, changed=("pkg/core.py",), files=(), deselect=(),
+            tests=0, reached=0, selection=None, conditional=(), total=8,
+            engine="dynamic"):
+    """A refined verdict as ``selection_engine.refine`` returns it."""
+    return types.SimpleNamespace(
+        kind=kind, changed=tuple(changed), files=tuple(files), direct=1,
+        via=1, total=total, reason="", ignored=0, engine=engine,
+        dynamic_ok=True, relevant=tuple(changed), static_reason="",
+        deselect=tuple(deselect), tests=tests, reached=reached,
+        units=(types.SimpleNamespace(kind="unrecorded", label="x", tests=1),),
+        details=(), project_index=None, selection=selection,
+        conditional=tuple(conditional))
+
+
+def _empty_static(mod, changed=()):
+    return mod.Impact(kind="none", changed=tuple(changed))
+
+
+def _route_tiered(monkeypatch, project_name, refined, *, repo_changed=(),
+                  static_changed=None):
+    """Stub the static plan (kind none) and the refinement result."""
+    _install_impact(monkeypatch, plans={})
+    mod, _ = _install_impact(
+        monkeypatch, repo_changed=repo_changed,
+        plans={project_name: types.SimpleNamespace(
+            kind="none", changed=tuple(
+                repo_changed if static_changed is None else static_changed),
+            files=(), direct=0, via=0, total=0, reason="", ignored=0)})
+    _install_selection(monkeypatch, refine=lambda static: refined)
+    return mod
+
+
+def test_no_run_line_never_calls_deferred_unaffected(tmp_path, monkeypatch, capsys):
+    # R31: with T2 tests the line says "nothing to run now"; "no tests
+    # affected" is only for a plan with nothing deferred.
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=14300, code="g-shared",
+                          path="api/models.py")
+    _route_tiered(monkeypatch, tmp_path.name,
+                  _tiered(selection=report, reached=5))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("changed vs origin/dev (no green run yet): pkg/core.py → "
+            "nothing to run now · deferred 14300 (shared import-time state "
+            "via api/models.py) · gate at spec end\n") in err
+    assert "no tests affected" not in err
+    assert "already passed" not in err
+    assert "runs everything" not in err
+
+
+@pytest.mark.parametrize("reached,gate,tail", [
+    (5, True, "no tests affected: 5 tests reach these changes and already "
+              "passed on this code"),
+    (0, True, "no tests affected"),
+    (0, False, "no tests affected · gate at spec end (no gate recorded)"),
+])
+def test_no_run_line_without_t2_keeps_no_tests_affected(
+        tmp_path, monkeypatch, capsys, reached, gate, tail):
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=0, gate_recorded=gate)
+    _route_tiered(monkeypatch, tmp_path.name,
+                  _tiered(selection=report, reached=reached))
+    _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    err = capsys.readouterr().err
+    assert f"pkg/core.py → {tail}\n" in err
+    assert "nothing to run now" not in err
+
+
+def test_empty_diff_runs_t1_nodes(tmp_path, monkeypatch, capsys):
+    # R10: an empty changed set still plans; T1 nodes run with the
+    # `{reference}: no changes → …` start line.
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=0, run_now=3)
+    refined = _tiered("selected", changed=(), files=("tests/test_a.py",),
+                      deselect=("tests/test_a.py::test_other",), tests=3,
+                      selection=report)
+    _route_tiered(monkeypatch, tmp_path.name, refined, repo_changed=())
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests/test_a.py",)
+    assert request.changed_note == (
+        "changed vs origin/dev (no green run yet): no changes → "
+        "3 tests in 1 of 8 files (dynamic · 1 unrecorded test file)")
+    assert request.selection is report
+    assert "nothing to test" not in capsys.readouterr().err
+
+
+def test_empty_diff_still_reports_deferred(tmp_path, monkeypatch, capsys):
+    # R31: an empty diff with T2 tests says so instead of "nothing to test".
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=9, code="u-static", path="tests/test_new.py")
+    _route_tiered(monkeypatch, tmp_path.name,
+                  _tiered(changed=(), selection=report), repo_changed=())
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to "
+            "run now · deferred 9 (unrecorded since gate via "
+            "tests/test_new.py) · gate at spec end\n") in err
+    assert "nothing to test" not in err
+
+
+def test_empty_diff_without_deferred_keeps_nothing_to_test_with_hint(
+        tmp_path, monkeypatch, capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=0, gate_recorded=False)
+    _route_tiered(monkeypatch, tmp_path.name,
+                  _tiered(changed=(), selection=report), repo_changed=())
+    _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to "
+            "test · gate at spec end (no gate recorded)\n"
+            ) in capsys.readouterr().err
+
+
+def test_conditional_only_plan_routes_through_execute(tmp_path, monkeypatch):
+    # R44 / D8: a plan with conditional entries and no T1 node executes.
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(
+        deferred=2, code="g-shared", path="pkg/models.py",
+        conditional=((_CONDITIONAL_ID, "g-shared", "pkg/models.py"),))
+    refined = _tiered(
+        "none", changed=("pkg/models.py",), files=("tests/test_a.py",),
+        deselect=(_CONDITIONAL_ID, "tests/test_a.py::test_other"),
+        selection=report, conditional=((_CONDITIONAL_ID, _FP),))
+    _route_tiered(monkeypatch, tmp_path.name, refined,
+                  repo_changed=("pkg/models.py",))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests/test_a.py",)
+    assert request.deselect == (_CONDITIONAL_ID, "tests/test_a.py::test_other")
+    assert request.conditional == ((_CONDITIONAL_ID, _FP),)
+    assert request.selection is report
+    assert request.changed_note == (
+        "changed vs origin/dev (no green run yet): pkg/models.py → "
+        "checking 1 observer · deferred 2 (shared import-time state via "
+        "pkg/models.py)")
+    assert "gate at spec end" not in request.changed_note
+
+
+def test_selected_plan_carries_selection_and_conditional(tmp_path, monkeypatch):
+    _pytest_project(tmp_path, monkeypatch)
+    report = _tier_report(deferred=3, run_now=2)
+    refined = _tiered(
+        "selected", files=("tests/test_a.py",), tests=2, selection=report,
+        deselect=(_CONDITIONAL_ID,), conditional=((_CONDITIONAL_ID, None),))
+    _route_tiered(monkeypatch, tmp_path.name, refined,
+                  repo_changed=("pkg/core.py",))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls[0].selection is report
+    assert calls[0].conditional == ((_CONDITIONAL_ID, None),)
+
+
+def test_forced_full_run_carries_its_reason_report(tmp_path, monkeypatch):
+    # R8a: the verdict's full_reason report rides to the end line / JSON.
+    _pytest_project(tmp_path, monkeypatch)
+    report = C.SelectionReport(engine=None, iteration=True, run_now=None,
+                               deferred=0,
+                               full_reason="uv.lock is a full trigger")
+    refined = _tiered("full", changed=("uv.lock",), selection=report)
+    refined.reason = "uv.lock is a full trigger"
+    _route_tiered(monkeypatch, tmp_path.name, refined,
+                  repo_changed=("uv.lock",))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls[0].mode is C.Mode.FULL
+    assert calls[0].selection is report
+    assert calls[0].selection.full_reason == "uv.lock is a full trigger"
+
+
+def test_vitest_changed_reports_engine_and_bare_gate_hint(
+        tmp_path, monkeypatch, capsys, case):
+    # R12: a Vitest changed run reports engine vitest-changed with no counts
+    # and its end line ends with the bare hint, never "(no gate recorded)".
+    from dataclasses import replace
+
+    _standalone(tmp_path, monkeypatch)
+    _route_standalone(
+        monkeypatch, tmp_path.name,
+        lambda mod: mod.Impact(kind="vitest", changed=("src/a.ts",)),
+        repo_changed=("src/a.ts",))
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    report = calls[0].selection
+    assert report == C.SelectionReport(engine="vitest-changed", iteration=True,
+                                       run_now=None, deferred=None)
+    assert report.gate_recorded is False
+    result = replace(case.result(status=C.Status.PASSED, exit_code=0,
+                                 counts=C.Counts(passed=4)), selection=report)
+    operations._emit_end(calls[0], result, 0.0)
+    err = capsys.readouterr().err.rstrip()
+    assert err.endswith("· gate at spec end")
+    assert "no gate recorded" not in err
+    assert "deferred" not in err
+
+
+def test_vitest_child_in_a_monorepo_reports_vitest_changed(
+        tmp_path, monkeypatch, monorepo):
+    _monorepo_root(
+        tmp_path, monkeypatch, monorepo,
+        lambda mod: {"api": mod.Impact(kind="none"),
+                     "web": mod.Impact(kind="vitest", changed=("src/a.ts",))})
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls[0].selection.engine == "vitest-changed"
+    assert calls[0].selection.iteration is True
+    assert (calls[0].selection.run_now, calls[0].selection.deferred) == (None, None)
+
+
+def test_vitest_folder_run_reports_vitest_changed(tmp_path, monkeypatch):
+    _standalone(tmp_path, monkeypatch)
+    (tmp_path / "src").mkdir()
+    _route_standalone(
+        monkeypatch, tmp_path.name,
+        lambda mod: mod.Impact(kind="vitest", changed=("src/a.ts",)),
+        repo_changed=("src/a.ts",))
+    calls = _capture(monkeypatch)
+
+    assert main(("src",)) == 0
+
+    assert calls[0].selection.engine == "vitest-changed"
+
+
+# --- monorepo totals (R39, Decision 10) ---------------------------------------
+
+def _tiered_monorepo(tmp_path, monkeypatch, monorepo, by_child, *,
+                     repo_changed=("api/a.py",)):
+    monorepo({"api": {"kind": "command", "launcher": ("true",)},
+              "web": {"kind": "command", "launcher": ("true",)}},
+             parent=tmp_path, name=None)
+    init_git_repo(tmp_path, message="base")
+    monkeypatch.chdir(tmp_path)
+    _install_impact(monkeypatch, plans={})
+    plans = {name: types.SimpleNamespace(
+        kind="none", changed=(f"{name}/x.py",), files=(), direct=0, via=0,
+        total=0, reason="", ignored=0) for name in by_child}
+    _install_impact(monkeypatch, repo_changed=repo_changed, plans=plans)
+    refined = {f"{name}/x.py": value for name, value in by_child.items()}
+    _install_selection(
+        monkeypatch, refine=lambda static: refined[static.changed[0]])
+
+
+def test_monorepo_total_sums_deferred_across_children(
+        tmp_path, monkeypatch, capsys, monorepo):
+    api = _tiered(changed=("api/x.py",),
+                  selection=_tier_report(deferred=3, path="api/m.py"))
+    web = _tiered(changed=("web/x.py",),
+                  selection=_tier_report(deferred=4, path="web/m.py",
+                                         gate_recorded=False))
+    _tiered_monorepo(tmp_path, monkeypatch, monorepo,
+                     {"api": api, "web": web})
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert ("ptest: api · no changes · deferred 3 (static reach via "
+            "api/m.py)") in lines
+    assert ("ptest: web · no changes · deferred 4 (static reach via "
+            "web/m.py)") in lines
+    total = [line for line in lines if line.startswith("ptest: total")]
+    assert len(total) == 1
+    assert "deferred 7 across 2 children" in total[0]
+    assert total[0].endswith("gate at spec end (no gate recorded)")
+    assert total[0].count("gate at spec end") == 1
+    assert "nothing to test" not in err
+
+
+def test_monorepo_nothing_anywhere_only_when_no_child_defers(
+        tmp_path, monkeypatch, capsys, monorepo):
+    api = _tiered(changed=("api/x.py",), selection=_tier_report(deferred=0))
+    web = _tiered(changed=("web/x.py",),
+                  selection=_tier_report(deferred=5, path="web/m.py"))
+    _tiered_monorepo(tmp_path, monkeypatch, monorepo,
+                     {"api": api, "web": web})
+    _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    err = capsys.readouterr().err
+    assert "ptest: no changes —" not in err
+    assert "ptest: web · no changes · deferred 5" in err
+
+
+# --- R40: folder scopes ---------------------------------------------------------
+
+def test_folder_run_counts_only_deferred_under_the_folder(
+        tmp_path, monkeypatch, capsys):
+    _pytest_project(tmp_path, monkeypatch)
+    (tmp_path / "tests").mkdir()
+    whole = _tier_report(deferred=9, path="pkg/models.py")
+    refined = _tiered(changed=("pkg/core.py",), selection=whole)
+    _route_tiered(monkeypatch, tmp_path.name, refined,
+                  repo_changed=("pkg/core.py",))
+    seen = {}
+
+    def narrow(impact, folders):
+        seen["folders"] = tuple(folders)
+        return types.SimpleNamespace(**{
+            **vars(impact),
+            "selection": _tier_report(deferred=2, path="pkg/models.py")})
+
+    import ptest.cli as cli_module
+    api = cli_module._selection_api()
+    api.narrow = narrow
+    calls = _capture(monkeypatch)
+
+    assert main(("tests",)) == 0
+
+    assert seen["folders"] == ("tests",)
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("no changes under tests — nothing to run now · deferred 2 "
+            "(static reach via pkg/models.py) · gate at spec end") in err
+    assert "deferred 9" not in err

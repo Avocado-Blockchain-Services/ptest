@@ -123,8 +123,9 @@ def test_folder_with_nothing_affected_prints_no_changes_under(
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: api · no changes under api/tests — nothing to test · "
-            "ptest --full api/tests runs all of them") in err
+    assert ("ptest: api · no changes under api/tests — nothing to test"
+            "\n") in err
+    assert "runs all of them" not in err
 
 
 def test_file_always_runs_even_when_nothing_changed(
