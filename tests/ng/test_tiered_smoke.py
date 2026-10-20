@@ -9,11 +9,17 @@ the project root). Store setup and store checks go through SQLite on the
 fixture domain's own ``selection.db``; nothing in ptest is monkeypatched.
 
 Spec: ``docs/specs/2026-10-19-tiered-iteration-selection.md`` (Smoke
-tests). Row ids below are the spec's ids. The serial end line carries
-no test count in this environment (the verified native identity that
-feeds counts is unavailable for a plain interpreter launcher), so the
-counts come from the JSON ``selection`` block instead; the xdist twin
-asserts the counted wording.
+tests). Row ids below are the spec's ids. With the spec's fixture
+``.ptest.toml`` a serial pytest run stays on the basic tier, whose end
+line carries no test counts (only the advanced tier, admitted by declared
+coverage or ``[runner] reuse = true``, spec 2026-10-12 R2, reads verified
+native counts), so those rows take their counts from the JSON
+``selection`` block. ``test_spec_counted_end_line`` asserts the spec's
+counted end lines exactly on the same fixture plus ``reuse = true`` and
+``non_input_outputs = ["ran.txt"]`` (the full mode fingerprints ignored
+files, and every test writes ``ran.txt``); that is the one deviation
+from the spec's fixture config. The xdist twin asserts the counted
+wording through the controller-reconciled counts.
 """
 from __future__ import annotations
 
@@ -95,7 +101,8 @@ def materialise(target: Path) -> Path:
 
 
 def config_text(project_id: str, args=SERIAL_ARGS,
-                fingerprint: list | None = None, workers: int = 1) -> str:
+                fingerprint: list | None = None, workers: int = 1,
+                reuse: bool = False) -> str:
     text = (
         "version = 1\n"
         f'project_id = "{project_id}"\n'
@@ -107,8 +114,13 @@ def config_text(project_id: str, args=SERIAL_ARGS,
         'test_roots = ["tests"]\n'
         f"workers = {workers}\n"
         'lifecycle = "cooperative-process-group"\n'
-        "\n[selection]\n"
+        + ("reuse = true\n" if reuse else "")
+        + "\n[selection]\n"
         "enabled = true\n")
+    if reuse:
+        # The full mode fingerprints ignored files, and every test writes
+        # ran.txt mid-run, so the counted variant declares it an output.
+        text += 'non_input_outputs = ["ran.txt"]\n'
     if fingerprint is not None:
         text += f"ambient_fingerprint = {json.dumps(fingerprint)}\n"
     return text
@@ -118,19 +130,21 @@ class Project:
     """One committed fixture repository inside a fixture domain."""
 
     def __init__(self, case, domain, root: Path, args=SERIAL_ARGS,
-                 workers: int = 1):
+                 workers: int = 1, reuse: bool = False):
         self.case = case
         self.domain = domain
         self.root = root
         self.args = tuple(args)
         self.workers = workers
+        self.reuse = reuse
         self.project_id = tomllib.loads(
             (root / ".ptest.toml").read_text())["project_id"]
 
     # -- construction
     @classmethod
     def create(cls, case, domain, args=SERIAL_ARGS, workers: int = 1,
-               files: dict | None = None) -> "Project":
+               files: dict | None = None,
+               reuse: bool = False) -> "Project":
         root = case.project(domain, kind="pytest")
         project_id = tomllib.loads(
             (root / ".ptest.toml").read_text())["project_id"]
@@ -139,16 +153,17 @@ class Project:
         for name, text in (files or {}).items():
             (root / name).write_text(text)
         (root / ".ptest.toml").write_text(
-            config_text(project_id, args, None, workers))
+            config_text(project_id, args, None, workers, reuse))
         support.init_git_repo(root, message="base")
-        return cls(case, domain, root, args, workers)
+        return cls(case, domain, root, args, workers, reuse)
 
     @classmethod
     def recorded(cls, case, args=SERIAL_ARGS, workers: int = 1,
-                 files: dict | None = None) -> "Project":
+                 files: dict | None = None,
+                 reuse: bool = False) -> "Project":
         """Fixture repo after one green ``ptest --full`` (``ran.txt`` gone)."""
         domain = case.domain(slots=workers, jobs=workers)
-        project = cls.create(case, domain, args, workers, files)
+        project = cls.create(case, domain, args, workers, files, reuse)
         full = project.run("--full")
         assert full.code == 0, full.err[-2000:]
         assert project.ran() == ALL_TESTS, project.ran()
@@ -221,7 +236,8 @@ class Project:
 
     def set_fingerprint(self, argv: list | None) -> None:
         (self.root / ".ptest.toml").write_text(
-            config_text(self.project_id, self.args, argv, self.workers))
+            config_text(self.project_id, self.args, argv, self.workers,
+                        self.reuse))
 
     # -- store (the fixture domain's own selection.db)
     @property
@@ -468,7 +484,7 @@ def test_s6a_lockfile_bump_in_the_diff_runs_the_full_suite(recorded):
     assert recorded.kv("last_gate_commit") == head  # R8a
 
 
-def _bumped_on_main(case) -> tuple:
+def _bumped_on_main(case, reuse: bool = False) -> tuple:
     """S6b setup: a recorded fixture whose main carries a lockfile bump.
 
     The spec's ``age`` field breaks the snapshot test unless the snapshot
@@ -476,7 +492,7 @@ def _bumped_on_main(case) -> tuple:
     also carries the pre-staged snapshot (no run happens on main, so no
     record exists for it).
     """
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=reuse)
     (project.root / "uv.lock").write_text(
         (project.root / "uv.lock").read_text() + "# bump\n")
     project.write_snapshot(["age", "email", "name"])
@@ -809,26 +825,24 @@ def test_s17_deferral_since_the_gate_survives_a_moved_green_point(recorded):
 
 # ------------------------------------------- spec end-line wording (S rows)
 # The spec writes counted serial end lines (`passed · 3 tests`, `1 failed,
-# 19 passed`). The product's serial line carries no counts (pinned by
-# test_run_output), so the rows above assert what it prints. Each spec
-# wording is asserted here exactly and expected to fail until the
-# orchestrator amends the spec or the product prints the counts; strict
-# xfail turns the day it starts passing into a visible failure.
+# 19 passed`). Counts come from the advanced tier's verified native
+# evidence, so these rows build the fixture with `reuse = true` (see the
+# module docstring) and assert each spec wording exactly.
 
 def _row_s1(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.edit_users_body()
     return project.run("--changed", timeout=CHANGED_TIMEOUT)
 
 
 def _row_s3(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.after_s2()
     return project.run("--full")
 
 
 def _row_s4(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.learned()
     project.reseed(["age", "email", "name"], None)
     project.add_field("phone: str")
@@ -836,7 +850,7 @@ def _row_s4(case):
 
 
 def _row_s5(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     tree_a = project.worktree("wt-a", "branch-a")
     project.add_field("age: int", tree_a)
     project.edit_users_body(tree_a)
@@ -848,7 +862,7 @@ def _row_s5(case):
 
 
 def _row_s6a(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.git("checkout", "-q", "-b", "bump")
     (project.root / "uv.lock").write_text(
         (project.root / "uv.lock").read_text() + "# bump\n")
@@ -857,7 +871,7 @@ def _row_s6a(case):
 
 
 def _row_s6c(case):
-    project, tree = _bumped_on_main(case)
+    project, tree = _bumped_on_main(case, reuse=True)
     project.run("--base", "main", root=tree, timeout=FULL_TIMEOUT)
     other = project.worktree("wt-total", "branch-total")
     project.edit_total_body(other)
@@ -866,7 +880,7 @@ def _row_s6c(case):
 
 
 def _row_s8(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.learned()
     project.reseed(["age", "email", "name"],
                    [sys.executable, "-m", "app.manifest"])
@@ -875,7 +889,7 @@ def _row_s8(case):
 
 
 def _row_s9(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.learned()
     project.reseed(["age", "email", "name"],
                    [sys.executable, "-c", "import sys; sys.exit(3)"])
@@ -884,7 +898,7 @@ def _row_s9(case):
 
 
 def _row_s11(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.edit("app/plugins/audit.py", '@route("/audit")',
                  '@route("/audit/v2")')
     project.edit_engine_body()
@@ -892,7 +906,7 @@ def _row_s11(case):
 
 
 def _row_s17(case):
-    project = Project.recorded(case)
+    project = Project.recorded(case, reuse=True)
     project.sql_write("DELETE FROM nodes WHERE test_file = ?",
                       ("tests/test_orders.py",))
     project.edit_total_body()
@@ -925,8 +939,6 @@ _SPEC_END_LINES = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason=SPEC_DELTA + "the serial end line "
-                   "carries no test counts")
 @pytest.mark.parametrize("row", sorted(_SPEC_END_LINES))
 def test_spec_counted_end_line(case, row):
     setup, pattern = _SPEC_END_LINES[row]
