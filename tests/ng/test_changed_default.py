@@ -1297,5 +1297,5 @@ def test_monorepo_conditional_child_executes_and_total_uses_its_result(
     assert calls[0].selection is report
     lines = capsys.readouterr().err.splitlines()
     (total,) = [line for line in lines if line.startswith("ptest: total")]
-    assert "deferred 3 across 1 child" in total
+    assert "deferred 3 across 1 children" in total
     assert total.endswith("gate at spec end")

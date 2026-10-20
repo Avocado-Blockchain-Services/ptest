@@ -283,8 +283,7 @@ def format_total_deferred(reports) -> str | None:
               if item is not None and item.deferred]
     if not counts:
         return None
-    children = "1 child" if len(counts) == 1 else f"{len(counts)} children"
-    return f"deferred {sum(counts)} across {children}"
+    return f"deferred {sum(counts)} across {len(counts)} children"
 
 
 def _no_run_tail(deferred: str | None, hint: str | None,

@@ -1072,7 +1072,7 @@ def test_total_note_and_step_sum_children():
     assert progress.format_total_deferred([api, web, None]) == (
         "deferred 7 across 2 children")
     assert progress.format_total_deferred([api, _report(deferred=0)]) == (
-        "deferred 3 across 1 child")
+        "deferred 3 across 1 children")
     assert progress.format_total_deferred([_report(deferred=0), None]) is None
     assert progress.total_next_step(C.Status.PASSED, [api, web]) == (
         progress.GATE_HINT_NO_GATE)
@@ -1292,7 +1292,11 @@ def _normalised(completed, root):
 def test_full_run_output_byte_identical_when_nothing_deferred(case):
     # Oracle: spec "Rollout and compatibility" - a plain `--full` run on a
     # project with nothing deferred prints exactly what 0.6.8 printed (ptest's
-    # own lines, durations masked); only the coverage wording changed.
+    # own lines, durations masked). Basis for the expected lines: they are
+    # produced by code this task did not touch (`progress.format_start`,
+    # `progress.format_end` without a note or hint, and the `full gate runs:`
+    # emit in `operations.execute`), checked with
+    # `git diff e005a18 -- src/ptest/` showing no hunk in any of them.
     domain = case.domain()
     root = _make_project(case, domain)
 
@@ -1305,3 +1309,53 @@ def test_full_run_output_byte_identical_when_nothing_deferred(case):
         "is absent or unsafe",
         "ptest: passed · <t>",
     ]
+
+
+def _coverage_project(case, domain):
+    """A small git pytest project that declares ``coverage_args`` and whose
+    tests write nothing (a writing test would invalidate the advanced tier)."""
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split(
+        'project_id = "', 1)[1].split('"', 1)[0]
+    (root / "pkg").mkdir()
+    (root / "pkg" / "__init__.py").write_text("VALUE = 1\n")
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "test_pkg.py").write_text(
+        "import pkg\n\n\ndef test_value():\n    assert pkg.VALUE == 1\n")
+    (root / ".gitignore").write_text(
+        "__pycache__/\n.pytest_cache/\n.coverage*\nptest-result-*.json\n")
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        'args = ["-q", "-p", "no:xdist"]\n'
+        "full_args = []\n"
+        'coverage_args = ["--cov", "pkg", "--cov-report", "term"]\n'
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8")
+    support.init_git_repo(root, message="base")
+    return root
+
+
+def test_plain_full_run_on_a_coverage_project_only_adds_the_owed_line(case):
+    # Oracle: spec R29 - the only change to a plain green `--full` on a project
+    # that declares coverage is the wording of the coverage line. This also
+    # proves the CLI's `--full` request carries no changed_note (a note would
+    # silence the line, as it does for a forced full suite).
+    domain = case.domain()
+    root = _coverage_project(case, domain)
+
+    full = case.invoke(domain, root, "--full", timeout=_FULL_TIMEOUT)
+
+    err = full.stderr.decode()
+    assert full.code == 0, err[-2000:]
+    lines = _normalised(full, root)
+    assert "ptest: <project> · pytest · full suite" in lines
+    (end,) = [line for line in lines if line.startswith("ptest: passed")]
+    assert end.endswith(" · coverage gate still owed: ptest --full --cov"), lines
+    assert "before handoff" not in err
