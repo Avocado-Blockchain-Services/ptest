@@ -7,7 +7,7 @@ guard are the authorities for ownership and process-group quiescence.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Callable
 from datetime import datetime, timezone
 import contextvars
@@ -26,9 +26,9 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import (config as config_api, executability, files, history, leases, monorepo, platform,
-               progress, render, reports, scheduler, selection, source,
-               stack_dumps)
+from . import (ambient_fingerprint, config as config_api, executability, files,
+               history, leases, monorepo, platform, progress, render, reports,
+               scheduler, selection, source, stack_dumps)
 from .adapters import pytest as pytest_adapter
 from .adapters import vitest as vitest_adapter
 from . import verified
@@ -59,6 +59,11 @@ _COMPOUND_TIMEOUT_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar(
 # resolve see None (no stall detection).
 _STALL_TIMEOUT_S: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "ptest_stall_timeout_s", default=None)
+
+# The attempt-decision budget (R42a) travels the same way: 30 s, or 90 s when
+# a run computes a declared ambient fingerprint inside its decision.
+_DECISION_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "ptest_decision_timeout_s", default=C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S)
 
 _STALL_RERUN_SUFFIX = "; rerun once alone, report a repeat"
 _STALL_DUMPS_SUFFIX = "; stack dumps above; rerun once alone, report a repeat"
@@ -414,16 +419,19 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                          input_after: C.InputSnapshot,
                          consumed_report: bool, report_reason,
                          cancelled: bool, guard_problem,
-                         setup_failed: bool) -> None:
+                         setup_failed: bool,
+                         fingerprint: str | None = None
+                         ) -> C.SelectionGateReport | None:
     """Ingest one native pytest attempt into the selection store.
 
-    Never raises and never changes the run outcome; the audit and
-    ``-v`` lines print before the end line.
+    Returns the gate report of a complete full-mode ingest (R33), else
+    None. Never raises and never changes the run outcome; the audit, gate
+    and ``-v`` lines print before the end line.
     """
     try:
         engine = _selection_engine()
     except ImportError:
-        return
+        return None
     try:
         valid_handoff = bool(consumed_report) and report_reason is None
         unchanged = (input_after is not None
@@ -432,7 +440,7 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                                               input_after) is None)
         argv_files = (None if plan.execution == "full"
                       else _selection_argv_files(request))
-        engine.after_run(
+        return engine.after_run(
             domain=domain, config=config, project_id=checkout.project_id,
             run_id=run_id, report_path=report_binding.path,
             project_root=checkout.root, expected_workers=grant.slots,
@@ -441,9 +449,152 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
             cancelled=bool(cancelled),
             guard_failed=guard_problem is not None,
             setup_failed=bool(setup_failed), argv_files=argv_files,
-            verbose=bool(request.verbose), quiet=bool(request.quiet))
+            verbose=bool(request.verbose), quiet=bool(request.quiet),
+            fingerprint=fingerprint)
     except Exception:
-        pass
+        return None
+
+
+# --- declared ambient fingerprint and conditional observers (R42-R45) ---------
+
+@dataclass
+class _Ambient:
+    """Per-run state of the ambient fingerprint step (computed once)."""
+
+    argv: tuple = ()
+    ran: bool = False
+    digest: str | None = None
+    reason: str | None = None
+    promoted: tuple = ()
+    # R44: nothing is left to run, so the decision stops with no-tests-needed.
+    stop: bool = False
+
+
+def _ambient_argv(config: C.Config, request: C.RunRequest,
+                  report_binding) -> tuple[str, ...]:
+    """The declared fingerprint command when this run computes it, else ()."""
+    if report_binding is None or config.runner.kind is not C.RunnerKind.PYTEST:
+        return ()
+    policy = getattr(config, "selection", None)
+    argv = tuple(getattr(policy, "ambient_fingerprint", ()) or ())
+    if not argv:
+        return ()
+    try:
+        if not _selection_engine().recording_enabled(config, request):
+            return ()
+    except Exception:
+        return ()
+    return argv
+
+
+def _decision_budget_s(ambient_argv: tuple) -> float:
+    """The attempt-decision budget (R42a): 90 s when the fingerprint runs."""
+    if ambient_argv:
+        return C.MAX_ATTEMPT_DECISION_TIMEOUT_S
+    return C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S
+
+
+def _ambient_key(domain: C.DomainPaths) -> bytes | None:
+    try:
+        return source._key(domain)
+    except Exception:
+        return None
+
+
+def _ambient_env(prepared: C.PreparedRun) -> dict[str, str]:
+    """The run's environment for the command: ours plus the adapter's
+    updates, without ptest's own control variables (no credentials added)."""
+    env = dict(os.environ)
+    for name, value in prepared.env_updates:
+        if not name.startswith("PTEST_"):
+            env[name] = value
+    return env
+
+
+def _emit_fingerprint_verbose(request: C.RunRequest, state: _Ambient,
+                              outcome, kept: int, promoted: int) -> None:
+    """The R45 ``-v fingerprint:`` line plus at most 10 escaped stderr lines."""
+    if not request.verbose:
+        return
+    if state.digest is None:
+        why = render.terminal_text(state.reason or "no output")
+        text = (f"absent ({why}) · treated as changed · "
+                f"{C.plural(promoted, 'observer')} promoted")
+    elif promoted:
+        text = f"changed · {C.plural(promoted, 'observer')} promoted"
+    else:
+        text = f"unchanged · {C.plural(kept, 'observer')} kept deferred"
+    progress.emit(f"ptest: -v fingerprint: {text}", quiet=request.quiet)
+    for line in tuple(outcome.stderr_tail)[:C.AMBIENT_FINGERPRINT_STDERR_LINES]:
+        progress.emit("ptest: -v fingerprint stderr: "
+                      + render.terminal_text(line), quiet=request.quiet)
+
+
+def _decide_ambient(state: _Ambient, *, domain: C.DomainPaths,
+                    checkout: C.CheckoutIdentity, request: C.RunRequest,
+                    prepared: C.PreparedRun, run_id: str, report_path,
+                    cancelled: Callable[[], bool]) -> C.Reason | None:
+    """Compute the fingerprint once, promote changed conditional observers.
+
+    Runs inside the attempt decision, after setup and before the source
+    capture (R42). Returns a stop reason only when the run must not
+    launch: cancellation, or a binding that cannot be rewritten (fail
+    closed). Everything else about a broken command is "absent".
+    """
+    if not state.argv or state.ran:
+        return None
+    state.ran = True
+    key = _ambient_key(domain)
+    if key is None:
+        outcome = ambient_fingerprint.Outcome(None, "no domain key", ())
+    else:
+        outcome = ambient_fingerprint.compute(
+            state.argv, cwd=checkout.root, env=_ambient_env(prepared),
+            key=key, cancelled=cancelled)
+    if outcome.reason == "cancelled":
+        return _reason("state-unavailable",
+                       "ambient fingerprint was cancelled")
+    state.digest, state.reason = outcome.digest, outcome.reason
+    conditional = tuple(request.conditional or ())
+    promoted = tuple(nodeid for nodeid, expected in conditional
+                     if outcome.digest is None or expected is None
+                     or expected != outcome.digest)
+    state.promoted = promoted
+    if promoted:
+        gone = frozenset(promoted)
+        keep = [nodeid for nodeid in request.deselect
+                if C.selection_nodeid_safe(nodeid) and nodeid not in gone]
+        if not _selection_engine().rewrite_binding(report_path, run_id, keep):
+            return _reason("state-unavailable",
+                           "the deselect binding could not be rewritten")
+    _emit_fingerprint_verbose(request, state, outcome,
+                              len(conditional) - len(promoted),
+                              len(promoted))
+    report = request.selection
+    state.stop = bool(conditional and not promoted and report is not None
+                      and report.run_now == 0)
+    return None
+
+
+def _final_selection(request: C.RunRequest, plan: C.Plan, state: _Ambient,
+                     gate, *, pytest_run: bool) -> C.SelectionReport | None:
+    """The result's selection block: the request's report after promotion,
+    with the gate counts of a full-mode ingest (R34)."""
+    report = request.selection
+    if report is None:
+        if not pytest_run or plan.execution != "full":
+            return None
+        report = C.SelectionReport(engine=None, iteration=False,
+                                   run_now=None, deferred=0)
+    if state.ran:
+        try:
+            report = _selection_engine().promote_conditional(
+                report, state.promoted, state.digest, state.reason)
+        except Exception:
+            pass
+    if isinstance(gate, C.SelectionGateReport):
+        report = replace(report, gate=gate)
+    return report
 
 
 def _advanced_plan(config: C.Config, request: C.RunRequest,
@@ -832,6 +983,7 @@ def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
                        if request.mode is C.Mode.FULL and command.kind is C.RunnerKind.PYTEST else ()),
                      *tuple(limitations)),
         input_before=input_before, input_after=input_after,
+        selection=request.selection,
     )
 
 
@@ -1037,6 +1189,8 @@ class _Frames:
         self.cancel_sent = False
         self.setup_started_at: float | None = None
         self.setup_elapsed_s: float | None = None
+        # The same bound the guard watchdog uses (manifest value, R42a).
+        self.decision_timeout_s = _DECISION_TIMEOUT_S.get()
 
     def _fail(self, message: str) -> None:
         if self.invalid is None:
@@ -1086,7 +1240,7 @@ class _Frames:
                     or frame.payload["deadline_monotonic"] <= time.monotonic()
                     or frame.payload["deadline_monotonic"] > (
                         time.monotonic()
-                        + C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S + _FRAME_TIMEOUT_S)):
+                        + self.decision_timeout_s + _FRAME_TIMEOUT_S)):
                 self._fail("attempt-ready frame does not match the command attempt")
                 return
             self.ready = dict(frame.payload)
@@ -1233,7 +1387,7 @@ class _CompoundFrames(_Frames):
                     or frame.payload["previous_attempt_id"] != self.previous_attempt
                     or frame.payload["generation"] != self.grant.generation
                     or frame.payload["deadline_monotonic"] <= time.monotonic()
-                    or frame.payload["deadline_monotonic"] > time.monotonic() + C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S + _FRAME_TIMEOUT_S):
+                    or frame.payload["deadline_monotonic"] > time.monotonic() + self.decision_timeout_s + _FRAME_TIMEOUT_S):
                 self._fail("attempt-ready frame does not match the compound attempt")
                 return
             if self.setup_facts is not None and (
@@ -1402,6 +1556,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
         compound_timeout_source=_COMPOUND_TIMEOUT_SOURCE.get(),
         stall_timeout_s=_STALL_TIMEOUT_S.get(),
+        attempt_decision_timeout_s=_DECISION_TIMEOUT_S.get(),
     )
     lease_fd = leases.held_fd(Path(domain.root), grant.run_id)
     if lease_fd is None:
@@ -2515,6 +2670,15 @@ def _config_label(config: C.Config) -> str:
             else render.terminal_text(f"{child.declaration}/.ptest.toml"))
 
 
+def _end_note(selection: C.SelectionReport | None) -> str | None:
+    """End-line note: ``full suite (reason)`` (R8a) or ``deferred N (…)`` (R30)."""
+    if selection is None:
+        return None
+    if selection.full_reason is not None:
+        return f"full suite ({render.terminal_text(selection.full_reason)})"
+    return progress.format_deferred(selection)
+
+
 def _emit_end(request: C.RunRequest, result: C.RunResult,
               run_mono: float, *, baseline_note: str | None = None,
               coverage_declared: bool = False,
@@ -2535,14 +2699,16 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
     status = (C.Status.CANCELLED
               if getattr(result, "signal", None) == signal.SIGINT
               else result.status)
-    next_hint = (progress.next_step(
-        status, request.mode is C.Mode.SCOPED, coverage=coverage_declared)
-        if request.next_hint else None)
+    selection = getattr(result, "selection", None)
+    next_hint = (progress.next_step(status, selection)
+                 if request.next_hint else None)
     if (next_hint is None and coverage_declared and not request.coverage
-            and request.mode is C.Mode.FULL and status is C.Status.PASSED):
-        # A plain green gate on a project that measures coverage at handoff:
-        # the coverage gate is still owed (spec C11).
-        next_hint = progress.NEXT_FULL_COV
+            and request.mode is C.Mode.FULL and status is C.Status.PASSED
+            and request.changed_note is None):
+        # A plain green `ptest --full` on a project that measures coverage
+        # at the gate: the coverage gate is still owed (spec C11, R29). A
+        # forced full suite (R8a) carries a changed_note and never prints it.
+        next_hint = progress.COVERAGE_OWED
     if (reuse_config is not None and status is C.Status.INCOMPLETE
             and any(reason.message.startswith(_BRIDGE_REFUSED)
                     for reason in result.reasons + result.limitations)):
@@ -2557,7 +2723,7 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         status, counts=result.counts,
         duration_s=elapsed_s, exit_code=result.exit_code,
         hint=hint, color=sys.stderr.isatty(),
-        next_step=next_hint), quiet=request.quiet)
+        next_step=next_hint, note=_end_note(selection)), quiet=request.quiet)
     if baseline_note is not None:
         progress.emit(baseline_note, quiet=request.quiet)
 
@@ -3597,6 +3763,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command, signals.number, queue_s)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         gate_snapshot: C.InputSnapshot | None = None
+        ambient = _Ambient(argv=_ambient_argv(config, request, report_binding))
 
         def decide_attempt() -> C.Reason | None:
             nonlocal gate_snapshot, input_before, expected_runtime_identity, verification_token
@@ -3608,6 +3775,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     domain, effective, checkout, setup_fingerprint_before)
                 if setup_reason is not None:
                     return setup_reason
+            if ambient.argv and not ambient.ran:
+                # The declared fingerprint runs once, here: after setup and
+                # before the source capture, so a command that writes an
+                # input file is caught as changed-during-run (R42).
+                ambient_reason = _decide_ambient(
+                    ambient, domain=domain, checkout=checkout,
+                    request=request, prepared=prepared, run_id=run_id,
+                    report_path=report_binding.path,
+                    cancelled=lambda: signals.number is not None)
+                if ambient_reason is not None:
+                    return ambient_reason
             gate_snapshot = _capture_source(
                 domain, effective, request, ensure_key=False,
                 execution_tier=(C.ExecutionTier.ADVANCED if advanced
@@ -3640,7 +3818,11 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 # judged against the post-setup state. Tracked or
                 # untracked changes by setup still invalidate it.
                 input_before = gate_snapshot
-                return None
+                invalidation = None
+            if invalidation is None and ambient.stop:
+                # R44: no T1 node and nothing promoted. A completed policy
+                # decision, taken only when no source invalidation wins.
+                return _reason("no-tests-needed", "no tests were executed")
             return invalidation
 
         try:
@@ -3663,6 +3845,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             token = _COMPOUND_TIMEOUT_S.set(limit)
             source_token = _COMPOUND_TIMEOUT_SOURCE.set(source)
             stall_token = _STALL_TIMEOUT_S.set(_stall_timeout_s(effective))
+            decision_token = _DECISION_TIMEOUT_S.set(
+                _decision_budget_s(ambient.argv))
             try:
                 raw_guard, frames, execution_s = _run_guard(
                     domain, grant, prepared, signals, decide_attempt,
@@ -3671,6 +3855,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 _COMPOUND_TIMEOUT_S.reset(token)
                 _COMPOUND_TIMEOUT_SOURCE.reset(source_token)
                 _STALL_TIMEOUT_S.reset(stall_token)
+                _DECISION_TIMEOUT_S.reset(decision_token)
         except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
@@ -3748,7 +3933,16 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # Section F: the run label comes from the bridge-owned attempt
         # report consumed below, never from the static prediction above.
         reasons: tuple = ()
-        incomplete = not protocol_valid or stopped_at_gate or cancelled_handoff
+        # R44: a stop whose reason is no-tests-needed is a completed policy
+        # decision (nothing was left to run), never an incomplete run.
+        completed_stop = bool(
+            ambient.stop and stopped_handoff and protocol_valid
+            and frames.decision_reason is not None
+            and frames.decision_reason.code == "no-tests-needed"
+            and signals.number is None and not cancelled_handoff)
+        incomplete = (not protocol_valid
+                      or (stopped_at_gate and not completed_stop)
+                      or cancelled_handoff)
         if incomplete:
             if not protocol_valid:
                 reasons += (_reason(
@@ -3782,6 +3976,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
             reasons += (_reason("state-unavailable", "guard execution did not complete normally"),)
         status, final_code, origin, signal_number = _outcome(
             raw, signals.number, guard_problem, incomplete)
+        if completed_stop and not incomplete:
+            status, final_code, origin, signal_number = (
+                C.Status.NO_TESTS_NEEDED, 0, "ptest", None)
         if setup_failed:
             origin = "setup"
         setup_s = frames.setup_elapsed_s
@@ -3815,7 +4012,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         result = _result(run_id=run_id, checkout=checkout, request=request,
                          plan=plan, command=command, status=status,
                          phase="complete", started=started,
-                         runner_code=None if setup_failed else raw,
+                         runner_code=(0 if completed_stop and not incomplete
+                                      else None if setup_failed else raw),
                          exit_code=final_code if final_code is not None else 70,
                          origin=origin, signal_number=signal_number, granted=grant,
                          reasons=reasons, limitations=_source_limitations(input_before),
@@ -3908,7 +4106,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
         native_evidence: C.AttemptEvidence | None = None
         native_report: reports.NativeTerminalReport | None = None
         report_reason: C.Reason | None = None
-        if native_runner and not setup_failed:
+        gate_report: C.SelectionGateReport | None = None
+        if native_runner and not setup_failed and not (
+                completed_stop and not incomplete):
             try:
                 if advanced:
                     native_evidence = reports.consume_attempt_report(report_binding)
@@ -4108,7 +4308,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 # Dependency ingest and self-audit (D10/D11): store-only,
                 # never history, never the outcome. Prints the audit and
                 # -v lines before the end line.
-                _selection_after_run(
+                gate_report = _selection_after_run(
                     domain, config, checkout, request, plan,
                     run_id=run_id, report_binding=report_binding,
                     grant=grant, input_before=input_before,
@@ -4118,7 +4318,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     cancelled=signals.number is not None
                     or cancelled_handoff,
                     guard_problem=guard_problem,
-                    setup_failed=setup_failed)
+                    setup_failed=setup_failed,
+                    fingerprint=ambient.digest if ambient.ran else None)
 
         # Every real advanced attempt is a private history event, including a
         # native failure or a refused/malformed report. Promotion is possible
@@ -4165,6 +4366,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
                             "advanced attempt history could not be committed"
                             + detail),
                 )
+
+        result = replace(result, selection=_final_selection(
+            request, plan, ambient, gate_report, pytest_run=native_pytest))
 
         def finalize(exported: C.RunResult) -> None:
             _finalize_with_retry(

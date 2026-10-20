@@ -666,12 +666,37 @@ def test_compatibility_moved_with_coverage_on_request(case, monkeypatch):
 from ptest import progress  # noqa: E402
 
 
-def test_next_step_names_the_coverage_gate_when_declared():
-    """C11: the handoff hint follows the project's coverage declaration."""
-    assert progress.next_step(C.Status.PASSED, True) == progress.NEXT_FULL
-    assert (progress.next_step(C.Status.PASSED, True, coverage=True)
-            == "next: ptest --full --cov before handoff")
-    assert progress.next_step(C.Status.FAILED, True, coverage=True) == progress.NEXT_FIX
+def _end_line(case, capsys, request, **kwargs):
+    from ptest import operations
+
+    operations._emit_end(request, case.result(
+        status=C.Status.PASSED, exit_code=0, counts=C.Counts(passed=3)),
+        0.0, **kwargs)
+    return capsys.readouterr().err
+
+
+def test_coverage_gate_line_is_owed_after_a_plain_full_run(case, capsys):
+    """R29 (replaces C11's next-step hint): a plain green `ptest --full`
+    on a project that declares coverage names the owed coverage gate."""
+    request = C.RunRequest(mode=C.Mode.FULL)
+    err = _end_line(case, capsys, request, coverage_declared=True)
+    assert "coverage gate still owed: ptest --full --cov" in err
+    assert progress.COVERAGE_OWED == "coverage gate still owed: ptest --full --cov"
+    assert "before handoff" not in err
+    # No coverage declared, or `--cov` requested: nothing is owed.
+    assert "coverage gate" not in _end_line(case, capsys, request)
+    assert "coverage gate" not in _end_line(
+        case, capsys, C.RunRequest(mode=C.Mode.FULL, coverage=True),
+        coverage_declared=True)
+
+
+def test_forced_full_suite_never_prints_the_coverage_line(case, capsys):
+    """R29: an R8a forced full run carries a changed_note and owes no
+    coverage line (it deferred nothing and recorded a gate)."""
+    request = C.RunRequest(mode=C.Mode.FULL,
+                           changed_note="origin/dev → full suite: uv.lock is a full trigger")
+    err = _end_line(case, capsys, request, coverage_declared=True)
+    assert "coverage gate" not in err
 
 
 def test_start_line_marks_a_run_that_measures_coverage():

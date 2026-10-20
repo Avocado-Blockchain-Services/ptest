@@ -1798,3 +1798,364 @@ def test_selection_after_run_receives_ingest_flags(case, monkeypatch):
     assert after["argv_files"] == ("tests/test_native.py",)
     assert after["cancelled"] is False
     assert after["setup_failed"] is False
+
+
+# --- 0.7.0 tiered selection: conditional observers, fingerprint, end line (T6) -
+
+from ptest import ambient_fingerprint, progress  # noqa: E402
+
+_BODY = "tests/test_native.py::test_body"
+_OTHER = "tests/test_native.py::test_other"
+_FP_A = "a" * 64
+_FP_B = "b" * 64
+
+
+def _conditional_project(case, domain, *, fingerprint=True):
+    """A git pytest project whose test file holds an observer and a failing
+    neighbour: running the neighbour makes the run FAIL, so a green run proves
+    the neighbour stayed deselected."""
+    root = _pytest_project(case, domain)
+    config_path = root / ".ptest.toml"
+    declared = ('ambient_fingerprint = ["fingerprint-command"]\n'
+                if fingerprint else "")
+    config_path.write_text(config_path.read_text().replace(
+        'args = ["-q"]', 'args = ["-q", "-p", "no:xdist"]')
+        + "\n[selection]\nenabled = true\n" + declared)
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    (root / "tests" / "test_native.py").write_text(
+        "def test_body():\n    assert True\n\n\n"
+        "def test_other():\n    assert False\n")
+    support.init_git_repo(root)
+    return root
+
+
+def _fingerprint_config(root):
+    return config_api.resolve_config(root).config
+
+
+def _deferred_report(**fields):
+    base = dict(
+        engine="dynamic", iteration=True, run_now=0, deferred=2,
+        deferred_by_reason=(("g-shared", "pkg/models.py", 2),),
+        deferred_by_file=(("tests/test_native.py", 2),),
+        observers_deferred=1, gate_recorded=True,
+        conditional=((_BODY, "g-shared", "pkg/models.py"),))
+    base.update(fields)
+    return C.SelectionReport(**base)
+
+
+def _conditional_request(**fields):
+    base = dict(
+        mode=C.Mode.SCOPED, argv=("tests/test_native.py",),
+        deselect=(_BODY, _OTHER), conditional=((_BODY, _FP_A),),
+        selection=_deferred_report(), next_hint=True)
+    base.update(fields)
+    return C.RunRequest(**base)
+
+
+def _stub_fingerprint(monkeypatch, outcome, seen=None):
+    def compute(argv, *, cwd, env, key, cancelled, **kwargs):
+        if seen is not None:
+            seen.update(argv=tuple(argv), cwd=cwd, env=dict(env),
+                        key=key, cancelled=cancelled)
+        return outcome() if callable(outcome) else outcome
+
+    monkeypatch.setattr(ambient_fingerprint, "compute", compute)
+
+
+def _spy_after_run(monkeypatch):
+    calls = []
+    real = operations._selection_after_run
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "_selection_after_run", spy)
+    return calls
+
+
+def _spy_rewrite(monkeypatch, *, result=None):
+    from ptest import selection_engine
+
+    calls = []
+    real = selection_engine.rewrite_binding
+
+    def spy(report_path, run_id, deselect):
+        calls.append(tuple(deselect))
+        return real(report_path, run_id, deselect) if result is None else result
+
+    monkeypatch.setattr(selection_engine, "rewrite_binding", spy)
+    return calls
+
+
+def test_unchanged_fingerprint_stops_with_no_tests_needed(case, monkeypatch, capsys):
+    # Oracle: spec R44 (no T1 node, nothing promoted -> completed decision).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+    seen = {}
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_A, None, ()), seen)
+    after = _spy_after_run(monkeypatch)
+    rewrites = _spy_rewrite(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request(
+        result_path="result.json", verbose=True))
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (
+        C.Status.NO_TESTS_NEEDED, 0, 0)
+    assert result.full_gate_eligible is False
+    assert not any(r.code in ("state-unavailable", "protocol-mismatch")
+                   for r in result.reasons)
+    assert after == []            # nothing recorded, no outcome, no marker
+    assert rewrites == []         # nothing promoted, binding untouched
+    assert seen["argv"] == ("fingerprint-command",)
+    assert seen["cwd"] == root
+    assert isinstance(seen["key"], bytes)
+    assert not any(name.startswith("PTEST_") for name in seen["env"]
+                   if name in ("PTEST_GRANT_NONCE", "PTEST_RUN_ID"))
+    err = capsys.readouterr().err
+    assert ("ptest: no tests needed · deferred 2 (shared import-time state "
+            "via pkg/models.py)") in err
+    assert err.rstrip().endswith("gate at spec end")
+    assert "ptest: -v fingerprint: unchanged · 1 observer kept deferred" in err
+    document = json.loads((root / "result.json").read_text())["data"]
+    assert document["selection"]["observers"]["fingerprint"] == "unchanged"
+    assert document["selection"]["run_now"] == 0
+    assert document["status"] == "no-tests-needed"
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
+
+
+@pytest.mark.parametrize("outcome,word", [
+    (ambient_fingerprint.Outcome(_FP_B, None, ()), "changed"),
+    (ambient_fingerprint.Outcome(None, "exit 3", ("boom",)), "absent"),
+])
+def test_conditional_binding_runs_only_promoted_ids(case, monkeypatch, capsys,
+                                                    outcome, word):
+    # Oracle: spec R44 (the rewrite drops exactly the promoted ids; T2
+    # neighbours stay deselected, absent compares as changed, R43).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+    _stub_fingerprint(monkeypatch, outcome)
+    rewrites = _spy_rewrite(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request(
+        result_path="result.json", verbose=True))
+
+    # The failing neighbour stayed deselected, so the promoted observer
+    # passed and the run is green (exit status never changes for a bad command).
+    assert (result.status, result.exit_code) == (C.Status.PASSED, 0)
+    assert rewrites == [(_OTHER,)]
+    selection = result.selection
+    assert selection.fingerprint == word
+    assert (selection.run_now, selection.deferred) == (1, 1)
+    assert selection.observers_promoted == 1
+    document = json.loads((root / "result.json").read_text())["data"]
+    assert document["selection"]["observers"]["fingerprint"] == word
+    err = capsys.readouterr().err
+    if word == "absent":
+        assert "ptest: -v fingerprint: absent (exit 3) · treated as changed · 1 observer promoted" in err
+        assert "ptest: -v fingerprint stderr: boom" in err
+    else:
+        assert "ptest: -v fingerprint: changed · 1 observer promoted" in err
+
+
+def test_unwritable_binding_rewrite_fails_closed(case, monkeypatch):
+    # Oracle: spec R44 / design 3.9 (rewrite failure -> state-unavailable stop).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_B, None, ()))
+    _spy_rewrite(monkeypatch, result=False)
+    after = _spy_after_run(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request())
+
+    assert result.status is C.Status.INCOMPLETE
+    assert any(r.code == "state-unavailable" for r in result.reasons)
+    assert result.exit_code == 70
+
+
+def test_fingerprint_writing_an_input_beats_no_tests_needed(case, monkeypatch):
+    # Oracle: R43 (a command that writes a project input fails closed with
+    # changed-during-run) and the advisor rule that invalidation wins.
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+
+    def writer():
+        (root / "tests" / "test_native.py").write_text(
+            "def test_body():\n    assert True\n\n\n"
+            "def test_other():\n    assert False  # touched\n")
+        return ambient_fingerprint.Outcome(_FP_A, None, ())
+
+    _stub_fingerprint(monkeypatch, writer)
+    after = _spy_after_run(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request())
+
+    assert result.status is C.Status.INCOMPLETE
+    assert any(r.code == "changed-during-run" for r in result.reasons)
+    assert result.exit_code == 70
+
+
+def test_sigint_during_fingerprint_cancels_run(case, monkeypatch):
+    # Oracle: spec R42 (the command is killed when the controller records a
+    # cancellation; nothing is ingested; exit 130).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    config = _fingerprint_config(root)
+    seen = {}
+
+    def interrupted():
+        os.kill(os.getpid(), signal.SIGINT)
+        deadline = time.monotonic() + 5
+        while not seen["cancelled"]() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert seen["cancelled"]()
+        return ambient_fingerprint.Outcome(None, "cancelled", ())
+
+    _stub_fingerprint(monkeypatch, interrupted, seen)
+    after = _spy_after_run(monkeypatch)
+
+    result = operations.execute(domain, config, _conditional_request())
+
+    assert result.exit_code == 130
+    assert result.status is not C.Status.NO_TESTS_NEEDED
+    assert not any(call.get("valid_handoff") and not call.get("cancelled")
+                   for call in after)
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
+
+
+def test_fingerprint_is_recorded_on_a_gate(case, monkeypatch):
+    # Oracle: spec R42 ("including gates") and R43 (stored on the run row):
+    # a `--full` run computes the fingerprint and hands it to the ingest;
+    # its report is not an iteration run and carries the outcome word.
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    (root / "tests" / "test_native.py").write_text(
+        "def test_body():\n    assert True\n")
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "green"],
+                   check=True)
+    config = _fingerprint_config(root)
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_B, None, ()))
+    after = _spy_after_run(monkeypatch)
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.FULL))
+
+    assert after and after[0]["fingerprint"] == _FP_B
+    assert result.selection.iteration is False
+    assert result.selection.fingerprint == "unchanged"
+
+
+def test_no_fingerprint_without_the_declaration(case, monkeypatch):
+    # Oracle: R41/R42 (a project that declares nothing never runs a command).
+    domain = case.domain()
+    root = _conditional_project(case, domain, fingerprint=False)
+    config = _fingerprint_config(root)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the fingerprint command must not run")
+
+    monkeypatch.setattr(ambient_fingerprint, "compute", boom)
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, argv=("tests/test_native.py::test_body",)))
+    assert result.status is C.Status.PASSED
+
+
+def test_slow_fingerprint_fits_decision_budget(case, monkeypatch):
+    # Oracle: spec R42a (manifest 90 s with the key, 30 s without; both
+    # controller checks follow the manifest value).
+    domain = case.domain()
+    root = _conditional_project(case, domain)
+    budgets = []
+    real = C.encode_launch_manifest
+
+    def capture(manifest):
+        budgets.append(manifest.attempt_decision_timeout_s)
+        return real(manifest)
+
+    monkeypatch.setattr(C, "encode_launch_manifest", capture)
+    _stub_fingerprint(monkeypatch, ambient_fingerprint.Outcome(_FP_A, None, ()))
+    operations.execute(domain, _fingerprint_config(root), _conditional_request())
+    plain_root = _conditional_project(case, domain, fingerprint=False)
+    operations.execute(domain, _fingerprint_config(plain_root),
+                       C.RunRequest(mode=C.Mode.SCOPED,
+                                    argv=("tests/test_native.py::test_body",)))
+
+    assert budgets == [90.0, 30.0]
+    assert operations._decision_budget_s(("x",)) == C.MAX_ATTEMPT_DECISION_TIMEOUT_S
+    assert operations._decision_budget_s(()) == C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S
+
+
+def test_frames_accept_a_late_ready_deadline_only_within_the_manifest_budget():
+    # Oracle: R42a (an attempt-ready deadline up to the manifest budget is
+    # valid; 60 s ahead needs the 90 s budget).
+    import socket
+
+    from ptest import operations as ops
+
+    def deadline_check(budget):
+        token = ops._DECISION_TIMEOUT_S.set(budget)
+        try:
+            left, right = socket.socketpair()
+            try:
+                frames = ops._Frames(left, None, None)
+            finally:
+                left.close()
+                right.close()
+        finally:
+            ops._DECISION_TIMEOUT_S.reset(token)
+        return frames.decision_timeout_s
+
+    assert deadline_check(30.0) == 30.0
+    assert deadline_check(90.0) == 90.0
+
+
+def test_end_line_notes_deferred_hint_and_forced_full(case, capsys):
+    # Oracle: spec R8a/R29/R30 and design 3.9 (note and hint are separate:
+    # a monorepo child keeps the note, loses the hint).
+    base = case.result(status=C.Status.PASSED, exit_code=0,
+                       counts=C.Counts(passed=12))
+    deferred = replace(base, selection=_report_for_end(deferred=14300))
+    request = C.RunRequest(mode=C.Mode.SCOPED, argv=("tests/a.py",),
+                           changed_note="x", next_hint=True)
+    operations._emit_end(request, deferred, 0.0)
+    err = capsys.readouterr().err
+    assert ("ptest: passed · 12 tests · deferred 14300 (static reach via "
+            "pkg/models.py) · ") in err
+    assert err.rstrip().endswith("gate at spec end")
+
+    child = replace(request, next_hint=False)
+    operations._emit_end(child, deferred, 0.0)
+    err = capsys.readouterr().err
+    assert "deferred 14300 (static reach via pkg/models.py)" in err
+    assert "gate at spec end" not in err
+
+    forced = replace(base, selection=C.SelectionReport(
+        engine=None, iteration=True, run_now=None, deferred=0,
+        full_reason="uv.lock is a full trigger \x1b[31m"))
+    operations._emit_end(replace(request, mode=C.Mode.FULL, argv=()),
+                         forced, 0.0)
+    err = capsys.readouterr().err
+    assert "full suite (uv.lock is a full trigger " in err
+    assert "\x1b" not in err
+    assert "gate at spec end" not in err
+    assert "coverage gate" not in err
+
+    clean = replace(base, selection=_report_for_end(deferred=0))
+    operations._emit_end(request, clean, 0.0)
+    err = capsys.readouterr().err
+    assert "deferred" not in err and "gate at spec end" not in err
+
+
+def _report_for_end(*, deferred):
+    return C.SelectionReport(
+        engine="dynamic", iteration=True, run_now=12, deferred=deferred,
+        deferred_by_reason=(() if not deferred
+                            else (("b-static", "pkg/models.py", deferred),)),
+        deferred_by_file=(() if not deferred
+                          else (("tests/test_m.py", deferred),)),
+        gate_recorded=True)
