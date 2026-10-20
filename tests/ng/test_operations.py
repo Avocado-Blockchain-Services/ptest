@@ -2090,9 +2090,11 @@ def test_slow_fingerprint_fits_decision_budget(case, monkeypatch):
     assert operations._decision_budget_s(()) == C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S
 
 
-def test_frames_accept_a_late_ready_deadline_only_within_the_manifest_budget():
-    # Oracle: R42a (an attempt-ready deadline up to the manifest budget is
-    # valid; 60 s ahead needs the 90 s budget).
+def test_frames_read_the_decision_budget_from_the_launch_context():
+    # Oracle: R42a. The frames take the budget the launch context carries.
+    # That the attempt-ready check really uses it is proven by the real-guard
+    # fingerprint tests: with the check on the 30 s constant they end
+    # incomplete (protocol-mismatch) against a 90 s manifest.
     import socket
 
     from ptest import operations as ops
