@@ -3746,18 +3746,21 @@ def _filter_folder_conditional(conditional: tuple, selected: tuple[str, ...],
                  and C.selection_test_file(item[0]) not in named)
 
 
-def _narrow_impact(impact, folders: tuple[str, ...]):
+def _narrow_impact(impact, folders: tuple[str, ...],
+                   whole: tuple[str, ...] = ()):
     """Restrict a refined verdict to the folders' part of the plan (R40).
 
-    Deferred nodes outside the folders are neither run nor counted. A
-    selection API without ``narrow`` (or a failing one) keeps the verdict.
+    Deferred nodes outside the folders are neither run nor counted; the
+    explicit ``whole`` files run whole, so none of their nodes count as
+    deferred (R30). A selection API without ``narrow`` (or a failing one)
+    keeps the verdict.
     """
     try:
         narrow = _selection_api().narrow
     except (ImportError, AttributeError):
         return impact
     try:
-        return narrow(impact, tuple(folders))
+        return narrow(impact, tuple(folders), tuple(whole))
     except Exception:
         return impact
 
@@ -3848,7 +3851,7 @@ def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     always = [item.local for item in split.files]
     folders = tuple(item.local for item in split.folders)
     typeds = tuple(item.typed for item in split.folders)
-    impact = _narrow_impact(impact, folders)
+    impact = _narrow_impact(impact, folders, tuple(always))
     if impact.kind == "vitest":
         argv = (("--changed", child_base.sha or "HEAD")
                 + tuple(local for local in folders if local)
@@ -3958,7 +3961,7 @@ def _run_folder_standalone(parsed: ParsedArgs,
     always = [local for _, local in files]
     under_roots = tuple(local for _, local in folders)
     typeds = tuple(typed for typed, _ in folders)
-    impact = _narrow_impact(impact, under_roots)
+    impact = _narrow_impact(impact, under_roots, tuple(always))
     if impact.kind == "vitest":
         argv = (("--changed", base.sha or "HEAD")
                 + under_roots + tuple(always))

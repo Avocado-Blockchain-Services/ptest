@@ -335,13 +335,15 @@ def _safe_path(path, fallback: str) -> str:
 
 
 def _tally(decision, *, kept, kept_conditional, observed,
-           scope=None) -> _Tally:
+           scope=None, whole=frozenset()) -> _Tally:
     """Count one decision's tiers, honouring what the run request kept.
 
     ``kept`` is the deselect the request can bind; ids the decision wanted
     to deselect but the request gave up (R5) run, so they count as run and
     leave the deferred counts. ``scope`` restricts every count to test
-    files under the given folders (R40).
+    files under the given folders (R40). Test files in ``whole`` run
+    whole (``ptest <folder> <file>``), so their nodes count as run and
+    never as deferred or conditional (R30).
     """
     tiers = getattr(decision, "tiers", None) or {}
     via = getattr(decision, "via", None) or {}
@@ -360,7 +362,9 @@ def _tally(decision, *, kept, kept_conditional, observed,
         if not _under_scope(path, scope):
             continue
         weight = max(1, int(weights.get(key, 1))) if is_file else 1
-        if tier == _T1:
+        if tier != _T1 and path in whole:
+            run_now += weight
+        elif tier == _T1:
             run_now += weight
             t1_codes[code] = t1_codes.get(code, 0) + weight
             if code == "o":
@@ -382,7 +386,8 @@ def _tally(decision, *, kept, kept_conditional, observed,
             run_now += 1
     conditional = []
     for nodeid, _run in getattr(decision, "conditional", ()) or ():
-        if not _under_scope(C.selection_test_file(nodeid), scope):
+        if (not _under_scope(C.selection_test_file(nodeid), scope)
+                or C.selection_test_file(nodeid) in whole):
             continue
         if nodeid in given_up:
             promoted += 1
@@ -910,22 +915,23 @@ def _decision_impact(static, decision, meta, *, snapshot=None,
                     conditional=(), **common)
 
 
-def narrow(impact, folders: tuple[str, ...]):
+def narrow(impact, folders: tuple[str, ...], whole: tuple[str, ...] = ()):
     """Restrict a dynamic plan to test files under ``folders`` (R40).
 
     ``""`` stands for the whole project. Files, deselect, conditional
     entries and the report's counts and aggregates are recounted for the
-    folders; tests outside them are neither run nor counted. A verdict the
-    dynamic planner did not decide only has its files narrowed. Never
-    raises.
+    folders; tests outside them are neither run nor counted. ``whole`` are
+    test files the user named explicitly: they run whole, so their nodes
+    are never counted as deferred (R30). A verdict the dynamic planner did
+    not decide only has its files narrowed. Never raises.
     """
     try:
-        return _narrow(impact, tuple(folders))
+        return _narrow(impact, tuple(folders), frozenset(whole))
     except Exception:
         return impact
 
 
-def _narrow(impact, folders: tuple):
+def _narrow(impact, folders: tuple, whole: frozenset = frozenset()):
     files = tuple(path for path in getattr(impact, "files", ()) or ()
                   if _under_scope(path, folders))
     decision = getattr(impact, "decision", None)
@@ -940,7 +946,7 @@ def _narrow(impact, folders: tuple):
     tally = _tally(decision, kept=impact.deselect,
                    kept_conditional=frozenset(n for n, _ in conditional),
                    observed=getattr(impact, "observed", frozenset()),
-                   scope=folders)
+                   scope=folders, whole=whole)
     narrowed = _dynamic_report(tally, gate_recorded=report.gate_recorded)
     if narrowed is not None:
         narrowed = dataclasses.replace(

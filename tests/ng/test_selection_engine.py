@@ -1835,6 +1835,42 @@ def test_narrow_recounts_the_report_for_the_folders(fakes, tmp_path):
     assert (empty.selection.run_now, empty.selection.deferred) == (0, 0)
 
 
+def test_narrow_never_counts_an_explicit_whole_file_as_deferred(fakes,
+                                                                tmp_path):
+    """R30: deferred tests are never among the executed ones. In
+    ``ptest <folder> <file>`` the named file runs whole, so none of its
+    T2 nodes or conditional observers may stay in the deferred counts."""
+    observer = "tests/api/test_a.py::t2"
+    fakes.store._snapshot = _snapshot(
+        fingerprint="cd" * 32, observers={observer: frozenset({"pkg/m.py"})})
+    tiers = {"tests/api/test_a.py::t0": (T1, "d"),
+             "tests/api/test_a.py::t1": (T2, "b-static"),
+             observer: (T2, "g-shared"),
+             "tests/api/test_b.py::t0": (T1, "d"),
+             "tests/api/test_b.py::t1": (T2, "g-shared")}
+    out = _tiered(
+        fakes, tmp_path, tiers,
+        files=("tests/api/test_a.py", "tests/api/test_b.py"),
+        deselect=("tests/api/test_a.py::t1", observer,
+                  "tests/api/test_b.py::t1"),
+        via={"tests/api/test_a.py::t1": "p.json", observer: "pkg/m.py",
+             "tests/api/test_b.py::t1": "pkg/m.py"},
+        conditional=((observer, RUN),),
+        config=_config(ambient_fingerprint=("echo", "x")))
+    narrowed = fakes.engine.narrow(out, ("tests/api",),
+                                   whole=("tests/api/test_a.py",))
+    report = narrowed.selection
+    assert (report.run_now, report.deferred) == (4, 1)
+    assert report.deferred_by_file == (("tests/api/test_b.py", 1),)
+    assert report.deferred_by_reason == (("g-shared", "pkg/m.py", 1),)
+    assert report.conditional == ()
+    assert report.observers_deferred == 0
+    assert report.observers_promoted == 0
+    # Without whole files the same plan keeps its deferred counts.
+    plain = fakes.engine.narrow(out, ("tests/api",)).selection
+    assert (plain.run_now, plain.deferred) == (2, 3)
+
+
 def test_narrow_never_raises_and_leaves_undecided_verdicts_alone(fakes):
     static = FakeImpact(kind="selected",
                         files=("tests/api/test_a.py", "tests/web/test_w.py"))

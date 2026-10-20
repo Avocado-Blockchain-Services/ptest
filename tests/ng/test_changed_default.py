@@ -1251,8 +1251,9 @@ def test_folder_run_counts_only_deferred_under_the_folder(
                   repo_changed=("pkg/core.py",))
     seen = {}
 
-    def narrow(impact, folders):
+    def narrow(impact, folders, whole=()):
         seen["folders"] = tuple(folders)
+        seen["whole"] = tuple(whole)
         return types.SimpleNamespace(**{
             **vars(impact),
             "selection": _tier_report(deferred=2, path="pkg/models.py")})
@@ -1265,11 +1266,40 @@ def test_folder_run_counts_only_deferred_under_the_folder(
     assert main(("tests",)) == 0
 
     assert seen["folders"] == ("tests",)
+    assert seen["whole"] == ()
     assert calls == []
     err = capsys.readouterr().err
     assert ("no changes under tests — nothing to run now · deferred 2 "
             "(static reach via pkg/models.py) · gate at spec end") in err
     assert "deferred 9" not in err
+
+
+def test_folder_run_hands_its_explicit_files_to_narrow_as_whole(
+        tmp_path, monkeypatch, capsys):
+    """R30: in ``ptest <folder> <file>`` the named file runs whole, so the
+    narrowing must know it to keep its nodes out of the deferred count."""
+    _pytest_project(tmp_path, monkeypatch)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    refined = _tiered(changed=("pkg/core.py",),
+                      selection=_tier_report(deferred=9, path="pkg/models.py"))
+    _route_tiered(monkeypatch, tmp_path.name, refined,
+                  repo_changed=("pkg/core.py",))
+    seen = {}
+
+    def narrow(impact, folders, whole=()):
+        seen["folders"] = tuple(folders)
+        seen["whole"] = tuple(whole)
+        return impact
+
+    import ptest.cli as cli_module
+    api = cli_module._selection_api()
+    api.narrow = narrow
+    _capture(monkeypatch)
+
+    main(("tests", "tests/test_x.py"))
+
+    assert seen == {"folders": ("tests",), "whole": ("tests/test_x.py",)}
 
 
 def test_monorepo_conditional_child_executes_and_total_uses_its_result(
