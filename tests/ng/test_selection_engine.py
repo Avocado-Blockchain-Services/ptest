@@ -1869,6 +1869,15 @@ def test_narrow_never_counts_an_explicit_whole_file_as_deferred(fakes,
     # Without whole files the same plan keeps its deferred counts.
     plain = fakes.engine.narrow(out, ("tests/api",)).selection
     assert (plain.run_now, plain.deferred) == (2, 3)
+    # A named node id of a planned file runs that file whole as well; one
+    # of an unplanned file runs alone, so its file's other nodes stay
+    # deferred.
+    by_node = fakes.engine.narrow(
+        out, ("tests/api",), whole=("tests/api/test_a.py::t0",)).selection
+    assert (by_node.run_now, by_node.deferred) == (4, 1)
+    unplanned = fakes.engine.narrow(
+        out, ("tests/api",), whole=("tests/api/test_c.py::t0",)).selection
+    assert (unplanned.run_now, unplanned.deferred) == (2, 3)
 
 
 def test_narrow_never_raises_and_leaves_undecided_verdicts_alone(fakes):

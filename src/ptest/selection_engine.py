@@ -938,6 +938,11 @@ def _narrow(impact, folders: tuple, whole: frozenset = frozenset()):
     report = getattr(impact, "selection", None)
     if decision is None or report is None or report.engine != "dynamic":
         return _replace(impact, files=files)
+    # A named file runs whole; a named node id runs its whole file only
+    # when that file is also part of the plan (the CLI then passes both).
+    whole = frozenset(
+        C.selection_test_file(item) for item in whole
+        if "::" not in item or C.selection_test_file(item) in files)
     deselect = tuple(nodeid for nodeid in impact.deselect
                      if _under_scope(C.selection_test_file(nodeid), folders))
     conditional = tuple(item for item in impact.conditional
