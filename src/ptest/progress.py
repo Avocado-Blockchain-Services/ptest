@@ -186,33 +186,113 @@ def format_changed_start(*, project: str, runner: str, segment: str,
             f"{runner} · {segment}")
 
 
-def format_no_changes(declaration: str, *, color: bool = False) -> str:
-    """Skip line for a monorepo child with no changes."""
-    return (f"{_prefix(color=color)} {_project(declaration, color=color)} "
+def format_no_changes(declaration: str, *, color: bool = False,
+                      deferred: str | None = None) -> str:
+    """Skip line for a monorepo child with no changes (R31)."""
+    line = (f"{_prefix(color=color)} {_project(declaration, color=color)} "
             "· no changes")
+    return f"{line} · {deferred}" if deferred else line
 
 
-#: End-line hint after a narrowed pass: the graph is a subset, not the gate.
-NEXT_FULL = "next: ptest --full before handoff"
-#: The same hint for a project that declares [runner] coverage_args: its
-#: handoff gate measures coverage (spec C11).
-NEXT_FULL_COV = "next: ptest --full --cov before handoff"
+#: End-line hint for an iteration run: the one integrated gate runs at the
+#: end of the spec, never per task (spec R29).
+GATE_HINT = "gate at spec end"
+#: The same hint when no usable gate marker is recorded yet.
+GATE_HINT_NO_GATE = "gate at spec end (no gate recorded)"
+#: A green plain ``--full`` on a project that measures coverage at the gate.
+COVERAGE_OWED = "coverage gate still owed: ptest --full --cov"
 #: End-line hint after any changed-mode failure.
 NEXT_FIX = "fix the code under test, then rerun ptest"
 
 
-def next_step(status: C.Status, narrowed: bool, *,
-              coverage: bool = False) -> str | None:
-    """One next-step hint for a changed-mode end line, or None.
+def next_step(status: C.Status,
+              selection: C.SelectionReport | None) -> str | None:
+    """One next-step hint for a changed-mode end line, or None (R29).
 
-    ``coverage``: the project declares coverage_args, so the handoff gate
-    is ``ptest --full --cov``.
+    Failure always reads ``NEXT_FIX``. A pass (or a decided "no tests
+    needed") of an iteration run carries the gate hint when the plan cannot
+    prove it covered everything: a Vitest ``--changed`` run (R12), a missing
+    gate marker, a static-engine run, or deferred tests. A full run, a
+    forced full suite (R8a) and a run without a report owe none.
     """
     if status is C.Status.FAILED:
         return NEXT_FIX
-    if narrowed and status in (C.Status.PASSED, C.Status.NO_TESTS_NEEDED):
-        return NEXT_FULL_COV if coverage else NEXT_FULL
+    if status not in (C.Status.PASSED, C.Status.NO_TESTS_NEEDED):
+        return None
+    if selection is None or not selection.iteration:
+        return None
+    if selection.full_reason is not None:
+        return None
+    if selection.engine == "vitest-changed":
+        return GATE_HINT
+    if not selection.gate_recorded:
+        return GATE_HINT_NO_GATE
+    if selection.engine == "static" or (selection.deferred or 0) > 0:
+        return GATE_HINT
     return None
+
+
+def total_next_step(status: C.Status, selections) -> str | None:
+    """The single hint of a monorepo total line (Decision 10).
+
+    ``NEXT_FIX`` on failure; otherwise the strongest child hint
+    (``no gate recorded`` over the plain one), or None.
+    """
+    if status is C.Status.FAILED:
+        return NEXT_FIX
+    steps = {next_step(status, item) for item in selections}
+    if GATE_HINT_NO_GATE in steps:
+        return GATE_HINT_NO_GATE
+    if GATE_HINT in steps:
+        return GATE_HINT
+    return None
+
+
+_DEFERRED_PHRASES = {
+    "g-shared": "shared import-time state via {path}",
+    "g-reach": "import-time reach via {path}",
+    "g-data": "ambient data {path}",
+    "b-static": "static reach via {path}",
+    "u-static": "unrecorded since gate via {path}",
+}
+
+
+def format_deferred(report: C.SelectionReport | None) -> str | None:
+    """``deferred N (reason)`` for the end line and no-run lines (R30).
+
+    The reason is the T2 code with the most tests and its top path; other
+    codes add ``, +k more``. None when nothing was deferred.
+    """
+    if report is None or not report.deferred:
+        return None
+    entries = C.selection_deferred_reasons(report)
+    if not entries:
+        return f"deferred {report.deferred}"
+    top = entries[0]
+    path = render.terminal_text(top.paths[0]) if top.paths else ""
+    phrase = _DEFERRED_PHRASES[top.code].format(path=path).strip()
+    more = len(entries) - 1
+    if more:
+        phrase += f", +{more} more"
+    return f"deferred {report.deferred} ({phrase})"
+
+
+def format_total_deferred(reports) -> str | None:
+    """Monorepo total note: one summed count over the children (R31)."""
+    counts = [item.deferred for item in reports
+              if item is not None and item.deferred]
+    if not counts:
+        return None
+    children = "1 child" if len(counts) == 1 else f"{len(counts)} children"
+    return f"deferred {sum(counts)} across {children}"
+
+
+def _no_run_tail(deferred: str | None, hint: str | None,
+                 nothing: str = "nothing to test") -> str:
+    """`` — nothing to test`` or ``— nothing to run now · deferred …`` + hint."""
+    text = (f"— nothing to run now · {deferred}" if deferred
+            else f"— {nothing}")
+    return text + (f" · {hint}" if hint else "")
 
 
 def format_impact(project: str, note: str, *, color: bool = False) -> str:
@@ -221,32 +301,38 @@ def format_impact(project: str, note: str, *, color: bool = False) -> str:
 
 
 def format_nothing_changed(label: str, *, color: bool = False,
-                           no_green_run: bool = False) -> str:
+                           no_green_run: bool = False,
+                           deferred: str | None = None,
+                           hint: str | None = None) -> str:
     """Line for a changed-mode run where nothing changed anywhere."""
     suffix = " (no green run yet)" if no_green_run else ""
-    return (f"{_prefix(color=color)} no changes vs {label}{suffix}"
-            " — nothing to test "
-            "· ptest --full runs everything")
+    return (f"{_prefix(color=color)} no changes vs {label}{suffix} "
+            + _no_run_tail(deferred, hint))
 
 
-def format_no_changes_anywhere(*, color: bool = False) -> str:
+def format_no_changes_anywhere(*, color: bool = False,
+                               deferred: str | None = None,
+                               hint: str | None = None) -> str:
     """Nothing changed in any project, whatever each project compares against."""
-    return (f"{_prefix(color=color)} no changes — nothing to test"
-            " · ptest --full runs everything")
+    return (f"{_prefix(color=color)} no changes "
+            + _no_run_tail(deferred, hint))
 
 
 def format_no_changes_under(declaration: str, scope: str, *,
-                            color: bool = False) -> str:
+                            color: bool = False,
+                            deferred: str | None = None,
+                            hint: str | None = None) -> str:
     """Line for a folder run whose change reaches no tests under it."""
     return (f"{_prefix(color=color)} {_project(declaration, color=color)} "
-            f"· no changes under {scope} — nothing to test · "
-            f"ptest --full {scope} runs all of them")
+            f"· no changes under {scope} " + _no_run_tail(deferred, hint))
 
 
-def format_no_green_changes(*, color: bool = False) -> str:
+def format_no_green_changes(*, color: bool = False,
+                            deferred: str | None = None,
+                            hint: str | None = None) -> str:
     """Line for a run where nothing changed since the last green run."""
-    return (f"{_prefix(color=color)} no changes since last green run"
-            " — nothing to test · ptest --full runs everything")
+    return (f"{_prefix(color=color)} no changes since last green run "
+            + _no_run_tail(deferred, hint))
 
 
 def format_already_verified(short_sha: str, age_s: float,
@@ -609,8 +695,10 @@ __all__ = [
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
     "format_changed_selected", "format_changed_start", "format_no_changes",
-    "NEXT_FULL", "NEXT_FIX", "next_step", "format_impact",
-    "format_nothing_changed", "format_no_green_changes",
+    "GATE_HINT", "GATE_HINT_NO_GATE", "COVERAGE_OWED", "NEXT_FIX",
+    "next_step", "total_next_step", "format_deferred", "format_total_deferred",
+    "format_impact", "format_nothing_changed", "format_no_green_changes",
+    "format_no_changes_anywhere", "format_no_changes_under",
     "format_already_verified", "format_verified_elsewhere",
     "format_child_unchanged", "format_child_skip_inputs",
     "format_skipped_children", "format_joined_full_run",

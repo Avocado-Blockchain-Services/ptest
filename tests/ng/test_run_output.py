@@ -932,3 +932,152 @@ def test_queued_run_behind_an_exclusive_holder_names_it(case):
         "ptest: waiting: this run needs the whole machine; 1 run is still active"
         " — in use by "), lines
     assert "free)" not in waiting[0]
+
+
+# --- 0.7.0 tiered selection: hints, deferred segment, no-run lines (T6) -------
+
+def _report(**fields):
+    base = dict(engine="dynamic", iteration=True, run_now=3, deferred=0,
+                gate_recorded=True)
+    base.update(fields)
+    deferred = base["deferred"]
+    if isinstance(deferred, int) and deferred > 0:
+        if "deferred_by_reason" not in base:
+            base["deferred_by_reason"] = (("b-static", "api/x.py", deferred),)
+        if "deferred_by_file" not in base:
+            base["deferred_by_file"] = (("tests/test_x.py", deferred),)
+    return C.SelectionReport(**base)
+
+
+def test_gate_hint_strings_replace_next_full():
+    # Oracle: spec R29 (the hint strings are exact).
+    assert progress.GATE_HINT == "gate at spec end"
+    assert progress.GATE_HINT_NO_GATE == "gate at spec end (no gate recorded)"
+    assert progress.COVERAGE_OWED == "coverage gate still owed: ptest --full --cov"
+    assert not hasattr(progress, "NEXT_FULL")
+    assert not hasattr(progress, "NEXT_FULL_COV")
+    assert "NEXT_FULL" not in progress.__all__
+
+
+@pytest.mark.parametrize("status,selection,expected", [
+    (C.Status.FAILED, None, progress.NEXT_FIX),
+    (C.Status.FAILED, _report(deferred=9), progress.NEXT_FIX),
+    (C.Status.PASSED, None, None),
+    (C.Status.PASSED, _report(iteration=False, engine=None), None),
+    (C.Status.PASSED, _report(full_reason="uv.lock is a full trigger",
+                              engine=None, deferred=0), None),
+    (C.Status.PASSED, _report(engine="vitest-changed", run_now=None,
+                              deferred=None, gate_recorded=False),
+     progress.GATE_HINT),
+    (C.Status.PASSED, _report(gate_recorded=False), progress.GATE_HINT_NO_GATE),
+    (C.Status.PASSED, _report(engine="static", run_now=None, deferred=None),
+     progress.GATE_HINT),
+    (C.Status.PASSED, _report(engine="static", run_now=None, deferred=None,
+                              gate_recorded=False),
+     progress.GATE_HINT_NO_GATE),
+    (C.Status.PASSED, _report(deferred=4), progress.GATE_HINT),
+    (C.Status.PASSED, _report(deferred=0), None),
+    (C.Status.NO_TESTS_NEEDED, _report(deferred=2), progress.GATE_HINT),
+    (C.Status.CANCELLED, _report(deferred=2), None),
+    (C.Status.INCOMPLETE, _report(deferred=2), None),
+    (C.Status.NOT_RUN, _report(deferred=2), None),
+])
+def test_next_step_matrix_follows_the_selection_report(status, selection,
+                                                       expected):
+    # Oracle: spec R29 (next_step rules) and D11 (no report, no hint).
+    assert progress.next_step(status, selection) == expected
+
+
+def _deferred(*rows):
+    tests = sum(item[2] for item in rows)
+    return _report(deferred=tests, deferred_by_reason=tuple(rows),
+                   deferred_by_file=(("tests/test_x.py", tests),))
+
+
+@pytest.mark.parametrize("code,phrase", [
+    ("g-shared", "shared import-time state via api/models.py"),
+    ("g-reach", "import-time reach via api/models.py"),
+    ("g-data", "ambient data api/models.py"),
+    ("b-static", "static reach via api/models.py"),
+    ("u-static", "unrecorded since gate via api/models.py"),
+])
+def test_format_deferred_phrases(code, phrase):
+    # Oracle: spec R30 (one phrase per T2 code).
+    report = _deferred((code, "api/models.py", 14300))
+    assert progress.format_deferred(report) == f"deferred 14300 ({phrase})"
+
+
+def test_format_deferred_names_other_codes_and_picks_top_path():
+    # Oracle: R30 example plus "+{k} more" for other codes; ties by path.
+    report = _deferred(("g-shared", "api/b.py", 5), ("g-shared", "api/a.py", 5),
+                       ("b-static", "api/c.py", 2), ("u-static", "api/d.py", 1))
+    assert progress.format_deferred(report) == (
+        "deferred 13 (shared import-time state via api/a.py, +2 more)")
+    one_more = _deferred(("g-shared", "api/a.py", 5), ("b-static", "api/c.py", 2))
+    assert progress.format_deferred(one_more) == (
+        "deferred 7 (shared import-time state via api/a.py, +1 more)")
+
+
+@pytest.mark.parametrize("report", [
+    None, _report(deferred=0), _report(deferred=None),
+    _report(engine="vitest-changed", run_now=None, deferred=None)])
+def test_format_deferred_is_none_without_deferred_tests(report):
+    assert progress.format_deferred(report) is None
+
+
+def test_format_deferred_escapes_hostile_paths():
+    # Oracle: R30 "escaped through render.terminal_text".
+    report = _deferred(("b-static", "api/\x1b[31mevil.py", 3))
+    line = progress.format_deferred(report)
+    assert "\x1b" not in line
+    assert line.startswith("deferred 3 (static reach via api/")
+
+
+def test_no_run_lines_name_deferred_and_drop_full_suffixes():
+    # Oracle: spec R31 (nothing to run now; suffixes dropped; hint last).
+    deferred = "deferred 7 (static reach via api/c.py)"
+    assert progress.format_nothing_changed(
+        "origin/dev", no_green_run=True, deferred=deferred,
+        hint=progress.GATE_HINT) == (
+        "ptest: no changes vs origin/dev (no green run yet) — nothing to run "
+        "now · deferred 7 (static reach via api/c.py) · gate at spec end")
+    assert progress.format_nothing_changed("origin/dev") == (
+        "ptest: no changes vs origin/dev — nothing to test")
+    assert progress.format_nothing_changed(
+        "origin/dev", hint=progress.GATE_HINT_NO_GATE) == (
+        "ptest: no changes vs origin/dev — nothing to test · "
+        "gate at spec end (no gate recorded)")
+    assert progress.format_no_green_changes(
+        deferred=deferred, hint=progress.GATE_HINT) == (
+        "ptest: no changes since last green run — nothing to run now · "
+        "deferred 7 (static reach via api/c.py) · gate at spec end")
+    assert progress.format_no_changes_anywhere() == (
+        "ptest: no changes — nothing to test")
+    assert progress.format_no_changes_under(
+        "api", "api/tests", deferred=deferred, hint=progress.GATE_HINT) == (
+        "ptest: api · no changes under api/tests — nothing to run now · "
+        "deferred 7 (static reach via api/c.py) · gate at spec end")
+    assert progress.format_no_changes_under("api", "api/tests") == (
+        "ptest: api · no changes under api/tests — nothing to test")
+    assert progress.format_no_changes(
+        "api", deferred=deferred) == (
+        "ptest: api · no changes · deferred 7 (static reach via api/c.py)")
+    assert progress.format_no_changes("api") == "ptest: api · no changes"
+
+
+def test_total_note_and_step_sum_children():
+    # Oracle: spec Decision 10 / R31 (one summed count and one hint).
+    api = _report(deferred=3)
+    web = _report(deferred=4, gate_recorded=False)
+    assert progress.format_total_deferred([api, web, None]) == (
+        "deferred 7 across 2 children")
+    assert progress.format_total_deferred([api, _report(deferred=0)]) == (
+        "deferred 3 across 1 child")
+    assert progress.format_total_deferred([_report(deferred=0), None]) is None
+    assert progress.total_next_step(C.Status.PASSED, [api, web]) == (
+        progress.GATE_HINT_NO_GATE)
+    assert progress.total_next_step(C.Status.PASSED, [api]) == (
+        progress.GATE_HINT)
+    assert progress.total_next_step(C.Status.PASSED, [_report(deferred=0)]) is None
+    assert progress.total_next_step(C.Status.FAILED, [api]) == progress.NEXT_FIX
+    assert progress.total_next_step(C.Status.PASSED, [None, None]) is None
