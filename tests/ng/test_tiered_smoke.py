@@ -75,8 +75,6 @@ MODELS = "app/models.py"
 SHARED_MODELS = "shared import-time state via app/models.py"
 GATE_HINT = "gate at spec end"
 HOLD_FLAG = "hold.flag"
-SPEC_DELTA = ("spec/product delta awaiting an orchestrator decision "
-              "(amend the spec row or close the product gap); ")
 
 _GITIGNORE = ("__pycache__/\n.pytest_cache/\nran.txt\n" + HOLD_FLAG
               + "\nptest-result-*.json\nr.json\n")
@@ -703,25 +701,14 @@ def test_s13_cancelled_run_leaves_the_store_alone_runner_ignoring_sigint(
 
 def test_s13_cancelled_run_leaves_the_store_alone_cooperative_runner(
         recorded):
-    """Pinned existing behaviour, not the spec's row: a pytest that leaves
-    on its own KeyboardInterrupt ends with its runner status (exit 2,
+    """Spec row S13 (amended 2026-10-20): a pytest that leaves on its own
+    KeyboardInterrupt ends with its runner status (exit 2,
     `test_real_cancellation_reaps_guard_and_releases_checkout`); the
-    records stay untouched. The spec's `cancelled (exit 130)` for this
-    plain run is the xfail row below."""
+    records stay untouched."""
     code, err, before = _cancel_run(recorded, "cooperative")
 
     assert code == 2, err[-2000:]
     _next_changed_run_is_intact(recorded, before)
-
-
-@pytest.mark.xfail(strict=True, reason=SPEC_DELTA + "S13: the spec ends an "
-                   "ordinary SIGINT'd run `cancelled` (exit 130); the "
-                   "product lets the runner's own exit 2 win")
-def test_s13_spec_plain_sigint_run_ends_cancelled_130(recorded):
-    code, err, _ = _cancel_run(recorded, "cooperative")
-
-    assert code == 130, err[-2000:]
-    assert "ptest: cancelled" in err
 
 
 def test_s14_unknown_schema_falls_back_to_static_and_never_writes(recorded):
