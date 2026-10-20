@@ -213,9 +213,8 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert '+args = []' in verbose_out
     assert '+coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in verbose_out
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert '"-n", "0"' not in raw
     assert 'coverage_args = ["--cov", "pkg", "--cov-report", "term"]' in raw
@@ -228,9 +227,8 @@ def test_fix_leaves_default_dev_group_out_of_setup_argv(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked"]' in raw
     assert "--group" not in raw
@@ -250,9 +248,8 @@ def test_fix_adds_extra_for_ptest_shaped_pyproject(tmp_path, monkeypatch, capsys
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
     assert "--group" not in raw
@@ -270,9 +267,8 @@ def test_fix_adds_group_for_plugin_in_non_default_group(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--group", "testdeps"]' in raw
 
@@ -285,9 +281,8 @@ def test_fix_never_invents_a_missing_extra(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked"]' in raw
     assert "--group" not in raw
@@ -305,9 +300,8 @@ def test_fix_adds_extra_for_xdist_when_n_is_used(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
 
@@ -424,9 +418,8 @@ def test_fix_appends_missing_selection_table_at_eof(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert "\n[selection]\nenabled = true\nclosed_inputs = true\n" in raw
     assert main(("doctor", "--fix")) == 0
@@ -464,9 +457,8 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
     assert '"libs/mylib"' in verbose_out
     assert '"src/core"' in verbose_out
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     parsed = tomllib.loads(raw)
     assert parsed["selection"]["enabled"] is True
@@ -740,9 +732,8 @@ def test_fix_handles_quoted_table_header_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
     assert '["selection"]' in raw
@@ -760,9 +751,8 @@ def test_fix_handles_quoted_key_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
     assert "args" in raw
@@ -797,9 +787,8 @@ def test_fix_preserves_unmanaged_settings_byte_for_byte(
     before = tomllib.loads(
         (root / ".ptest.toml").read_text(encoding="utf-8"))["selection"]
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     lines = raw.splitlines()
     assert "# a user comment" in lines
@@ -1058,9 +1047,8 @@ def test_fix_adds_node_modules_to_vitest_config_and_is_idempotent(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    code = main(("doctor", "--fix"))
-    captured = capsys.readouterr()
-    assert code == 0, captured.err + captured.out
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'non_input_outputs = ["node_modules"]' in raw
 

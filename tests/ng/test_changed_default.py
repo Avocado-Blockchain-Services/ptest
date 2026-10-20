@@ -1262,3 +1262,40 @@ def test_folder_run_counts_only_deferred_under_the_folder(
     assert ("no changes under tests — nothing to run now · deferred 2 "
             "(static reach via pkg/models.py) · gate at spec end") in err
     assert "deferred 9" not in err
+
+
+def test_monorepo_conditional_child_executes_and_total_uses_its_result(
+        tmp_path, monkeypatch, capsys, monorepo):
+    # R44 in a monorepo: a child with only conditional observers executes
+    # (children carry no hint), and the total line sums the counts the child's
+    # RESULT reports after promotion, not the planned ones.
+    report = _tier_report(
+        deferred=4, code="g-shared", path="api/models.py",
+        conditional=((_CONDITIONAL_ID, "g-shared", "api/models.py"),))
+    api = _tiered("none", changed=("api/x.py",), files=("tests/test_a.py",),
+                  deselect=(_CONDITIONAL_ID,), selection=report,
+                  conditional=((_CONDITIONAL_ID, _FP),))
+    web = _tiered(changed=("web/x.py",),
+                  selection=_tier_report(deferred=0))
+    _tiered_monorepo(tmp_path, monkeypatch, monorepo, {"api": api, "web": web})
+    calls = []
+    promoted = _tier_report(deferred=3, run_now=1)
+
+    def fake_execute(domain, config, request):
+        calls.append(request)
+        return types.SimpleNamespace(
+            reasons=(), exit_code=0, status=C.Status.PASSED,
+            counts=C.Counts(passed=1), selection=promoted)
+
+    monkeypatch.setattr("ptest.operations.execute", fake_execute)
+
+    assert main(()) == 0
+
+    assert len(calls) == 1
+    assert calls[0].conditional == ((_CONDITIONAL_ID, _FP),)
+    assert calls[0].next_hint is False
+    assert calls[0].selection is report
+    lines = capsys.readouterr().err.splitlines()
+    (total,) = [line for line in lines if line.startswith("ptest: total")]
+    assert "deferred 3 across 1 child" in total
+    assert total.endswith("gate at spec end")
