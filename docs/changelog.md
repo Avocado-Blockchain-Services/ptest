@@ -20,7 +20,8 @@
     and planning uses the record closest to the current tree.
   - P4: hint, guide and JSON. The end lines, `run.json` `data.selection`
     (nullable, additive) and the agent guide describe the loop: iterate with
-    `ptest`, gate once at spec end.
+    `ptest`, gate once at spec end. The guide also tells a worktree
+    branched off another unmerged branch to pass `--base <that branch>`.
   - P5: `[selection] ambient_fingerprint` is a command whose output digest
     says whether ambient state changed; unchanged means the deferred tests
     need not run, a changed or absent digest promotes them. It runs with no
