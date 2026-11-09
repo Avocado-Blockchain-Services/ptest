@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.2
+
+- Fix: a change to a test helper no longer forces the full suite on a bare
+  `ptest`. `ptest doctor --fix` used to list every test helper module and
+  package `__init__.py` that tests import in `[selection] full_triggers`, and
+  a full trigger is decided before tiered selection runs. Adding one factory
+  to a package `__init__.py` therefore ran the whole suite (in persea, about
+  18,000 tests, 19 minutes, for one task). Helpers are no longer drafted as
+  triggers, so the dynamic planner decides: the tests that ran the changed
+  code run now and the import-time reach is deferred to the gate. Lockfiles,
+  project and pytest config, `.ptest.toml` and `conftest.py` stay triggers.
+- Upgrade: run `ptest doctor --fix` once to remove the drafted helper entries
+  from an existing `.ptest.toml`; it names every entry it removes. An entry is
+  recognised by its shape, in a sorted list. To keep a helper as a deliberate
+  trigger, list it out of sorted order. Because `.ptest.toml` is itself a full
+  trigger, a checkout whose last green point is older than that edit pays one
+  full run on its next bare or `--changed` run, including an in-flight
+  worktree after it merges the edit; later bare runs are selective again. A
+  run with an explicit `--base` is full on every run while `.ptest.toml`
+  differs from that base. Worktrees that have not merged the edit are
+  unaffected. Declared triggers you keep still force the full suite.
+
 ## 0.7.1
 
 - Fix: `ptest` / `ptest --base <branch>` crashed with `request.argv exceeds
