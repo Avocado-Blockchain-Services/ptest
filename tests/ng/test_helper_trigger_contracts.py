@@ -165,6 +165,11 @@ _TEST_ORDERS = (
     "def test_order_total():\n"
     "    assert REGISTRY['order']()['total'] == 3\n")
 
+_TEST_ORDERS_DIRECT = (
+    "from tests.factories import orders\n\n\n"
+    "def test_order_total():\n"
+    "    assert orders.build_order()['total'] == 3\n")
+
 ALL = frozenset({
     "tests/test_users.py::test_user_has_name",
     "tests/test_users.py::test_user_is_dict",
@@ -278,11 +283,41 @@ def test_body_edit_to_helper_runs_only_the_tests_that_executed_it(recorded):
     assert "test support" not in run.err
 
 
+def test_adding_a_factory_import_line_runs_the_new_test_and_defers_the_rest(
+        recorded):
+    # Oracle: the demo result (.pipeline/progress.md): one factory, one
+    # import line appended to tests/factories/__init__.py, one new test that
+    # imports the factory directly. The edit reaches the other tests only
+    # through import-time reach (g-reach on the new factory), so only the
+    # new test runs and the rest are deferred to the spec-end gate.
+    write_file(recorded.root / "tests/factories/orders.py", _ORDERS)
+    write_file(recorded.root / "tests/test_orders.py", _TEST_ORDERS_DIRECT)
+    recorded.edit("tests/factories/__init__.py",
+                  "register('user', users.build_user)\n",
+                  "register('user', users.build_user)\n"
+                  "from tests.factories import orders  # noqa: E402,F401\n")
+
+    run = recorded.run("--changed")
+
+    assert run.code == 0, run.err[-2000:]
+    assert recorded.ran() == {NEW_ORDER}
+    selection = run.done.result["data"]["selection"]
+    assert selection["run_now"] == 1, selection
+    assert selection["deferred"] == 4, selection
+    assert selection["deferred_reasons"] == [
+        {"code": "g-reach", "paths": ["tests/factories/orders.py"],
+         "tests": 4}], selection
+    assert ("deferred 4 (import-time reach via tests/factories/orders.py)"
+            in run.end), run.end
+    assert GATE_HINT in run.end
+
+
 def test_registering_a_new_factory_runs_the_new_test_and_defers_the_rest(
         recorded):
-    # Oracle: the demo result. Adding one factory plus its registration in
-    # tests/factories/__init__.py is an import-time edit: only the reached
-    # new test runs, the others are deferred to the spec-end gate.
+    # Oracle: a top-level register() call in tests/factories/__init__.py
+    # mutates shared import-time state, so the deferral tier is g-shared
+    # (a different branch from the plain import line above): only the
+    # reached new test runs, the others are deferred to the spec-end gate.
     write_file(recorded.root / "tests/factories/orders.py", _ORDERS)
     write_file(recorded.root / "tests/test_orders.py", _TEST_ORDERS)
     recorded.edit("tests/factories/__init__.py",
