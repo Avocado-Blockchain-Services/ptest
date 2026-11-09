@@ -1247,7 +1247,7 @@ def _with_comment(root: Path, *, trailing: bool) -> None:
 
 @pytest.mark.parametrize("row", [
     "no-ptest-toml", "unsorted", "duplicate", "array-comment",
-    "trailing-comment", "enabled-false", "dynamic-false"])
+    "trailing-comment", "dynamic-false"])
 def test_fix_leaves_a_list_that_fails_a_gate_untouched(
         row, tmp_path, monkeypatch, capsys):
     triggers = _LEGACY_TWIN_TRIGGERS
@@ -1262,9 +1262,6 @@ def test_fix_leaves_a_list_that_fails_a_gate_untouched(
     path = root / ".ptest.toml"
     if row in ("array-comment", "trailing-comment"):
         _with_comment(root, trailing=row == "trailing-comment")
-    elif row == "enabled-false":
-        path.write_text(path.read_text(encoding="utf-8").replace(
-            "enabled = true", "enabled = false"), encoding="utf-8")
     elif row == "dynamic-false":
         path.write_text(path.read_text(encoding="utf-8").replace(
             "enabled = true", "enabled = true\ndynamic = false"),
@@ -1287,6 +1284,50 @@ def test_fix_leaves_a_list_that_fails_a_gate_untouched(
     else:
         assert n4 not in out
     assert "removed test-helper entries" not in out
+
+
+def test_fix_migration_converges_in_one_pass_when_selection_was_off(
+        tmp_path, monkeypatch, capsys):
+    # Oracle: applying the fix is idempotent. The pass that flips
+    # selection.enabled to true must also migrate the legacy list, so the
+    # next plan is empty.
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "gate-enabled-false")
+    path = root / ".ptest.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "enabled = true", "enabled = false"), encoding="utf-8")
+
+    first = _plan_for(root)
+    assert any(change.key == "enabled" for item in first.files
+               for change in item.changes)
+    assert _trigger_changes(first) != []
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    assert _plan_for(root).change_count == 0
+    assert "tests/__init__.py" not in _twin_selection(root)["full_triggers"]
+
+
+def test_dot_test_root_attributes_no_helper_entry(tmp_path):
+    # Oracle: the old generator never drafted a helper under a "." root,
+    # so hand-written source triggers there must survive byte for byte.
+    from ptest import doctor_fix
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "gen_schema.py").write_text("X = 1\n",
+                                                        encoding="utf-8")
+    (tmp_path / "src" / "core").mkdir(parents=True)
+    (tmp_path / "src" / "core" / "a.py").write_text("X = 1\n",
+                                                    encoding="utf-8")
+    for entry in ("scripts/gen_schema.py", "src/core"):
+        assert not doctor_fix._drafted_helper_entry(
+            tmp_path, (".",), entry)
+    raw = b'[selection]\nfull_triggers = ["x"]\n'
+    changes, notes = [], []
+    doctor_fix._plan_trigger_migration(
+        raw, {"full_triggers": [".ptest.toml", "pyproject.toml",
+                                "scripts/gen_schema.py", "src/core",
+                                "uv.lock"]},
+        tmp_path, (".",), changes, notes)
+    assert changes == [] and notes == []
 
 
 @pytest.mark.parametrize("kind", ["vitest", "command"])

@@ -801,8 +801,12 @@ def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, 
 
 
 def _in_test_roots(rel: str, test_roots: tuple) -> bool:
-    """True when ``rel`` is strictly below a test root (any path for ``.``)."""
-    return any(root == "." or _is_under(rel, root) for root in test_roots)
+    """True when ``rel`` is strictly below a named test root.
+
+    A ``.`` root attributes nothing: the old generator never put a helper
+    under it, so an entry there is hand-written and stays.
+    """
+    return any(_is_under(rel, root) for root in test_roots)
 
 
 def _drafted_helper_entry(project_dir: Path, test_roots: tuple,
@@ -1231,9 +1235,11 @@ def plan_project(root: Path, declaration: str, config: C.Config, *,
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
 
+    enabled_now = isinstance(selection, dict) and (
+        selection.get("enabled") is True
+        or FieldChange("selection", "enabled", True) in changes)
     if (tree_drafts and kind is C.RunnerKind.PYTEST
-            and isinstance(selection, dict)
-            and selection.get("enabled") is True
+            and isinstance(selection, dict) and enabled_now
             and selection.get("dynamic") is not False):
         _plan_trigger_migration(
             raw, selection, project_dir, tuple(config.runner.test_roots),
