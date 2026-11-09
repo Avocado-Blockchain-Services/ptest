@@ -1135,6 +1135,13 @@ _N2 = ("selection.full_triggers: until then a helper edit still runs the full "
        "suite. Apply this alone on the base branch or just before the spec's "
        "gate: a branch carrying this edit runs the full suite on every bare "
        "ptest")
+# Oracle: requirement 3's cost statement, context pack (one full run because
+# .ptest.toml is a trigger, re-recording, unmerged worktrees unaffected).
+_COST_NOTE = ("selection.full_triggers: .ptest.toml is itself a full trigger, so "
+              "the checkout applying this pays a full run (one, if applied alone "
+              "on the base branch) and existing selection records must be "
+              "re-recorded under the new config; worktrees that have not merged "
+              "this edit keep the old config and are unaffected")
 _N3_TAIL = "To keep a helper as a deliberate trigger, list it out of sorted order"
 
 
@@ -1197,6 +1204,7 @@ def test_fix_migrates_legacy_helper_triggers_to_a_fresh_draft(
             "runs only the tests that reach it, once a run has recorded under "
             "this config") in out
     assert f"# .ptest.toml: {_N2}" in out
+    assert f"# .ptest.toml: {_COST_NOTE}" in out
     assert ("# .ptest.toml: selection.full_triggers: to keep a helper as a "
             "deliberate trigger, list it out of sorted order") in out
 
@@ -1284,21 +1292,32 @@ def test_fix_leaves_a_list_that_fails_a_gate_untouched(
     else:
         assert n4 not in out
     assert "removed test-helper entries" not in out
+    assert _COST_NOTE not in out
 
 
+@pytest.mark.parametrize("row, drafted", [("false", False), ("absent", True)])
 def test_fix_migration_converges_in_one_pass_when_selection_was_off(
-        tmp_path, monkeypatch, capsys):
-    # Oracle: applying the fix is idempotent. The pass that flips
-    # selection.enabled to true must also migrate the legacy list, so the
-    # next plan is empty.
-    root = _legacy_twin(tmp_path, monkeypatch, capsys, "gate-enabled-false")
+        row, drafted, tmp_path, monkeypatch, capsys):
+    # Oracle: applying the fix is idempotent. The pass that turns
+    # selection.enabled on, whether it was false or never written, must also
+    # migrate the legacy list, so the next plan is empty.
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, f"gate-enabled-{row}")
     path = root / ".ptest.toml"
-    path.write_text(path.read_text(encoding="utf-8").replace(
-        "enabled = true", "enabled = false"), encoding="utf-8")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    index = lines.index("[selection]\n") + 1
+    index += lines[index:].index("enabled = true\n")
+    if row == "false":
+        lines[index] = "enabled = false\n"
+    else:
+        del lines[index]
+    path.write_text("".join(lines), encoding="utf-8")
 
     first = _plan_for(root)
-    assert any(change.key == "enabled" for item in first.files
-               for change in item.changes)
+    enabled = [change for item in first.files for change in item.changes
+               if change.key == "enabled"]
+    # The absent key comes through the drafted branch; without this the row
+    # would prove only the false path again.
+    assert [change.draft for change in enabled] == [drafted]
     assert _trigger_changes(first) != []
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()

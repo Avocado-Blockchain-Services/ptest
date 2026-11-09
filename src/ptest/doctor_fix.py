@@ -936,6 +936,12 @@ def _plan_trigger_migration(raw: bytes, selection: dict, project_dir: Path,
         "full suite. Apply this alone on the base branch or just before the "
         "spec's gate: a branch carrying this edit runs the full suite on "
         "every bare ptest")
+    notes.append(
+        "selection.full_triggers: .ptest.toml is itself a full trigger, so the "
+        "checkout applying this pays a full run (one, if applied alone on the "
+        "base branch) and existing selection records must be re-recorded "
+        "under the new config; worktrees that have not merged this edit keep "
+        "the old config and are unaffected")
     keep = "to keep a helper as a deliberate trigger, list it out of sorted order"
     if deliberate:
         notes.append(f"selection.full_triggers: kept {', '.join(deliberate)}. "
@@ -1237,7 +1243,8 @@ def plan_project(root: Path, declaration: str, config: C.Config, *,
 
     enabled_now = isinstance(selection, dict) and (
         selection.get("enabled") is True
-        or FieldChange("selection", "enabled", True) in changes)
+        or any(change.table == "selection" and change.key == "enabled"
+               and change.value is True for change in changes))
     if (tree_drafts and kind is C.RunnerKind.PYTEST
             and isinstance(selection, dict) and enabled_now
             and selection.get("dynamic") is not False):
