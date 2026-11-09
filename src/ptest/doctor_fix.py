@@ -929,19 +929,19 @@ def _plan_trigger_migration(raw: bytes, selection: dict, project_dir: Path,
     changes.append(FieldChange("selection", "full_triggers", result))
     notes.append(
         "selection.full_triggers: removed test-helper entries "
-        f"{_summarise_triggers(removed)}; a helper edit now runs only the "
-        "tests that reach it, once a run has recorded under this config")
+        f"{len(removed)} ({', '.join(removed)}); a helper edit now runs only "
+        "the tests that reach it, once a run has recorded under this config")
     notes.append(
         "selection.full_triggers: until then a helper edit still runs the "
-        "full suite. Apply this alone on the base branch or just before the "
-        "spec's gate: a branch carrying this edit runs the full suite on "
-        "every bare ptest")
+        "full suite. A checkout whose last green point is older than this "
+        "edit pays one full run on its next bare or --changed run, including "
+        "in-flight worktrees after they merge it; later bare runs are "
+        "selective again")
     notes.append(
-        "selection.full_triggers: .ptest.toml is itself a full trigger, so the "
-        "checkout applying this pays a full run (one, if applied alone on the "
-        "base branch) and existing selection records must be re-recorded "
-        "under the new config; worktrees that have not merged this edit keep "
-        "the old config and are unaffected")
+        "selection.full_triggers: .ptest.toml is itself a full trigger. "
+        "Worktrees that have not merged this edit are unaffected. A run with "
+        "an explicit --base is full on every run while .ptest.toml differs "
+        "from that base")
     keep = "to keep a helper as a deliberate trigger, list it out of sorted order"
     if deliberate:
         notes.append(f"selection.full_triggers: kept {', '.join(deliberate)}. "

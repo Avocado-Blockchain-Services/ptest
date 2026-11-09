@@ -1132,16 +1132,16 @@ _LEGACY_TWIN_TRIGGERS = [
     ".ptest.toml", "pyproject.toml", "tests/__init__.py", "tests/conftest.py",
     "tests/factories", "tests/unit/conftest.py", "uv.lock"]
 _N2 = ("selection.full_triggers: until then a helper edit still runs the full "
-       "suite. Apply this alone on the base branch or just before the spec's "
-       "gate: a branch carrying this edit runs the full suite on every bare "
-       "ptest")
-# Oracle: requirement 3's cost statement, context pack (one full run because
-# .ptest.toml is a trigger, re-recording, unmerged worktrees unaffected).
-_COST_NOTE = ("selection.full_triggers: .ptest.toml is itself a full trigger, so "
-              "the checkout applying this pays a full run (one, if applied alone "
-              "on the base branch) and existing selection records must be "
-              "re-recorded under the new config; worktrees that have not merged "
-              "this edit keep the old config and are unaffected")
+       "suite. A checkout whose last green point is older than this edit pays "
+       "one full run on its next bare or --changed run, including in-flight "
+       "worktrees after they merge it; later bare runs are selective again")
+# Oracle: observed last-green behaviour (src/ptest/lastgreen.py): one full run
+# per stale checkout, unmerged worktrees unaffected, explicit --base full on
+# every run while .ptest.toml differs from that base.
+_COST_NOTE = ("selection.full_triggers: .ptest.toml is itself a full trigger. "
+              "Worktrees that have not merged this edit are unaffected. A run "
+              "with an explicit --base is full on every run while .ptest.toml "
+              "differs from that base")
 _N3_TAIL = "To keep a helper as a deliberate trigger, list it out of sorted order"
 
 
@@ -1207,6 +1207,25 @@ def test_fix_migrates_legacy_helper_triggers_to_a_fresh_draft(
     assert f"# .ptest.toml: {_COST_NOTE}" in out
     assert ("# .ptest.toml: selection.full_triggers: to keep a helper as a "
             "deliberate trigger, list it out of sorted order") in out
+
+
+def test_fix_names_every_removed_helper_entry_past_the_preview_limit(
+        tmp_path, monkeypatch, capsys):
+    # Oracle: the migration removes entries by shape, so every removed entry
+    # is named in the output (a real client list has about 50).
+    stale = sorted(f"tests/helpers/h{i}.py" for i in range(8))
+    triggers = sorted([*_LEGACY_TWIN_TRIGGERS, *stale])
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "legacy-many", triggers)
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+
+    removed = sorted(["tests/__init__.py", "tests/factories", *stale])
+    assert ("selection.full_triggers: removed test-helper entries "
+            f"{len(removed)} ({', '.join(removed)});") in out
+    assert "…" not in out.split("removed test-helper entries", 1)[1].split(
+        ";", 1)[0]
+    assert _twin_selection(root)["full_triggers"] == _FRESH_TWIN_TRIGGERS
 
 
 def test_fix_migration_is_idempotent_and_counted_once(
