@@ -1,6 +1,7 @@
 """Acceptance for `ptest doctor --fix`: plan, direct apply, mention."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tomllib
@@ -604,6 +605,11 @@ def _write_import_twin(root: Path) -> Path:
     return root
 
 
+_FRESH_TWIN_TRIGGERS = [
+    ".ptest.toml", "pyproject.toml", "tests/conftest.py",
+    "tests/factories/conftest.py", "tests/unit/conftest.py", "uv.lock"]
+
+
 def _twin_selection(root: Path) -> dict:
     return tomllib.loads(
         (root / ".ptest.toml").read_text(encoding="utf-8"))["selection"]
@@ -630,7 +636,7 @@ def test_fix_drafts_import_derived_groups_with_transitive_deps(
     ]
 
 
-def test_fix_drafts_full_triggers_cover_conftests_and_helpers(
+def test_fix_drafts_full_triggers_cover_conftests_not_helpers(
         tmp_path, monkeypatch, capsys):
     root = _write_import_twin(tmp_path / "twin-triggers")
     monkeypatch.chdir(root)
@@ -642,16 +648,17 @@ def test_fix_drafts_full_triggers_cover_conftests_and_helpers(
     assert ".ptest.toml" in triggers
     assert "uv.lock" in triggers
     assert "pyproject.toml" in triggers
-    # Every conftest.py under the child, at any depth.
+    # Every conftest.py under the child, at any depth, listed explicitly.
     assert "tests/conftest.py" in triggers
     assert "tests/unit/conftest.py" in triggers
-    # The shared factories dir is imported by tests but holds no tests
-    # itself, so it compresses to one directory trigger (which also covers
-    # its nested conftest.py).
-    assert "tests/factories" in triggers
-    assert "tests/factories/conftest.py" not in triggers
-    # The tests package init executes on every tests.factories import.
-    assert "tests/__init__.py" in triggers
+    assert "tests/factories/conftest.py" in triggers
+    # Spec oracle (helper-full-triggers): helper modules and package
+    # __init__.py files are not drafted, so a helper edit is planned from
+    # the import graph instead of forcing the full suite.
+    assert "tests/factories" not in triggers
+    assert "tests/factories/f.py" not in triggers
+    assert "tests/__init__.py" not in triggers
+    assert triggers == _FRESH_TWIN_TRIGGERS
 
 
 def test_fix_leaves_unimported_test_file_out_of_every_group(
@@ -692,12 +699,12 @@ def test_fix_never_compresses_triggers_over_test_dirs(
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     selection = _twin_selection(root)
-    # Every non-test module under tests/unit is imported, but the
-    # directory also holds tests: compressing the trigger to tests/unit
-    # would shadow the groups and force full on any unit-test change.
+    # The directory holds tests: a trigger over tests/unit would shadow
+    # the groups and force full on any unit-test change.
     assert "tests/unit" not in selection["full_triggers"]
-    assert "tests/unit/helpers.py" in selection["full_triggers"]
-    assert "tests/unit/__init__.py" in selection["full_triggers"]
+    # Spec oracle (helper-full-triggers): helpers are no longer drafted.
+    assert "tests/unit/helpers.py" not in selection["full_triggers"]
+    assert "tests/unit/__init__.py" not in selection["full_triggers"]
     # Group compression is unaffected: pkg_a still covers tests/unit.
     by_name = {group["name"]: group["tests"]
                for group in selection["groups"]}
@@ -1075,8 +1082,8 @@ def test_fix_dry_run_prints_selection_summary_not_the_full_mapping(
     assert "selection.enabled = true" in out
     assert "selection.closed_inputs = true" in out
     assert "selection.groups: 2 (pkg_a 2 test files, pkg_b 2 test files)" in out
-    assert ("selection.full_triggers: 7 (.ptest.toml, pyproject.toml, "
-            "tests/__init__.py, tests/conftest.py, …)") in out
+    assert ("selection.full_triggers: 6 (.ptest.toml, pyproject.toml, "
+            "tests/conftest.py, tests/factories/conftest.py, …)") in out
     assert "DRAFT" in out
     # The full mapping stays off the terminal: no per-file diff lines.
     assert "+groups = [" not in out
@@ -1114,4 +1121,318 @@ def test_fix_applies_the_full_selection_content(tmp_path, monkeypatch, capsys):
     selection = _twin_selection(root)
     assert [group["name"] for group in selection["groups"]] == ["pkg_a", "pkg_b"]
     assert "tests/unit/test_both.py" in selection["groups"][1]["tests"]
-    assert len(selection["full_triggers"]) == 7
+    assert len(selection["full_triggers"]) == 6
+
+
+# helper-full-triggers: doctor --fix stops drafting helper triggers and
+# removes the entries an older generator drafted. Oracle: the spec in
+# .pipeline/design.md (D1, D3, D4) and its frozen note strings.
+
+_LEGACY_TWIN_TRIGGERS = [
+    ".ptest.toml", "pyproject.toml", "tests/__init__.py", "tests/conftest.py",
+    "tests/factories", "tests/unit/conftest.py", "uv.lock"]
+_N2 = ("selection.full_triggers: until then a helper edit still runs the full "
+       "suite. Apply this alone on the base branch or just before the spec's "
+       "gate: a branch carrying this edit runs the full suite on every bare "
+       "ptest")
+_N3_TAIL = "To keep a helper as a deliberate trigger, list it out of sorted order"
+
+
+def _trigger_line(values) -> str:
+    return "full_triggers = [" + ", ".join(json.dumps(v) for v in values) + "]"
+
+
+def _set_triggers(root: Path, values) -> None:
+    path = root / ".ptest.toml"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines)
+                 if line.startswith("full_triggers = "))
+    lines[index] = _trigger_line(values) + "\n"
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def _legacy_twin(tmp_path, monkeypatch, capsys, name, triggers=None) -> Path:
+    """Current config on the twin, then the legacy trigger line spliced in."""
+    root = _write_import_twin(tmp_path / name)
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    _set_triggers(root, triggers or _LEGACY_TWIN_TRIGGERS)
+    return root
+
+
+def _plan_for(root: Path, **kwargs):
+    from ptest import config as config_api
+    from ptest import doctor_fix
+
+    return doctor_fix.plan_all(root, config_api.resolve_config(root), **kwargs)
+
+
+def _trigger_changes(plan) -> list:
+    return [change for item in plan.files for change in item.changes
+            if (change.table, change.key) == ("selection", "full_triggers")]
+
+
+def test_fix_migrates_legacy_helper_triggers_to_a_fresh_draft(
+        tmp_path, monkeypatch, capsys):
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "legacy")
+    before = (root / ".ptest.toml").read_text(encoding="utf-8")
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+
+    after = (root / ".ptest.toml").read_text(encoding="utf-8")
+    # Equal to a fresh draft of the same tree (the nested conftest of the
+    # removed tests/factories directory is restored), and every other byte
+    # of the file is unchanged.
+    assert _twin_selection(root)["full_triggers"] == _FRESH_TWIN_TRIGGERS
+    assert after == before.replace(_trigger_line(_LEGACY_TWIN_TRIGGERS),
+                                   _trigger_line(_FRESH_TWIN_TRIGGERS))
+    assert ("selection.full_triggers: 6 (.ptest.toml, pyproject.toml, "
+            "tests/conftest.py, tests/factories/conftest.py, …)") in out
+    assert ("# .ptest.toml: selection.full_triggers: removed test-helper "
+            "entries 2 (tests/__init__.py, tests/factories); a helper edit now "
+            "runs only the tests that reach it, once a run has recorded under "
+            "this config") in out
+    assert f"# .ptest.toml: {_N2}" in out
+    assert ("# .ptest.toml: selection.full_triggers: to keep a helper as a "
+            "deliberate trigger, list it out of sorted order") in out
+
+
+def test_fix_migration_is_idempotent_and_counted_once(
+        tmp_path, monkeypatch, capsys):
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "legacy-count")
+    # Everything else is current, so the count isolates the migration.
+    assert _plan_for(root).change_count == 1
+    # The run-start notice (tree_drafts=False) never proposes it.
+    assert _plan_for(root, tree_drafts=False).change_count == 0
+
+    dry = (root / ".ptest.toml").read_bytes()
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    capsys.readouterr()
+    assert (root / ".ptest.toml").read_bytes() == dry
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    assert _plan_for(root).change_count == 0
+    assert main(("doctor", "--fix")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+
+
+def test_doctor_mentions_fix_for_legacy_helper_triggers(
+        tmp_path, monkeypatch, capsys):
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "legacy-mention")
+    assert main(("doctor", "--offline")) == 0
+    assert "config is out of date: 1 changes" in capsys.readouterr().out
+
+
+_UNSORTED = ["uv.lock", ".ptest.toml", "pyproject.toml", "tests/__init__.py",
+             "tests/conftest.py", "tests/factories", "tests/unit/conftest.py"]
+
+
+def _with_comment(root: Path, *, trailing: bool) -> None:
+    path = root / ".ptest.toml"
+    text = path.read_text(encoding="utf-8")
+    old = _trigger_line(_LEGACY_TWIN_TRIGGERS)
+    if trailing:
+        new = old + "  # drafted"
+    else:
+        body = "".join(f'    {json.dumps(v)},{"  # keep" if v == "uv.lock" else ""}\n'
+                       for v in _LEGACY_TWIN_TRIGGERS)
+        new = "full_triggers = [\n" + body + "]"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+@pytest.mark.parametrize("row", [
+    "no-ptest-toml", "unsorted", "duplicate", "array-comment",
+    "trailing-comment", "enabled-false", "dynamic-false"])
+def test_fix_leaves_a_list_that_fails_a_gate_untouched(
+        row, tmp_path, monkeypatch, capsys):
+    triggers = _LEGACY_TWIN_TRIGGERS
+    if row == "no-ptest-toml":
+        triggers = [v for v in triggers if v != ".ptest.toml"]
+    elif row == "unsorted":
+        triggers = _UNSORTED
+    elif row == "duplicate":
+        triggers = [*triggers, "uv.lock"]
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, f"gate-{row}",
+                        triggers)
+    path = root / ".ptest.toml"
+    if row in ("array-comment", "trailing-comment"):
+        _with_comment(root, trailing=row == "trailing-comment")
+    elif row == "enabled-false":
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "enabled = true", "enabled = false"), encoding="utf-8")
+    elif row == "dynamic-false":
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "enabled = true", "enabled = true\ndynamic = false"),
+            encoding="utf-8")
+    before = path.read_bytes()
+
+    assert _trigger_changes(_plan_for(root)) == []
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert path.read_bytes() == before
+    n4 = "selection.full_triggers: left as written ("
+    if row in ("unsorted", "duplicate"):
+        helpers = "tests/__init__.py, tests/factories"
+        assert (f"{n4}not in sorted order): {helpers}; each still forces the "
+                "full suite when edited") in out
+    elif row in ("array-comment", "trailing-comment"):
+        assert (f"{n4}its value has comments): tests/__init__.py, "
+                "tests/factories; each still forces the full suite when "
+                "edited") in out
+    else:
+        assert n4 not in out
+    assert "removed test-helper entries" not in out
+
+
+@pytest.mark.parametrize("kind", ["vitest", "command"])
+def test_fix_never_migrates_non_pytest_runners(kind, tmp_path, monkeypatch):
+    root = tmp_path / kind
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "helpers.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "package-lock.json").write_text('{"lockfileVersion": 3}\n',
+                                            encoding="utf-8")
+    write_ptest_toml(
+        root, kind=kind, launcher=("node",) if kind == "vitest" else ("echo",),
+        args=() if kind == "vitest" else ("hi",), project_id=PROJECT_ID,
+        tail="[selection]\nenabled = true\nnon_input_outputs = [\"node_modules\"]\n"
+             + _trigger_line([".ptest.toml", "tests/helpers.py"]) + "\n")
+    monkeypatch.chdir(root)
+    assert _trigger_changes(_plan_for(root)) == []
+
+
+@pytest.mark.parametrize("row", [
+    "outside-test-roots", "dir-with-test-file", "data-only-dir",
+    "non-py-file"])
+def test_fix_keeps_entries_the_scan_cannot_attribute(
+        row, tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / f"keep-{row}")
+    (root / "src" / "generated").mkdir()
+    (root / "src" / "generated" / "schema.py").write_text("S = 1\n",
+                                                          encoding="utf-8")
+    (root / "tests" / "data").mkdir()
+    (root / "tests" / "data" / "rows.json").write_text("[]\n", encoding="utf-8")
+    (root / "tests" / "factories" / "seed.sql").write_text("--\n",
+                                                           encoding="utf-8")
+    extra = {
+        "outside-test-roots": "src/generated/schema.py",
+        "dir-with-test-file": "tests/unit",
+        "data-only-dir": "tests/data",
+        "non-py-file": "tests/factories/seed.sql",
+    }[row]
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    legacy = sorted({*_LEGACY_TWIN_TRIGGERS, extra})
+    _set_triggers(root, legacy)
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+    triggers = _twin_selection(root)["full_triggers"]
+    assert extra in triggers
+    assert "tests/__init__.py" not in triggers
+    assert f"selection.full_triggers: kept {extra}. {_N3_TAIL}" in out
+
+
+def test_fix_keeps_a_deliberate_helper_listed_out_of_sorted_order(
+        tmp_path, monkeypatch, capsys):
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "deliberate")
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    migrated = _twin_selection(root)["full_triggers"]
+    # The user re-adds a helper as a deliberate trigger, out of order.
+    _set_triggers(root, [*migrated, "tests/factories/f.py"])
+    before = (root / ".ptest.toml").read_bytes()
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+    assert (root / ".ptest.toml").read_bytes() == before
+    assert ("selection.full_triggers: left as written (not in sorted order): "
+            "tests/factories/f.py; each still forces the full suite when "
+            "edited") in out
+
+
+def test_fix_names_a_kept_generated_schema_module(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "schema")
+    (root / "src" / "generated").mkdir()
+    (root / "src" / "generated" / "schema.py").write_text("S = 1\n",
+                                                          encoding="utf-8")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    _set_triggers(root, sorted([*_LEGACY_TWIN_TRIGGERS,
+                                "src/generated/schema.py"]))
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+    assert ("# .ptest.toml: selection.full_triggers: kept "
+            f"src/generated/schema.py. {_N3_TAIL}") in out
+    assert f"# .ptest.toml: {_N2}" in out
+    assert "src/generated/schema.py" in _twin_selection(root)["full_triggers"]
+
+
+def test_fix_migrates_a_monorepo_child_with_child_relative_paths(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "mono-helpers"
+    root.mkdir()
+    (root / ".ptest.toml").write_text(
+        'version = 2\n\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    api = root / "api"
+    _write_import_twin(api)
+    before_root = (root / ".ptest.toml").read_bytes()
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    _set_triggers(api, _LEGACY_TWIN_TRIGGERS)
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+    selection = tomllib.loads(
+        (api / ".ptest.toml").read_text(encoding="utf-8"))["selection"]
+    assert selection["full_triggers"] == _FRESH_TWIN_TRIGGERS
+    assert (root / ".ptest.toml").read_bytes() == before_root
+    assert "# api/.ptest.toml: selection.full_triggers: removed test-helper" in out
+
+
+def test_migrated_helper_edit_is_no_longer_a_full_trigger(
+        tmp_path, monkeypatch, capsys):
+    from ptest import config as config_api
+    from ptest import impact
+
+    root = _legacy_twin(tmp_path, monkeypatch, capsys, "impact")
+    # A helper listed out of sorted order is a deliberate trigger: the list
+    # is then left as written, so first migrate, then re-add it unsorted.
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    (root / "tests" / "unit" / "helpers.py").write_text("H = 1\n",
+                                                        encoding="utf-8")
+    migrated = _twin_selection(root)["full_triggers"]
+    _set_triggers(root, [*migrated, "tests/unit/helpers.py"])
+    config = config_api.resolve_config(root).config
+    assert "tests/factories" not in config.selection.full_triggers
+
+    def reason(path):
+        return impact.plan(root, root, config, (path,)).reason
+
+    assert "is a full trigger" not in reason("tests/factories/f.py")
+    assert reason("tests/unit/helpers.py") == (
+        "tests/unit/helpers.py is a full trigger")
+
+
+def test_init_writes_empty_full_triggers_and_never_drafts_helpers(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "init-twin")
+    (root / ".ptest.toml").unlink()
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest")) == 0
+    capsys.readouterr()
+    selection = _twin_selection(root)
+    assert selection["full_triggers"] == []

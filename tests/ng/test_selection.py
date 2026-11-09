@@ -466,8 +466,10 @@ def test_drafted_factory_change_goes_full(case, tmp_path):
     root = _write_selection_twin(tmp_path / "twin-factory")
     config = _twin_config(case, root)
     plan = _twin_plan(case, config, "tests/factories/f.py")
+    # Helpers are no longer drafted as triggers: on this declared-group
+    # path an input no group claims fails safe to full as unknown-input.
     assert plan.execution == "full"
-    assert plan.reasons[0].code == "policy-changed"
+    assert plan.reasons[0].code == "unknown-input"
 
 
 def test_drafted_unclassified_test_change_goes_full(case, tmp_path):
@@ -490,8 +492,7 @@ def test_drafted_unit_test_change_selects_its_group_not_full(case, tmp_path):
         encoding="utf-8")
     config = _twin_config(case, root)
     plan = _twin_plan(case, config, "tests/unit/test_a.py")
-    # The helper trigger files must not compress to tests/unit: that
-    # directory trigger would shadow the group and force full here.
+    # tests/unit holds tests, so no directory trigger shadows the group.
     assert plan.execution == "selected"
     assert plan.files == (
         "tests/test_b.py", "tests/unit/test_a.py", "tests/unit/test_both.py")

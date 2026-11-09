@@ -26,6 +26,7 @@ import re
 import secrets
 import stat
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -40,9 +41,9 @@ _CONFIG_LIMIT = 256 * 1024
 _CONFIG_NAME = ".ptest.toml"
 
 #: Files probed (in order) for the selection ``full_triggers`` draft.
-#: Every ``conftest.py`` under the child and the test helper modules found
-#: by the static import scan join these; the bare ``conftest.py`` entry is
-#: covered by that walk.
+#: Every ``conftest.py`` under the child joins these. Test helper modules
+#: are not drafted: the import graph plans a helper edit, so a helper
+#: only forces the full suite when a user lists it by hand.
 _TRIGGER_CANDIDATES = (
     "uv.lock", "poetry.lock", "Pipfile.lock", "pyproject.toml", "pytest.ini",
     "tox.ini", "setup.cfg", ".ptest.toml",
@@ -454,19 +455,6 @@ def _is_under(path: str, directory: str) -> bool:
     return path != directory and path.startswith(directory + "/")
 
 
-def _parent_chain(path: str) -> list[str]:
-    parents: list[str] = []
-    parent = path.rpartition("/")[0]
-    while parent:
-        parents.append(parent)
-        parent = parent.rpartition("/")[0]
-    return parents
-
-
-def _under_any(rel: str, roots: tuple) -> bool:
-    return any(rel == root or _is_under(rel, root) for root in roots)
-
-
 def _real_py(path: Path) -> bool:
     try:
         stamp = os.lstat(path)
@@ -569,72 +557,6 @@ def _parse_imports(source: str) -> tuple[set[str], list, bool]:
     return tops, records, True
 
 
-def _existing_module_files(base: Path, parts: tuple) -> list[Path]:
-    """Existing module file, package init, and parent inits for ``parts``."""
-    found: list[Path] = []
-    if (not parts or len(parts) > 32
-            or any(not part or part in (".", "..") or "/" in part
-                   or "\\" in part for part in parts)):
-        return found
-    rel = Path(*parts)
-    candidate = base / rel.parent / (rel.name + ".py")
-    if _real_py(candidate):
-        found.append(candidate)
-    package_init = base / rel / "__init__.py"
-    if _real_py(package_init):
-        found.append(package_init)
-    for depth in range(1, len(parts)):
-        init = base / Path(*parts[:depth]) / "__init__.py"
-        if _real_py(init):
-            found.append(init)
-    return found
-
-
-def _resolve_helper(project_dir: Path, test_roots: tuple, importer_rel: str,
-                    record: tuple) -> list[str]:
-    """Test-root helper files one import record pulls in, as rel paths."""
-    module, level, names = record
-    anchor: tuple = ()
-    if level and level > 0:
-        try:
-            importer_parts = tuple(Path(importer_rel).parent.parts)
-        except (ValueError, OSError):
-            return []
-        if level - 1 > len(importer_parts):
-            return []
-        anchor = importer_parts[:len(importer_parts) - (level - 1)]
-        bases = [project_dir]
-    else:
-        bases = [project_dir] + [project_dir / root for root in test_roots
-                                 if root != "."]
-    module_parts = tuple(module) if module else ()
-    if level and level > 0 and module_parts:
-        full = anchor + module_parts
-    elif level and level > 0:
-        full = anchor
-    else:
-        full = module_parts
-    probed = [full] if full else []
-    for name in names:
-        if name in ("*", ""):
-            continue
-        probed.append(full + (name,))
-    found: list[str] = []
-    for parts in probed:
-        for base in bases:
-            for path in _existing_module_files(base, parts):
-                try:
-                    rel = path.relative_to(project_dir).as_posix()
-                except ValueError:
-                    continue
-                name = path.name
-                if (name == "conftest.py" or _is_test_file_name(name)
-                        or not _under_any(rel, test_roots)):
-                    continue
-                found.append(rel)
-    return found
-
-
 def _src_dependency_graph(project_dir: Path,
                           packages: tuple) -> tuple[dict, bool]:
     """Map each src package to the sibling src packages it imports.
@@ -703,19 +625,16 @@ def _transitive_dependents(graph: dict) -> dict:
 
 def _scan_test_roots(project_dir: Path, test_roots: tuple,
                      package_names: tuple) -> tuple:
-    """Scan test roots: ``(hits, helpers, tests, helper_files, complete)``.
+    """Scan test roots: ``(hits, tests, complete)``.
 
     ``hits`` maps each test file (any depth under the test roots) to the
     src packages it imports; unreadable files map to every package (fail
-    safe). ``helpers`` holds non-test, non-conftest modules under the test
-    roots that test or conftest files import. ``tests`` and
-    ``helper_files`` are the full universes behind directory compression.
+    safe). ``tests`` is the universe of test files behind directory
+    compression.
     """
     wanted = set(package_names)
     hits: dict[str, set] = {}
-    helpers: set[str] = set()
     universe_tests: set[str] = set()
-    universe_helpers: set[str] = set()
     complete = True
     for root in test_roots:
         base = project_dir if root == "." else project_dir / root
@@ -729,42 +648,23 @@ def _scan_test_roots(project_dir: Path, test_roots: tuple,
         complete = complete and walk_ok
         for item in rels:
             rel = item if root == "." else f"{root}/{item}"
-            name = item.rsplit("/", 1)[-1]
-            if name == "conftest.py":
-                source = _read_scan_text(base / item)
-                if source is not None:
-                    _, records, ok = _parse_imports(source)
-                    if ok:
-                        for record in records:
-                            helpers.update(_resolve_helper(
-                                project_dir, test_roots, rel, record))
+            if not _is_test_file_name(item.rsplit("/", 1)[-1]):
                 continue
-            if _is_test_file_name(name):
-                universe_tests.add(rel)
-                source = _read_scan_text(base / item)
-                if source is None:
-                    hits[rel] = set(wanted)
-                    continue
-                tops, records, ok = _parse_imports(source)
-                hits[rel] = set(wanted) if not ok else set(tops & wanted)
-                if ok:
-                    for record in records:
-                        helpers.update(_resolve_helper(
-                            project_dir, test_roots, rel, record))
-            else:
-                universe_helpers.add(rel)
-    return hits, helpers, universe_tests, universe_helpers, complete
+            universe_tests.add(rel)
+            source = _read_scan_text(base / item)
+            if source is None:
+                hits[rel] = set(wanted)
+                continue
+            tops, _, ok = _parse_imports(source)
+            hits[rel] = set(wanted) if not ok else set(tops & wanted)
+    return hits, universe_tests, complete
 
 
-def _compress_to_dirs(files: list, universe: set,
-                       blocked: set = frozenset()) -> list:
+def _compress_to_dirs(files: list, universe: set) -> list:
     """Replace fully-covered directory contents with the directory itself.
 
     A directory compresses only when every universe file beneath it is in
     ``files``; correctness over brevity, so partial coverage stays listed.
-    Directories holding a ``blocked`` path never compress: a trigger
-    directory covering a test file would shadow that file's group and
-    force full on its change.
     """
     original = set(files)
     if not original:
@@ -775,10 +675,8 @@ def _compress_to_dirs(files: list, universe: set,
         while parent:
             members.setdefault(parent, set()).add(path)
             parent = parent.rpartition("/")[0]
-    tainted = {parent for path in blocked
-               for parent in _parent_chain(path)}
     chosen = [directory for directory, paths in members.items()
-              if paths and paths <= original and directory not in tainted]
+              if paths and paths <= original]
     # A chosen dir nested under another chosen dir is subsumed by it.
     final = [directory for directory in chosen
              if not any(other != directory and _is_under(directory, other)
@@ -812,7 +710,7 @@ def _selection_group_draft(project_dir: Path, test_roots: tuple,
     dependents = _transitive_dependents(graph)
     if test_scan is None:
         test_scan = _scan_test_roots(project_dir, tuple(test_roots), names)
-    hits, _, universe_tests, _, scan_complete = test_scan
+    hits, universe_tests, scan_complete = test_scan
     complete = src_complete and scan_complete
     for package, rel in packages:
         if not complete:
@@ -861,6 +759,14 @@ def _selection_conftest_draft(project_dir: Path) -> list[str]:
     return sorted(item for item in rels if item.rsplit("/", 1)[-1] == "conftest.py")
 
 
+def _normalised_triggers(entries: Iterable[str]) -> list[str]:
+    """Sorted, unique trigger entries without those a directory entry covers."""
+    seen = set(entries)
+    return [entry for entry in sorted(seen)
+            if not any(other != entry and _is_under(entry, other)
+                       for other in seen)]
+
+
 def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, dict]:
     """Draft ``[selection]`` values from the source layout.
 
@@ -868,8 +774,10 @@ def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, 
     bare ``src/`` itself: generated trees beneath it (for example a
     hand-tuned ``*.egg-info`` exclusion) must not overlap the drafted
     inputs, or the policy would fail ptest's own validation. Groups come
-    from the static import scan; full triggers add every ``conftest.py``
-    and the test helper modules to the lockfile and pytest config files.
+    from the static import scan; full triggers are the lockfile and
+    pytest config files plus every ``conftest.py``. Test helper modules
+    and package ``__init__.py`` files are not drafted: a helper edit is
+    planned from the import graph, not forced to the full suite.
     """
     packages = _src_package_entries(project_dir)
     roots = set(test_roots) | {rel for _, rel in packages}
@@ -882,21 +790,154 @@ def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, 
             pass
     names = tuple(name for name, _ in packages)
     test_scan = _scan_test_roots(project_dir, tuple(test_roots), names)
-    _, helpers, universe_tests, helper_universe, _ = test_scan
     triggers = [name for name in _TRIGGER_CANDIDATES
                 if _is_real_file(project_dir, name)]
     triggers.extend(_selection_conftest_draft(project_dir))
-    triggers.extend(_compress_to_dirs(sorted(helpers), helper_universe,
-                                      blocked=universe_tests))
-    seen = set(triggers)
-    triggers = sorted(seen)
-    triggers = [entry for entry in triggers
-                if not any(other != entry and _is_under(entry, other)
-                           for other in seen)]
+    triggers = _normalised_triggers(triggers)
     groups = _selection_group_draft(project_dir, tuple(test_roots),
                                     test_scan=test_scan)
     return ({"input_roots": sorted(roots)}, {"full_triggers": triggers},
             {"groups": groups})
+
+
+def _in_test_roots(rel: str, test_roots: tuple) -> bool:
+    """True when ``rel`` is strictly below a test root (any path for ``.``)."""
+    return any(root == "." or _is_under(rel, root) for root in test_roots)
+
+
+def _drafted_helper_entry(project_dir: Path, test_roots: tuple,
+                          entry: str) -> bool:
+    """True when ``entry`` has the shape an older draft gave a helper.
+
+    A ``.py`` path under a test root that is neither a conftest nor a test
+    file (it may be gone from disk: a stale draft), or a real directory
+    strictly under a test root holding a non-conftest, non-test ``.py`` and
+    no test file, read by a complete walk. Anything else was never drafted.
+    """
+    if not _in_test_roots(entry, test_roots):
+        return False
+    name = entry.rsplit("/", 1)[-1]
+    if entry.endswith(".py"):
+        return name != "conftest.py" and not _is_test_file_name(name)
+    path = project_dir / entry
+    try:
+        if os.path.islink(path) or not path.is_dir():
+            return False
+    except OSError:
+        return False
+    rels, complete = _walk_py_files(path)
+    if not complete:
+        return False
+    names = [item.rsplit("/", 1)[-1] for item in rels]
+    if any(_is_test_file_name(item) for item in names):
+        return False
+    return any(item != "conftest.py" for item in names)
+
+
+def _migrate_helper_triggers(project_dir: Path, test_roots: tuple,
+                             entries: list[str]) -> tuple | None:
+    """``(new full_triggers, removed, deliberate kept)``, or None.
+
+    None means no entry is attributable to the old helper draft. Conftests
+    under a removed directory entry are restored, since the directory used
+    to cover them; the result is normalised as a fresh draft is.
+    """
+    removed = tuple(entry for entry in entries
+                    if _drafted_helper_entry(project_dir, test_roots, entry))
+    if not removed:
+        return None
+    gone = set(removed)
+    kept = [entry for entry in entries if entry not in gone]
+    for entry in removed:
+        if entry.endswith(".py"):
+            continue
+        rels, _ = _walk_py_files(project_dir / entry)
+        kept.extend(f"{entry}/{item}" for item in rels
+                    if item.rsplit("/", 1)[-1] == "conftest.py")
+    result = tuple(_normalised_triggers(kept))
+    deliberate = tuple(
+        entry for entry in result if entry not in _TRIGGER_CANDIDATES
+        and entry.rsplit("/", 1)[-1] != "conftest.py")
+    return result, removed, deliberate
+
+
+_TOML_STRING_RE = re.compile(r'"(?:\\.|[^"\\\n])*"|\'[^\'\n]*\'')
+
+
+def _assignment_text(raw: bytes, table: str, key: str) -> str | None:
+    """Source text of ``key = value`` inside ``[table]``, or None.
+
+    Uses the same table, key and value-end logic as ``_apply_changes``.
+    """
+    lines = raw.decode("utf-8").splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    headers = [(index, _table_name(match.group(1)))
+               for index, line in enumerate(lines)
+               if (match := _TABLE_RE.match(line.strip()))]
+    start = next((index for index, name in headers if name == table), None)
+    if start is None:
+        return None
+    end = next((index for index, _ in headers if index > start), len(lines))
+    for index in range(start + 1, end):
+        if re.match(_KEY_RE_TEMPLATE % re.escape(key), lines[index]):
+            return "".join(lines[index:_value_end(lines, index, end)])
+    return None
+
+
+def _plan_trigger_migration(raw: bytes, selection: dict, project_dir: Path,
+                            test_roots: tuple, changes: list[FieldChange],
+                            notes: list[str]) -> None:
+    """Drop helper entries an older draft put in ``full_triggers``.
+
+    The file carries no draft marker, so provenance is read from the list:
+    it must be non-empty, hold ``.ptest.toml`` (only the old generator
+    wrote it), be sorted and unique, and be a comment-free assignment in
+    ``[selection]``. A list failing a gate is left as written; a helper
+    listed out of sorted order is how a user keeps it as a trigger.
+    """
+    value = selection.get("full_triggers")
+    if (not isinstance(value, list) or not value
+            or not all(isinstance(item, str) and item for item in value)
+            or _CONFIG_NAME not in value):
+        return
+    text = _assignment_text(raw, "selection", "full_triggers")
+    if text is None:
+        return
+    shaped = [entry for entry in value
+              if _drafted_helper_entry(project_dir, test_roots, entry)]
+    if not shaped:
+        return
+    why = None
+    if value != sorted(set(value)):
+        why = "not in sorted order"
+    elif "#" in _TOML_STRING_RE.sub("", text):
+        why = "its value has comments"
+    if why is not None:
+        notes.append(f"selection.full_triggers: left as written ({why}): "
+                     f"{', '.join(shaped)}; each still forces the full suite "
+                     "when edited")
+        return
+    migrated = _migrate_helper_triggers(project_dir, test_roots, value)
+    if migrated is None:
+        return
+    result, removed, deliberate = migrated
+    changes.append(FieldChange("selection", "full_triggers", result))
+    notes.append(
+        "selection.full_triggers: removed test-helper entries "
+        f"{_summarise_triggers(removed)}; a helper edit now runs only the "
+        "tests that reach it, once a run has recorded under this config")
+    notes.append(
+        "selection.full_triggers: until then a helper edit still runs the "
+        "full suite. Apply this alone on the base branch or just before the "
+        "spec's gate: a branch carrying this edit runs the full suite on "
+        "every bare ptest")
+    keep = "to keep a helper as a deliberate trigger, list it out of sorted order"
+    if deliberate:
+        notes.append(f"selection.full_triggers: kept {', '.join(deliberate)}. "
+                     f"{keep[0].upper()}{keep[1:]}")
+    else:
+        notes.append(f"selection.full_triggers: {keep}")
 
 
 #: The Cache Directory Tagging signature (https://bford.info/cachedir/).
@@ -1050,8 +1091,9 @@ def plan_project(root: Path, declaration: str, config: C.Config, *,
                  notes: list | None = None) -> FileFix | None:
     """Compute the fix for one project, or None when it is up to date.
 
-    ``tree_drafts`` adds the drafts that depend on the working tree
-    (gitignored files); notes about them are appended to ``notes``.
+    ``tree_drafts`` adds the work that depends on the working tree
+    (gitignored files, and removing helper entries an older draft put in
+    ``full_triggers``); notes about them are appended to ``notes``.
     """
     rel = _cfg(declaration)
     raw, identity = _read_text(root, rel)
@@ -1189,6 +1231,13 @@ def plan_project(root: Path, declaration: str, config: C.Config, *,
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
 
+    if (tree_drafts and kind is C.RunnerKind.PYTEST
+            and isinstance(selection, dict)
+            and selection.get("enabled") is True
+            and selection.get("dynamic") is not False):
+        _plan_trigger_migration(
+            raw, selection, project_dir, tuple(config.runner.test_roots),
+            changes, notes if notes is not None else [])
     if tree_drafts and kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST):
         _draft_gitignored(config, project_dir, changes,
                           notes if notes is not None else [])
@@ -1319,7 +1368,9 @@ def plan_all(root: Path, resolution: C.ConfigResolution, *,
 
     The run-start upgrade notice passes ``tree_drafts=False``: it speaks
     once per ptest version, and drafts for gitignored files depend on the
-    working tree, not on the version.
+    working tree, not on the version. It also leaves out the helper-trigger
+    migration: it costs a full run in the checkout that applies it, so only
+    an explicit ``doctor --fix`` (or doctor's mention) proposes it.
     """
     if resolution.config is None and resolution.monorepo is None:
         raise resolution.problem or _problem(
