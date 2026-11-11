@@ -17,7 +17,7 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 A scoped or changed green, dynamic or static, is iteration only; only the spec's one `ptest --full --cov` gate
 completes it; it runs once, at the end of the chain, by the orchestrator, never per task or handoff. Rerun it only after a change (`--again` forces one). Fast-forward
 the green tip and never rerun for the merge (`already verified … in <checkout>`). Keep notes
-and reports outside the repo, or in declared gitignored outputs. Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal. In a worktree branched off another unmerged branch (a task off a feature branch), run `ptest --base <that branch>` (optionally plus `<folder>`) so the parent branch's changes stay out; `--base` main or dev there selects them all.
+and reports outside the repo, or in declared gitignored outputs. Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal. In a worktree branched off another unmerged branch (a task off a feature branch), run `ptest --base <that branch>` (optionally plus `<folder>`) so the parent branch's changes stay out; `--base` main or dev there selects them all. Running a few files with `ptest <file>` never replaces bare `ptest` after an edit: only bare `ptest` finds the tests your change reaches that you did not name. Leave the checkout alone while a run is going: no edits, `git stash`, `checkout`, `reset`, `pull`, `merge` or rebase in that worktree until the end line prints; a run during which files changed proves nothing, even if they were changed back before it ended, so do side comparisons in another worktree.
 
 An iteration run that ends `deferred N (<reason>) · gate at spec end` proved nothing about those N tests: ptest knows the change may reach them but did not run them, and they stay deferred until the gate runs them. Never run `ptest --full` during a task to clear a deferred count. After integrating task commits onto the chain, the chain owner runs one bare `ptest` at the chain tip; it records the tests of the integration so each later task worktree branched from the tip finds them, it is an iteration run, not a gate, and it never clears deferred tests.
 
@@ -28,7 +28,7 @@ Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite th
 
 ## Reading ptest output
 
-ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `ptest -q` silences ptest lines (errors still print).
+ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `ptest -q` silences ptest lines (errors still print). Read the whole output: never pipe it through `grep`, `tail` or `head` and never discard stderr, which carries ptest's reasons and its end line; for a machine-readable result add `--result-json <path>`.
 
 | Line | Meaning | What to do |
 |---|---|---|

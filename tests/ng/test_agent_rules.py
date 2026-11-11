@@ -1438,3 +1438,29 @@ def test_repository_guides_are_byte_identical_and_state_one_gate():
     assert "| 0 | pass | Done; the spec's one `--full --cov` gate completes it. |" in text
     assert "writes no result document and leaves any existing file at that path untouched" in flat
     assert "next: ptest --full" not in text
+
+
+def test_rules_forbid_filtered_output_and_mid_run_checkout_changes():
+    """Oracle: incident 2026-11-11. An agent piped bare `ptest` through
+    `grep | tail`, lost the `changed → full suite: <reason>` line, then ran
+    `git stash` / `stash pop` in the same worktree while the run was going.
+    The guide and every generated skill must forbid both, and the guide must
+    say file runs never replace bare `ptest` after an edit.
+    """
+    import ptest.agent_rules as rules_module
+
+    guide = " ".join(rules_module._guide().decode("utf-8").split())
+    assert "never pipe it through `grep`, `tail` or `head` and never discard stderr" in guide
+    assert "`--result-json <path>`" in guide
+    assert "`ptest <file>` never replaces bare `ptest` after an edit" in guide
+    assert "Leave the checkout alone while a run is going" in guide
+    assert "`git stash`" in guide
+    assert "even if they were changed back before it ended" in guide
+    for provider in ("claude", "codex", "opencode", "gemini"):
+        skill = rules_module._provider_text(provider).decode("utf-8")
+        assert "never pipe it through grep, tail or head" in skill
+        assert ("Never edit, stash, check out or reset files in the checkout "
+                "while a run is going") in skill
+        previous = rules_module._pre_quiet_tree_provider_text(provider)
+        assert previous in rules_module._previous_skill_bytes(provider)
+        assert b"while a run is going" not in previous

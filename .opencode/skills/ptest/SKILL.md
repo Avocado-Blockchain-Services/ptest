@@ -14,4 +14,5 @@ After each edit run bare `ptest` (no project name): it runs only the tests your 
 | `ptest --full <folder>` | all tests under that folder |
 | `ptest --full --cov` | integrated gate, once at the end of the spec or chain, by the orchestrator |
 Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.
+Read ptest's whole output: never pipe it through grep, tail or head. Never edit, stash, check out or reset files in the checkout while a run is going.
 Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.

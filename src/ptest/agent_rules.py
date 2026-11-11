@@ -342,6 +342,30 @@ def _pre_one_gate_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_quiet_tree_provider_text(provider: str) -> bytes:
+    """Skill shipped through 0.7.2 (before the whole-output and quiet-checkout rules)."""
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches.\n"
+        "| Command | Runs |\n"
+        "|---|---|\n"
+        "| `ptest` | changed tests, whole repo |\n"
+        "| `ptest <folder>` | changed tests under that folder |\n"
+        "| `ptest <file>` | that file, always |\n"
+        "| `ptest --full <folder>` | all tests under that folder |\n"
+        "| `ptest --full --cov` | integrated gate, once at the end of the spec or chain, by the orchestrator |\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus the five-command table.
 
@@ -368,6 +392,7 @@ def _provider_text(provider: str) -> bytes:
         "| `ptest --full <folder>` | all tests under that folder |\n"
         "| `ptest --full --cov` | integrated gate, once at the end of the spec or chain, by the orchestrator |\n"
         "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.\n"
+        "Read ptest's whole output: never pipe it through grep, tail or head. Never edit, stash, check out or reset files in the checkout while a run is going.\n"
         "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
 
@@ -422,7 +447,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_loop_hint_provider_text(provider),
                    _pre_five_command_provider_text(provider),
                    _pre_coverage_provider_text(provider),
-                   _pre_one_gate_provider_text(provider)):
+                   _pre_one_gate_provider_text(provider),
+                   _pre_quiet_tree_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -993,6 +1019,8 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 2c1be1d (0.7.0-0.7.2): guide before the whole-output and quiet-checkout rules.
+    "d100a12a27f0324ad734754526373989b34140cf9b052b40724078c473bde514",
     # 6f3ac15 (0.7.0 branch, T5): one-gate guide before the R44 fingerprint row fix.
     "163c9d0b41d75ce124142e5a3ed1edc62a9d942c3630616a5473bcbf59c58495",
     # 4162818 (0.7.0 branch): guide before the stacked-worktree --base sentence.
@@ -1130,6 +1158,7 @@ def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
         _pre_five_command_provider_text(provider),
         _pre_coverage_provider_text(provider),
         _pre_one_gate_provider_text(provider),
+        _pre_quiet_tree_provider_text(provider),
     )
 
 
