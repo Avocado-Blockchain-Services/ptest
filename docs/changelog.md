@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.3
+
+- Agent rules: read ptest's whole output. The guide and every generated skill
+  now forbid piping ptest through `grep`, `tail` or `head` or discarding
+  stderr, which carries ptest's reasons and end line; use `--result-json
+  <path>` for a machine-readable result. An agent that filtered a bare
+  `ptest` lost the `changed → full suite: <reason>` line and could not tell
+  why the run widened.
+- Agent rules: leave the checkout alone while a run is going. No edits,
+  `git stash`, `checkout`, `reset`, `pull`, `merge` or rebase in that
+  worktree until the end line prints; a run during which files changed
+  proves nothing, even if they were changed back. ptest compares file
+  contents before and after a run, so a stash and pop during the run goes
+  unseen.
+- Agent rules: running a few files with `ptest <file>` never replaces bare
+  `ptest` after an edit.
+- Upgrade: run `ptest rules --apply` in each project. The 0.7.2 guide and
+  skills upgrade in place; edited copies are left alone and reported.
+
 ## 0.7.2
 
 - Fix: a change to a test helper no longer forces the full suite on a bare
