@@ -275,31 +275,28 @@ def test_fix_never_drafts_an_entry_that_would_invalidate_the_policy(tmp_path):
     assert "gen" in _notes(plan)
 
 
-def test_fix_never_declares_a_directory_that_also_holds_ptest_byproducts(tmp_path):
+def test_fix_drafts_nothing_for_stale_bytecode_beside_ptest_byproducts(tmp_path):
     """fullon2 integrations: a stale .pyc (its test was deleted) sits beside
-    bytecode ptest already ignores. Declaring the whole __pycache__ would
-    make that bytecode a fingerprinted input; only the stale file is drafted."""
+    bytecode ptest already ignores. Since 0.7.4 (G5, PEP 3147) orphan
+    __pycache__ bytecode is never an input, so nothing is drafted at all."""
     root = _repo(tmp_path, gitignore="__pycache__/\n")
     _write(root, "tests/__pycache__/test_app.cpython-313-pytest-9.1.1.pyc")
     _write(root, "tests/__pycache__/test_gone.cpython-313-pytest-9.1.1.pyc")
-    assert _selection_changes(_plan(root)) == {
-        "ignored_inputs": ("tests/__pycache__/test_gone.cpython-313-pytest-9.1.1.pyc",)}
+    assert _selection_changes(_plan(root)) == {}
 
 
 def test_fix_says_when_it_could_not_check_gitignored_files(tmp_path, monkeypatch):
     """fullon2 web: .next exceeded the input scan's byte limit and doctor
-    drafted nothing without saying so."""
+    drafted nothing without saying so. Since 0.7.4 the check is names-only and
+    bounded by an entry count, so the note names the count (G6)."""
     from ptest import source
 
     root = _repo(tmp_path, gitignore="data/\n")
-    _write(root, "data/x")
-    limited = C.InputSnapshot(digest=None, compatibility=None, head=None, clean=False,
-                              limitations=(C.Reason(code="scan-limit",
-                                  message="input fingerprint byte limit exceeded"),))
-    monkeypatch.setattr(source, "listing_snapshot", lambda config: limited)
+    for index in range(6):
+        _write(root, f"data/x{index}")
+    monkeypatch.setattr(source, "LISTING_ENTRY_LIMIT", 3)
     plan = _plan(root)
-    assert plan.files == ()
-    assert "gitignored files not checked: input fingerprint byte limit exceeded" in _notes(plan)
+    assert "gitignored files only partly checked: stopped after 3 directory entries" in _notes(plan)
 
 
 def test_fix_has_nothing_to_draft_for_a_clean_tree(tmp_path):

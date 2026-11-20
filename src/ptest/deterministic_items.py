@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -171,6 +172,59 @@ def _select_answer(config: C.Config, cfg: str,
                 f"{len(policy.full_triggers)} full triggers); unknown input "
                 "widens to the full suite"),
         evidence_paths=evidence)
+
+
+_SAFE_NAME = re.compile(r"[A-Za-z0-9._/@+=,~-]+")
+_GITIGNORED_NAMED = 3
+
+
+def _env_style(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return name == ".env" or name.startswith(".env.")
+
+
+def _gitignored_answer(config: C.Config, cfg: str, evidence: tuple[str, ...],
+                       answer: DeterministicAnswer) -> DeterministicAnswer:
+    """Turn a satisfied SELECT-001 into a gap when gitignored files count as inputs.
+
+    Undeclared gitignored files make the tree unclean, so a passing full run
+    records no baseline: ``--full`` can never skip and other checkouts cannot
+    reuse the green. The names come from the content-free listing
+    (``source.undeclared_gitignored``), so the answer is the same on every
+    run. Only names made of plain path characters are printed; the count
+    still covers every path.
+    """
+    from . import selection as selection_api
+    from . import source
+
+    if answer.status != "satisfied":
+        return answer
+    listing = source.undeclared_gitignored(config)
+    if listing is None or not listing.paths:
+        return answer
+    declare = selection_api.declarable(list(listing.paths),
+                                       listing.as_snapshot())
+    named = [path for path in declare if _SAFE_NAME.fullmatch(path)]
+    shown = ", ".join(named[:_GITIGNORED_NAMED])
+    if len(declare) > _GITIGNORED_NAMED or len(named) < len(declare):
+        shown += (", " if shown else "") + \
+            f"+{len(declare) - min(len(named), _GITIGNORED_NAMED)} more"
+    partial = (f" (the listing stopped after {listing.examined} directory "
+               "entries)" if listing.truncated else "")
+    summary = (f"{C.plural(len(listing.paths), 'gitignored file')} count as "
+               f"test inputs and no baseline can be recorded: {shown}{partial}.")
+    outputs = ("[selection] non_input_outputs" if any(
+        _env_style(path) for path in listing.paths)
+        else "[selection] non_input_outputs (or ignored_inputs for files a test reads)")
+    fix = (f"Run ptest doctor --fix, or declare them in {cfg}: {outputs}. "
+           ".env files and symlinks belong in non_input_outputs; "
+           "ignored_inputs refuses a worktree's symlinked .env.")
+    if C.aa_prose_is_untrusted(summary) or C.aa_prose_is_untrusted(fix):
+        return answer
+    return DeterministicAnswer(
+        item_id="SELECT-001", status="gap",
+        reason=summary[:-1], evidence_paths=evidence,
+        finding_summary=summary, finding_change=fix)
 
 
 def _select_fix(config: C.Config, cfg: str, *,
@@ -520,6 +574,17 @@ def _packet_facts(config: C.Config, declaration: str) -> dict | None:
         return None
 
 
+def _select_input_answer(config: C.Config, cfg: str,
+                         evidence: tuple[str, ...], *,
+                         parallel_active: bool) -> DeterministicAnswer:
+    answer = _select_answer(config, cfg, evidence,
+                            parallel_active=parallel_active)
+    try:
+        return _gitignored_answer(config, cfg, evidence, answer)
+    except Exception:
+        return answer
+
+
 def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
                  packet,
                  facts: dict | None = None) -> dict[str, DeterministicAnswer]:
@@ -545,7 +610,7 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
     parallel_active = (isinstance(parallel_fact, str)
                        and parallel_fact != NOT_CONFIGURED_PARALLEL)
     answers = {
-        "SELECT-001": _select_answer(
+        "SELECT-001": _select_input_answer(
             config, cfg, evidence, parallel_active=parallel_active),
         "TIMING-001": timing,
     }

@@ -808,6 +808,10 @@ class Change:
     old: str | None
     new: str | None
     kind: str
+    #: Byte size of a gitignored file too large to fingerprint. Run-time
+    #: only: ``history._change_dict`` does not persist it, so an older
+    #: reader of a stored snapshot never meets the extra key.
+    size: int | None = None
 
     def __post_init__(self) -> None:
         if self.old is not None:
@@ -815,6 +819,8 @@ class Change:
         if self.new is not None:
             _check_str("change.new", self.new, allow_empty=True)
         _check_str("change.kind", self.kind)
+        if self.size is not None:
+            _check_int("change.size", self.size, lo=0, hi=2**62)
 
 
 @dataclass(frozen=True, kw_only=True)

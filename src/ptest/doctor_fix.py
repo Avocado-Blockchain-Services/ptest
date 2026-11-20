@@ -981,6 +981,8 @@ def _holds_only(project_dir: Path, entry: str, declared: set[str]) -> bool:
     ``declared`` files. ptest's own byproducts and outputs are missing from
     its snapshot, so the snapshot alone cannot tell whether declaring the
     directory would also turn them into inputs or outputs."""
+    from . import source
+
     base = project_dir / entry
     try:
         if not stat.S_ISDIR(os.lstat(base).st_mode):
@@ -997,7 +999,7 @@ def _holds_only(project_dir: Path, entry: str, declared: set[str]) -> bool:
             if seen > _COLLAPSE_WALK_LIMIT:
                 return False
             rel = Path(directory, name).relative_to(project_dir).as_posix()
-            if rel not in declared:
+            if rel not in declared and not source.is_bytecode_path(rel):
                 return False
     return True
 
@@ -1006,7 +1008,8 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
                       changes: list[FieldChange], notes: list[str]) -> None:
     """Declare the gitignored files ptest would count as undeclared inputs.
 
-    ptest's own snapshot names them, so built-in outputs and runner
+    ptest's names-only listing (``source.undeclared_gitignored``) applies
+    the snapshot's exclusions, so built-in outputs, bytecode and runner
     byproducts never appear. Tagged caches become outputs; anything else
     becomes an input, which is fingerprinted, so a wrong guess costs a
     rerun and never keeps stale proof. ``.env`` files and symlinks are only
@@ -1016,17 +1019,19 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
     from . import selection as selection_api
     from . import source
 
-    snapshot = source.listing_snapshot(config)
-    if snapshot.digest is None:
-        if any(item.code == "scan-limit" for item in snapshot.limitations):
-            notes.append("gitignored files not checked: "
-                         f"{snapshot.limitations[0].message}")
+    listing = source.undeclared_gitignored(config)
+    if listing is None:
         return
-    ignored = [change.new for change in snapshot.changes
-               if change.kind == "ignored" and change.new
-               and not change.new.startswith("../")]
+    if listing.truncated:
+        notes.append(
+            f"gitignored files only partly checked: stopped after "
+            f"{listing.examined} directory entries (limit "
+            f"{source.LISTING_ENTRY_LIMIT}); declare or delete large "
+            "output directories, then rerun ptest doctor --fix")
+    ignored = list(listing.paths)
     if not ignored:
         return
+    snapshot = listing.as_snapshot()
     policy = config.selection
     for change in changes:
         if change.table == "selection" and change.key in _SELECTION_PATH_KEYS:
@@ -1038,7 +1043,8 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
     declared = set(ignored)
     entries: list[str] = []
     for entry in selection_api.declarable(ignored, snapshot):
-        if _holds_only(project_dir, entry, declared):
+        if (entry.rsplit("/", 1)[-1] in source.LISTING_HEAVY
+                or _holds_only(project_dir, entry, declared)):
             entries.append(entry)
         else:
             entries.extend(path for path in ignored
@@ -1053,7 +1059,8 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
         if name == ".env" or name.startswith(".env."):
             env_files.append(entry)
             continue
-        if _tagged_cache(project_dir, entry):
+        if (_tagged_cache(project_dir, entry)
+                or name in source.LISTING_HEAVY):
             target = outputs
         elif link:
             notes.append(f"not declared: {entry} is a symlink; declare it "
@@ -1094,6 +1101,33 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
     if added_input:
         notes.append("ignored_inputs are gitignored files tests may read; "
                      "move one to non_input_outputs if no test reads it")
+
+
+def _drop_bytecode_inputs(parsed: dict, changes: list[FieldChange],
+                          notes: list) -> None:
+    """Remove ``ignored_inputs`` entries of bytecode shape (0.7.4).
+
+    Older drafts declared ``__pycache__/*.pyc`` files one by one. Orphan
+    bytecode is never an input, so the entries only cost fingerprint work.
+    Recognised by shape, like the 0.7.2 helper migration; every other
+    entry is kept as written.
+    """
+    from . import source
+
+    selection = parsed.get("selection", {})
+    entries = selection.get("ignored_inputs") if isinstance(selection, dict) else None
+    if not isinstance(entries, list):
+        return
+    kept = tuple(item for item in entries
+                 if not (isinstance(item, str) and source.is_bytecode_entry(item)))
+    removed = len(entries) - len(kept)
+    if not removed:
+        return
+    changes[:] = [change for change in changes
+                  if (change.table, change.key) != ("selection", "ignored_inputs")]
+    changes.append(FieldChange("selection", "ignored_inputs", kept))
+    notes.append(f"removed {C.plural(removed, 'bytecode entry')} "
+                 "from ignored_inputs: __pycache__ files are never inputs")
 
 
 def plan_project(root: Path, declaration: str, config: C.Config, *,
@@ -1251,6 +1285,8 @@ def plan_project(root: Path, declaration: str, config: C.Config, *,
         _plan_trigger_migration(
             raw, selection, project_dir, tuple(config.runner.test_roots),
             changes, notes if notes is not None else [])
+    _drop_bytecode_inputs(parsed, changes,
+                          notes if notes is not None else [])
     if tree_drafts and kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST):
         _draft_gitignored(config, project_dir, changes,
                           notes if notes is not None else [])

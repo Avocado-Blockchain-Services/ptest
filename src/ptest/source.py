@@ -63,6 +63,25 @@ def _compatibility_runner(config: C.Config) -> str:
     return repr(config.runner)
 
 
+def is_bytecode_path(path: str) -> bool:
+    """A ``.pyc``/``.pyo`` file below a ``__pycache__`` directory.
+
+    Python 3 never imports such a file without its source (PEP 3147), so it
+    is a build byproduct, never an input. A sourceless ``.pyc`` beside its
+    siblings (the legacy layout, which is importable) does not match.
+    """
+    parts = path.split("/")
+    return (len(parts) > 1 and "__pycache__" in parts[:-1]
+            and parts[-1].endswith((".pyc", ".pyo")))
+
+
+def is_bytecode_entry(entry: str) -> bool:
+    """A declared path of bytecode shape: a bytecode file or a ``__pycache__``
+    directory. ``doctor --fix`` removes such entries from ``ignored_inputs``."""
+    parts = entry.rstrip("/").split("/")
+    return parts[-1] == "__pycache__" or is_bytecode_path(entry)
+
+
 def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
     return C.Reason(code=code, message=message, paths=paths)
 
@@ -96,11 +115,15 @@ class _Unavailable(Exception):
 
 @dataclass
 class _Scan:
-    deadline: float
+    #: ``None`` means no wall clock at all (the names-only listing, whose
+    #: answer must not depend on speed).
+    deadline: float | None
     captured: int = 0
     read_bytes: int = 0
 
-    def remaining(self) -> float:
+    def remaining(self) -> float | None:
+        if self.deadline is None:
+            return None
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise _Unavailable("input scan deadline exceeded", "scan-limit")
@@ -772,6 +795,148 @@ def listing_snapshot(config: C.Config) -> C.InputSnapshot:
     return snapshot(None, config, None, None)
 
 
+#: ``undeclared_gitignored`` stops after examining this many directory
+#: entries. A count, never a clock: one tree always gives one answer.
+LISTING_ENTRY_LIMIT = 50_000
+
+#: Dependency installs the names-only listing never enters: they hold
+#: millions of files no project declares one by one. An undeclared one is
+#: reported as a single path (the directory), since the snapshot counts it.
+LISTING_HEAVY = frozenset({"node_modules", ".venv"})
+
+
+@dataclass(frozen=True)
+class IgnoredListing:
+    """Names of undeclared gitignored files, without reading any content."""
+
+    paths: tuple[str, ...]
+    #: Tracked and untracked (not ignored) names, which ``declarable`` needs
+    #: to avoid proposing a directory that also holds them.
+    other: tuple[str, ...]
+    examined: int
+    truncated: bool
+
+    def as_snapshot(self) -> C.InputSnapshot:
+        """The listing in the shape ``selection.declarable`` reads."""
+        changes = tuple(C.Change(old=None, new=path, kind="untracked")
+                        for path in self.other)
+        return C.InputSnapshot(digest=None, compatibility=None, head=None,
+                               clean=False, changes=changes, limitations=(),
+                               files=())
+
+
+def undeclared_gitignored(config: C.Config) -> IgnoredListing | None:
+    """Gitignored files ptest would count as undeclared inputs, by name.
+
+    The snapshot names the same files but hashes every one of them under a
+    wall clock; this lists names only, so the answer cannot depend on speed.
+    It prunes ``node_modules``, ``.venv``, ``__pycache__`` and every
+    declared ``non_input_outputs``/``ignored_inputs`` entry before walking,
+    drops bytecode and pytest byproducts like the snapshot does, and stops
+    at ``LISTING_ENTRY_LIMIT`` examined entries (``truncated``). ``None``
+    means Git could not answer (not a repository, unreadable root).
+    """
+    root = (config.checkout.root if config.checkout
+            else (config.config_path.parent if config.config_path else None))
+    if root is None:
+        return None
+    scan = _Scan(None)
+    def names(*argv: str) -> list[str]:
+        # A name Git prints but ptest refuses (control bytes, bad UTF-8) is
+        # skipped; a directory entry keeps its trailing slash.
+        result = []
+        for item in _records(_git(root, scan, *argv) or b""):
+            try:
+                result.append(_path(item.rstrip(b"/")) + ("/" if item.endswith(b"/") else ""))
+            except (_Unavailable, UnicodeError):
+                continue
+        return result
+
+    try:
+        tracked = set(names("ls-files", "-z"))
+        others = names("ls-files", "--others", "--exclude-standard", "-z")
+        ignored = names("ls-files", "--others", "--ignored",
+                        "--exclude-standard", "--directory", "-z")
+    except (_Unavailable, OSError, UnicodeError, ValueError,
+            subprocess.TimeoutExpired):
+        return None
+    declared = tuple(config.selection.ignored_inputs)
+    pytest_tools = None
+    if config.runner.kind is C.RunnerKind.PYTEST:
+        pytest_tools = (
+            _coverage_data_bases(os.fspath(root))
+            if _pytest_coverage_enabled(config) else (),
+            _pytest_cache_parents(os.fspath(root), tracked))
+
+    def declared_or_output(path: str) -> bool:
+        return _is_non_input_output(config, path) or _matches(path, declared)
+
+    def pruned(path: str) -> bool:
+        """Skip ``path`` and everything below it; a dependency install that
+        nothing declares is recorded once, by its directory."""
+        parts = path.split("/")
+        if "__pycache__" in parts:
+            return True
+        for index, part in enumerate(parts):
+            if part in LISTING_HEAVY:
+                heavy = "/".join(parts[:index + 1])
+                if not declared_or_output(heavy):
+                    heavy_found.add(heavy)
+                return True
+        return declared_or_output(path)
+
+    def counts(path: str) -> bool:
+        if pruned(path) or is_bytecode_path(path):
+            return False
+        if pytest_tools is not None and _pytest_tool_generated(
+                path, set(), coverage_bases=pytest_tools[0],
+                cache_parents=pytest_tools[1]) is not None:
+            return False
+        return True
+
+    found: list[str] = []
+    heavy_found: set[str] = set()
+    examined = 0
+    truncated = False
+    for entry in ignored:
+        if truncated:
+            break
+        if not entry.endswith("/"):
+            examined += 1
+            if counts(entry):
+                found.append(entry)
+            continue
+        top = entry.rstrip("/")
+        if pruned(top):
+            continue
+        for directory, subdirs, names in os.walk(root / top):
+            relative = Path(directory).relative_to(root).as_posix()
+            subdirs.sort()
+            keep = []
+            for name in sorted(names) + subdirs:
+                examined += 1
+                if examined > LISTING_ENTRY_LIMIT:
+                    examined, truncated = LISTING_ENTRY_LIMIT, True
+                    break
+                path = f"{relative}/{name}"
+                if name in subdirs:
+                    if pruned(path):
+                        continue
+                    if os.path.islink(root / path):
+                        if counts(path):
+                            found.append(path)
+                        continue
+                    keep.append(name)
+                elif counts(path):
+                    found.append(path)
+            if truncated:
+                break
+            subdirs[:] = keep
+    return IgnoredListing(paths=tuple(sorted(set(found) | heavy_found)),
+                          other=tuple(sorted(tracked.union(others))),
+                          examined=examined, truncated=truncated)
+
+
 def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baseline | None,
              base: str | None, *, runtime_identity: str | None = None,
              pytest_full_outputs: bool = False) -> C.InputSnapshot:
@@ -888,7 +1053,8 @@ def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baselin
         untracked_raw = _git(git_root, scan, *untracked_args)
         untracked = {_scoped_path(_path(path)) for path in _records(untracked_raw)}
         untracked = {path for path in untracked
-                     if not _is_non_input_output(config, path)}
+                     if not _is_non_input_output(config, path)
+                     and not is_bytecode_path(path)}
         ignored_args = ("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
         if pathspec:
             ignored_args += ("--", *pathspec)
@@ -896,7 +1062,8 @@ def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baselin
         ignored_all = set()
         for raw_path in _records(ignored_raw):
             path = _scoped_path(_path(raw_path))
-            if not _is_non_input_output(config, path):
+            if (not _is_non_input_output(config, path)
+                    and not is_bytecode_path(path)):
                 ignored_all.add(path)
         declared_ignored = {path for path in ignored_all
                             if _matches(path, config.selection.ignored_inputs)}
@@ -954,6 +1121,24 @@ def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baselin
                 generated.add(path)
         untracked -= generated
         undeclared_ignored -= generated
+        # A gitignored file over the per-file limit is never fingerprinted
+        # and never makes the snapshot unavailable (a tool cache such as
+        # .mypy_cache/3.12/cache.db is routinely larger). It counts as an
+        # undeclared input: the tree is unclean, so no baseline is recorded,
+        # and the change carries the size for the refusal text. Tracked and
+        # untracked files keep the strict limit in _fingerprints.
+        oversized: dict[str, int] = {}
+        for path in sorted(declared_ignored | undeclared_ignored):
+            location = (git_root / path[3:] if path.startswith("../")
+                        else root / path)
+            try:
+                info = os.lstat(location)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size > _MAX_FILE_BYTES:
+                oversized[path] = info.st_size
+        declared_ignored -= oversized.keys()
+        undeclared_ignored -= oversized.keys()
         paths = present | untracked | declared_ignored | undeclared_ignored
         kinds: dict[str, str] = {}
         if prefix is None:
@@ -999,7 +1184,8 @@ def snapshot(domain: C.DomainPaths | None, config: C.Config, baseline: C.Baselin
             *raw_changes,
             *(C.Change(old=path, new=path, kind="mode") for path in sorted(mode_changed)),
             *(C.Change(old=None, new=path, kind="untracked") for path in sorted(untracked)),
-            *(C.Change(old=None, new=path, kind="ignored") for path in sorted(undeclared_ignored)))))
+            *(C.Change(old=None, new=path, kind="ignored", size=oversized.get(path))
+              for path in sorted(undeclared_ignored | oversized.keys())))))
         changes = tuple(dict.fromkeys((*changes, *working)))
         if mode_changed:
             raise _Unavailable("file mode differs from Git index")

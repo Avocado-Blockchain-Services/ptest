@@ -215,18 +215,21 @@ def test_undeclared_ignored_content_is_not_an_automatic_exemption(case):
 
     domain, root = _repository(case)
     ensure_fingerprint_key(domain)
-    (root / ".gitignore").write_text("__pycache__/\n.venv/\n")
+    (root / ".gitignore").write_text("__pycache__/\n.venv/\n*.pyc\n")
     git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
     config = _config(case, domain)
     before = snapshot(domain, config, None, None)
+    # 0.7.4 (G5): bytecode under __pycache__ is never an input; a sourceless
+    # .pyc outside it still is.
     (root / "src/__pycache__").mkdir()
     (root / "src/__pycache__/a.pyc").write_bytes(b"cache")
+    (root / "src/legacy.pyc").write_bytes(b"cache")
     (root / ".venv").mkdir()
     (root / ".venv/cache").write_bytes(b"cache")
     after = snapshot(domain, config, None, None)
     ignored = {change.new for change in after.changes if change.kind == "ignored"}
     assert not after.clean
-    assert ignored == {".venv/cache", "src/__pycache__/a.pyc"}
+    assert ignored == {".venv/cache", "src/legacy.pyc"}
     assert before.digest != after.digest
     assert ignored.issubset({item.path for item in after.files})
 
@@ -445,10 +448,13 @@ def test_pytest_snapshot_excludes_hypothesis_database(case):
 
 
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
-                                  "tests/__pycache__/sourceless.cpython-313.pyc",
                                   "nested/.hypothesis/examples/ab"])
 def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
-    """The scoped byproduct filter stays fail-closed on unknown shapes."""
+    """The scoped byproduct filter stays fail-closed on unknown shapes.
+
+    0.7.4 (G5): a sourceless ``__pycache__/*.pyc`` left this list; PEP 3147
+    makes it never importable, so it is no input (test_gitignored_inputs.py
+    pins it; a sourceless .pyc outside __pycache__ still counts, A11)."""
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case)
@@ -463,7 +469,6 @@ def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
 
 
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
-                                  "tests/__pycache__/sourceless.cpython-313.pyc",
                                   "nested/.hypothesis/examples/ab"])
 def test_pytest_full_snapshot_retains_nonstandard_cache_outputs(case, path):
     from ptest.source import ensure_fingerprint_key
