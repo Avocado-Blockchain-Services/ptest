@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.7.4
+
+- Fix: the first run in a fresh worktree is no longer serial. ptest used to
+  decide the worker count before setup ran, so a first run whose `uv sync`
+  installed pytest-xdist still ended `parallel-workers: serial: pytest-xdist
+  is not installed in the project environment yet` (in persea, 1,940 tests
+  on one worker). When the only reason to run serially is the project
+  environment (xdist or the pytest-cov pair missing or unqualified), ptest
+  now runs setup first, then decides the workers and asks for slots.
+  `--no-setup` and config reasons (`-n 1`, `--dist each`) are unchanged.
+- A full run that passes but records no baseline now says what that costs and
+  how to fix it, on the same line: `no baseline recorded: gitignored files
+  count as test inputs: .env (+1 more) · until fixed, --full always reruns
+  and other checkouts cannot reuse this green · fix: ptest doctor --fix or
+  declare them in [selection] non_input_outputs`. The refusal is kept for
+  the project, and every later run in any worktree prints `last gate at
+  <sha> (<age> ago) recorded no baseline: <reason>` until a gate records a
+  baseline. Paths only, never file contents.
+- The dynamic `changed:` line now names what it compared against: the age of
+  the newest recorded run, up to three changed modules and the last gate. An
+  empty diff that still selects tests (`no changes → 1940 tests`) explains
+  itself in one run.
+- Fix: stale `__pycache__/*.pyc` files of deleted modules no longer count as
+  test inputs. Python never imports them without their source. `ptest doctor
+  --fix` no longer drafts them into `ignored_inputs` and removes the ones it
+  drafted before.
+- `ptest doctor`'s check for undeclared gitignored files lists names only,
+  skips `node_modules`, `.venv`, `__pycache__` and declared entries, and is
+  bounded by an entry count, not a clock. The same tree now gives the same
+  answer on every run (it used to report "input scan deadline exceeded" on
+  one run and a complete scan on the next). `ptest doctor --offline` reports
+  undeclared gitignored inputs too.
+- Fix (#5): one gitignored file over 16 MiB no longer ends a full run
+  incomplete (exit 70). The run goes ahead; the file counts as an
+  undeclared input, and the refusal names it and its size.
+- Fix (#4): on macOS every run ended incomplete (exit 70, "guard handoff was
+  incomplete"). The guard's process-group scans counted PID 0 as a live
+  member; they now skip it. Not yet verified on a real Mac.
+- Fix (#3): the one-line installer aborted on macOS's bash 3.2
+  (`forwarded[@]: unbound variable`).
+- Coverage moves to the push. The gate ladder is now: bare `ptest` while
+  iterating; `ptest --full` once at the end of the spec or chain, before a
+  local merge; `ptest --full --cov` once before pushing to origin. The guide,
+  skills, README and the `coverage gate still owed` line say so.
+- Upgrade: run `ptest rules --apply` in each project. The 0.7.3 guide and
+  skills upgrade in place; edited copies are left alone and reported.
+
 ## 0.7.3
 
 - Agent rules: read ptest's whole output. The guide and every generated skill
