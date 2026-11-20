@@ -1022,6 +1022,10 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
     listing = source.undeclared_gitignored(config)
     if listing is None:
         return
+    if listing.failed:
+        notes.append("gitignored files not checked: Git could not list them "
+                     "(unreadable, or its output went over the size limit)")
+        return
     if listing.truncated:
         notes.append(
             f"gitignored files only partly checked: stopped after "
@@ -1056,7 +1060,7 @@ def _draft_gitignored(config: C.Config, project_dir: Path,
         except OSError:
             continue
         name = entry.rsplit("/", 1)[-1]
-        if name == ".env" or name.startswith(".env."):
+        if source.is_env_style(entry):
             env_files.append(entry)
             continue
         if (_tagged_cache(project_dir, entry)

@@ -656,6 +656,13 @@ class RefusalRecord:
     recorded_at: float
 
 
+def refusal_path_ok(path) -> bool:
+    """A path the refusal record may hold: checkout-relative (no ``..``,
+    backslash, absolute or over-long form) and printable, so escape bytes
+    and bidi controls can never reach a terminal."""
+    return bool(C.selection_relpath_safe(path) and path.isprintable())
+
+
 def _refusal_fields(code, paths, total):
     """The validated path tuple, or None for any malformed field."""
     if code not in _REFUSAL_CODES:
@@ -664,9 +671,7 @@ def _refusal_fields(code, paths, total):
             or not 1 <= len(paths) <= _REFUSAL_PATHS_MAX:
         return None
     for path in paths:
-        # Printable only: escape bytes and bidi controls never enter the
-        # record, so they can never reach a terminal.
-        if not (C.selection_relpath_safe(path) and path.isprintable()):
+        if not refusal_path_ok(path):
             return None
     if (isinstance(total, bool) or not isinstance(total, int)
             or not len(paths) <= total <= _REFUSAL_TOTAL_MAX):
@@ -722,7 +727,6 @@ class _PlannedUpdate:
     gate: object = None
     clear_gate: bool = False
     refusal: GateRefusal | None = None
-    clear_refusal: bool = False
 
 
 class SelectionStore:
@@ -1034,6 +1038,12 @@ class SelectionStore:
                                (_REFUSAL_KEY,)).fetchone()
         return None if row is None else _read_refusal(row[0])
 
+    def clear_refusal(self) -> None:
+        """Delete the stored baseline refusal (a baseline was published)."""
+        with self._lock:
+            self._guard().execute("DELETE FROM kv WHERE key = ?",
+                                  (_REFUSAL_KEY,))
+
     # -- update ------------------------------------------------------------
 
     def update(self, run, *, run_id: str, recorded_at: float,
@@ -1042,8 +1052,7 @@ class SelectionStore:
                observers: Mapping[str, frozenset[str]] | None = None,
                gate: GateMarker | None = None,
                clear_gate: bool = False,
-               refusal: GateRefusal | None = None,
-               clear_refusal: bool = False) -> int:
+               refusal: GateRefusal | None = None) -> int:
         """Record one run: one transaction replacing only the tests it ran.
 
         The run's rows are inserted under the ``(nodeid, run_id)`` key and
@@ -1054,8 +1063,10 @@ class SelectionStore:
         than ``MAX_GREEN_FILES``, a cleared marker) in kv, all in this one
         transaction: a rejected update writes none of them. ``refusal``
         (stored only beside a marker, which supplies its commit and time)
-        records why this gate published no baseline; ``clear_refusal``, or
-        a cleared marker, deletes it. Returns the
+        records why this gate published no baseline (an invalid one is
+        dropped, never raised: it must not cost the run its records); a
+        cleared marker deletes it, and ``clear_refusal`` does it alone
+        once a baseline is published. Returns the
         observer rows the store cap evicted in it.
 
         Never fails for size: unreferenced cache goes first, then surplus
@@ -1071,8 +1082,7 @@ class SelectionStore:
                                     digests=digests, full=full,
                                     fingerprint=fingerprint,
                                     observers=observers, gate=gate,
-                                    clear_gate=clear_gate, refusal=refusal,
-                                    clear_refusal=clear_refusal)
+                                    clear_gate=clear_gate, refusal=refusal)
         with self._lock:
             conn = self._guard()
             try:
@@ -1108,8 +1118,8 @@ class SelectionStore:
 
     def _plan_update(self, run, *, run_id, recorded_at, compatibility,
                      digests, full, fingerprint=None, observers=None,
-                     gate=None, clear_gate=False, refusal=None,
-                     clear_refusal=False) -> _PlannedUpdate:
+                     gate=None, clear_gate=False,
+                     refusal=None) -> _PlannedUpdate:
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("run_id must be a 32-hex string")
         if isinstance(recorded_at, bool) or not isinstance(
@@ -1138,14 +1148,10 @@ class SelectionStore:
         clear_gate = self._check_gate(gate, clear_gate)
         if clear_gate:
             gate = None
-        if not isinstance(clear_refusal, bool):
-            raise ValueError("clear_refusal must be bool")
-        if refusal is not None:
-            if clear_refusal:
-                raise ValueError("refusal and clear_refusal are exclusive")
-            if (not isinstance(refusal, GateRefusal) or _refusal_fields(
+        if refusal is not None and (
+                not isinstance(refusal, GateRefusal) or _refusal_fields(
                     refusal.code, refusal.paths, refusal.total) is None):
-                raise ValueError("refusal must be a valid GateRefusal")
+            refusal = None
         try:
             vocabulary = run.vocabulary
             nodes = dict(run.nodes)
@@ -1215,8 +1221,7 @@ class SelectionStore:
             vocab_fixtures=vocab_fixtures, fixture_keys=fixture_keys,
             nodes=nodes, fixtures=fixtures, ambient=ambient, bad=bad,
             fingerprint=fingerprint, observers=learned, gate=gate,
-            clear_gate=clear_gate, refusal=refusal,
-            clear_refusal=clear_refusal)
+            clear_gate=clear_gate, refusal=refusal)
 
     @staticmethod
     def _check_observers(observers) -> dict[str, frozenset[str]]:
@@ -1575,8 +1580,7 @@ class SelectionStore:
                      "paths": list(refusal.paths), "total": refusal.total,
                      "commit": gate.commit, "at": float(gate.recorded_at)},
                     ensure_ascii=True, separators=(",", ":"))))
-        elif planned.clear_refusal or planned.clear_gate \
-                or refusal is not None:
+        elif planned.clear_gate or refusal is not None:
             # A refusal without a marker has no commit to name; a cleared
             # marker leaves nothing for it to describe.
             conn.execute("DELETE FROM kv WHERE key = ?", (_REFUSAL_KEY,))

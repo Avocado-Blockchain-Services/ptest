@@ -15,6 +15,7 @@ import sys
 
 from . import contracts as C
 from . import render
+from . import source
 from .project_facts import terminal_width
 
 HINT = "run with ptest -v for scheduling and setup details"
@@ -447,8 +448,11 @@ def ignored_input_paths(before: C.InputSnapshot,
 #: the reason so nobody has to rerun to learn it (0.7.4 G2).
 BASELINE_REFUSED_COST = ("until fixed, --full always reruns and other "
                          "checkouts cannot reuse this green")
-BASELINE_REFUSED_FIX = ("fix: ptest doctor --fix or declare them in "
-                        "[selection] non_input_outputs")
+
+
+def baseline_refused_fix(paths: list[str], *, complete: bool = True) -> str:
+    return ("fix: ptest doctor --fix or declare them in [selection] "
+            + source.declare_tables(paths, complete=complete))
 #: The short fix of the later "last gate" line.
 LAST_GATE_FIX = "fix: ptest doctor --fix"
 
@@ -475,7 +479,7 @@ def _unclean_detail(before: C.InputSnapshot, after: C.InputSnapshot) -> str:
         big = (f" · too large to fingerprint: {name} "
                f"({(largest.size or 0) / 1_000_000:.1f} MB)")
     return (f"{ignored_inputs_reason(paths[0], len(paths))}{big} · "
-            f"{BASELINE_REFUSED_COST} · {BASELINE_REFUSED_FIX}")
+            f"{BASELINE_REFUSED_COST} · {baseline_refused_fix(paths)}")
 
 
 def format_age(seconds: float | None) -> str:

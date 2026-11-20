@@ -618,7 +618,7 @@ def test_generated_skill_names_the_loop_without_duplicated_guidance(tmp_path):
         # The three never-rules.
         assert "Never invoke pytest, vitest, or npm test directly" in text
         assert "Never cd into a child" in text
-        assert "Never rerun `ptest --full` without a change" in text
+        assert "Never rerun the same `ptest --full` without a change" in text
         assert "docs/ptest-agent.md" in text
         assert "output" in text.lower()
         assert "run tests only through `ptest` from the repository root" in text.lower()

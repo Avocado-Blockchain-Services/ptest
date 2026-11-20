@@ -121,11 +121,18 @@ def test_refusal_record_is_per_project(domain_factory):
 
 
 def test_published_baseline_clears_refusal(domain_factory):
-    """A5: a later gate that published a baseline deletes the record."""
+    """A5: the clear after a published baseline deletes the record, only
+    for its own project."""
     domain = domain_factory()
     _record(domain, gate=_marker(), refusal=_refusal())
-    _record(domain, run_id=RUN_B, gate=_marker(), clear_refusal=True)
+    _record(domain, OTHER, gate=_marker(), refusal=_refusal())
+    E.clear_gate_refusal(domain, PROJ)
     assert E.gate_refusal_line(domain, PROJ, now=NOW) is None
+    assert E.gate_refusal_line(domain, OTHER, now=NOW) == LINE
+
+
+def test_clear_without_a_store_never_raises(domain_factory):
+    E.clear_gate_refusal(domain_factory(), PROJ)
 
 
 def test_gate_without_verdict_keeps_the_refusal(domain_factory):
@@ -215,14 +222,19 @@ def _plan(execution="full"):
     return types.SimpleNamespace(execution=execution)
 
 
+def _config(enabled=True, kind=C.RunnerKind.PYTEST):
+    return types.SimpleNamespace(
+        selection=types.SimpleNamespace(enabled=enabled),
+        runner=types.SimpleNamespace(kind=kind))
+
+
 IGN = (C.Change(old=None, new=".env", kind="ignored"),
        C.Change(old=None, new="build/a.py", kind="ignored"))
 
 
 def test_gate_verdict_refuses_when_only_ignored_paths_made_it_unclean():
-    refusal, clear = operations._gate_refusal(
+    refusal = operations._gate_refusal(
         _plan(), C.Status.PASSED, _snap(False, IGN), _snap(False, IGN))
-    assert clear is False
     assert refusal == S.GateRefusal(code="unknown-input",
                                     paths=(".env", "build/a.py"), total=2)
 
@@ -230,14 +242,16 @@ def test_gate_verdict_refuses_when_only_ignored_paths_made_it_unclean():
 def test_gate_verdict_caps_paths_at_three_and_counts_all():
     many = tuple(C.Change(old=None, new=f"b/{i}.py", kind="ignored")
                  for i in range(7))
-    refusal, _ = operations._gate_refusal(
+    refusal = operations._gate_refusal(
         _plan(), C.Status.PASSED, _snap(False, many), _snap(False, many))
     assert len(refusal.paths) == 3 and refusal.total == 7
 
 
-def test_gate_verdict_clears_on_a_clean_passing_gate():
+def test_gate_verdict_leaves_the_record_on_a_clean_passing_gate():
+    """G3 lifecycle: a clean tree is not proof a baseline was published
+    (history decides that later), so the transaction never clears."""
     assert operations._gate_refusal(
-        _plan(), C.Status.PASSED, _snap(True), _snap(True)) == (None, True)
+        _plan(), C.Status.PASSED, _snap(True), _snap(True)) is None
 
 
 @pytest.mark.parametrize("execution,status,before,after", [
@@ -250,7 +264,7 @@ def test_gate_verdict_clears_on_a_clean_passing_gate():
 ])
 def test_gate_verdict_is_silent_otherwise(execution, status, before, after):
     assert operations._gate_refusal(
-        _plan(execution), status, before, after) == (None, False)
+        _plan(execution), status, before, after) is None
 
 
 def test_later_runs_print_the_refusal_line(domain_factory, capsys):
@@ -259,17 +273,114 @@ def test_later_runs_print_the_refusal_line(domain_factory, capsys):
     checkout = C.CheckoutIdentity(project_id=PROJ, checkout_id="cd" * 16,
                                   root=Path("/tmp/proj"))
     request = types.SimpleNamespace(quiet=False, setup_only=False)
-    operations._emit_last_gate_refusal(domain, checkout, request)
+    config = _config()
+    operations._emit_last_gate_refusal(domain, checkout, request, config)
     err = capsys.readouterr().err
     assert err.startswith("ptest: last gate at abababababab (")
     assert err.endswith("fix: ptest doctor --fix\n")
     quiet = types.SimpleNamespace(quiet=True, setup_only=False)
-    operations._emit_last_gate_refusal(domain, checkout, quiet)
+    operations._emit_last_gate_refusal(domain, checkout, quiet, config)
     assert capsys.readouterr().err == ""
     other = C.CheckoutIdentity(project_id=OTHER, checkout_id="cd" * 16,
                                root=Path("/tmp/proj"))
-    operations._emit_last_gate_refusal(domain, other, request)
+    operations._emit_last_gate_refusal(domain, other, request, config)
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("enabled,kind", [
+    (False, C.RunnerKind.PYTEST), (True, C.RunnerKind.VITEST)])
+def test_refusal_line_needs_the_store_to_be_written_too(
+        domain_factory, capsys, enabled, kind):
+    """G3 lifecycle: with dynamic selection off (or a runner that never
+    records) nothing could ever clear the record, so it is never printed."""
+    domain = domain_factory()
+    _record(domain, gate=_marker(), refusal=_refusal())
+    checkout = C.CheckoutIdentity(project_id=PROJ, checkout_id="cd" * 16,
+                                  root=Path("/tmp/proj"))
+    request = types.SimpleNamespace(quiet=False, setup_only=False)
+    operations._emit_last_gate_refusal(
+        domain, checkout, request, _config(enabled=enabled, kind=kind))
+    assert capsys.readouterr().err == ""
+
+
+def test_clear_after_publication_is_conditional(domain_factory):
+    """G3 lifecycle: only a gate whose baseline was published clears."""
+    domain = domain_factory()
+    _record(domain, gate=_marker(), refusal=_refusal())
+    checkout = C.CheckoutIdentity(project_id=PROJ, checkout_id="cd" * 16,
+                                  root=Path("/tmp/proj"))
+    config = _config()
+    operations._clear_gate_refusal(domain, config, checkout, _plan(), False)
+    operations._clear_gate_refusal(
+        domain, config, checkout, _plan("selected"), True)
+    assert E.gate_refusal_line(domain, PROJ, now=NOW) == LINE
+    operations._clear_gate_refusal(domain, config, checkout, _plan(), True)
+    assert E.gate_refusal_line(domain, PROJ, now=NOW) is None
+
+
+HOSTILE_GATE_PATHS = [
+    ("monorepo-root-alias", "../.env"),
+    ("backslash", "a\\b.env"),
+    ("escape-bytes", "a\x1b[31mred"),
+    ("bidi-control", "a\u202eb"),
+    ("oversized", "a" * 5000),
+    ("absolute", "/etc/passwd"),
+]
+
+
+@pytest.mark.parametrize("row,path", HOSTILE_GATE_PATHS,
+                         ids=[r for r, _ in HOSTILE_GATE_PATHS])
+def test_gate_refusal_never_costs_the_run_its_records(domain_factory, row, path):
+    """A2 (write side). A monorepo child maps root-level ignored files to
+    ``../`` aliases; other hostile names can appear too. The store refused
+    them and the whole ingest (records, observers, gate marker) was lost.
+    The refusal now keeps only paths the store accepts and the update
+    always lands."""
+    domain = domain_factory()
+    changes = (C.Change(old=None, new=path, kind="ignored"),
+               C.Change(old=None, new="build/a.py", kind="ignored"))
+    refusal = operations._gate_refusal(
+        _plan(), C.Status.PASSED, _snap(False, changes), _snap(False, changes))
+    assert refusal == S.GateRefusal(code="unknown-input",
+                                    paths=("build/a.py",), total=2)
+    _record(domain, gate=_marker(), refusal=refusal)
+    store = S.open_store(domain, PROJ, create=False)
+    try:
+        assert store.snapshot().gate == _marker()
+        assert store.read_refusal().paths == ("build/a.py",)
+    finally:
+        store.close()
+
+
+def test_child_gate_with_only_a_root_level_ignored_file_keeps_its_records(
+        domain_factory):
+    """The reviewed case: a child whose only ignored change is ``../.env``
+    records no refusal (nothing nameable) and still lands its records and
+    gate marker."""
+    domain = domain_factory()
+    changes = (C.Change(old=None, new="../.env", kind="ignored"),)
+    refusal = operations._gate_refusal(
+        _plan(), C.Status.PASSED, _snap(False, changes), _snap(False, changes))
+    assert refusal is None
+    _record(domain, gate=_marker(), refusal=refusal)
+    store = S.open_store(domain, PROJ, create=False)
+    try:
+        assert store.snapshot().gate == _marker()
+    finally:
+        store.close()
+
+
+def test_store_ignores_an_invalid_refusal_instead_of_raising(domain_factory):
+    """A bad refusal must never reject the update that carries the run."""
+    domain = domain_factory()
+    bad = S.GateRefusal(code="unknown-input", paths=("../.env",), total=1)
+    _record(domain, gate=_marker(), refusal=bad)
+    store = S.open_store(domain, PROJ, create=False)
+    try:
+        assert store.snapshot().gate == _marker()
+        assert store.read_refusal() is None
+    finally:
+        store.close()
 
 
 # --- G4 ---------------------------------------------------------------------
@@ -324,3 +435,53 @@ def test_age_words():
     assert [progress.format_age(s) for s in (0, 59, 60, 3599, 3600, 86399,
                                              86400, 3 * 86400 + 5, -4)] == [
         "0s", "59s", "1m", "59m", "1h", "23h", "1d", "3d", "0s"]
+
+
+# --- full-lease join with an unfingerprinted file ---------------------------
+
+def _join_attempt(case, monkeypatch, capsys, changes, clean):
+    """A live full run holds a lease for this digest; a second run
+    requests the gate with the given snapshot."""
+    import os
+
+    from test_coverage_on_request import (
+        _RUN_ID, _gate, _hold_lease, _pytest_repo, _resolved, _snap)
+    from dataclasses import replace
+
+    from ptest import history as history_api
+    from support import git
+
+    domain = case.domain()
+    root = _pytest_repo(domain)
+    config = _resolved(root)
+    snapshot = replace(_snap(git(root, "rev-parse", "HEAD")),
+                       clean=clean, changes=changes)
+    checkout = _hold_lease(domain, config, coverage=False)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *a, **k: snapshot)
+    try:
+        action = _gate(domain, config, coverage=False)
+        held = history_api.read_full_lease(domain, checkout)
+    finally:
+        history_api.release_full_lease(domain, checkout, _RUN_ID)
+    assert held is not None and held["pid"] == os.getpid()
+    return action, capsys.readouterr().err
+
+
+def test_a_tree_with_an_unfingerprinted_ignored_file_never_joins(
+        case, monkeypatch, capsys):
+    """G10 (review). An oversized gitignored file is left out of the digest,
+    so two trees differing only in that file share a digest. Before 0.7.4
+    such a tree had no digest and could never join; it still must not."""
+    big = (C.Change(old=None, new="data/blob.bin", kind="ignored",
+                    size=17_000_000),)
+    action, err = _join_attempt(case, monkeypatch, capsys, big, clean=False)
+    assert action == "run"
+    assert "joined the running full run" not in err
+
+
+def test_the_same_digest_without_an_oversized_file_still_joins(
+        case, monkeypatch, capsys):
+    """Positive twin: the join path is live for an ordinary tree."""
+    action, err = _join_attempt(case, monkeypatch, capsys, (), clean=True)
+    assert "joined the running full run" in err

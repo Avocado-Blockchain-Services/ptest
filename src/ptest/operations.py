@@ -414,32 +414,56 @@ def _selection_argv_files(request: C.RunRequest) -> tuple[str, ...]:
 def _gate_refusal(plan: C.Plan, status: C.Status,
                   input_before: C.InputSnapshot | None,
                   input_after: C.InputSnapshot | None):
-    """``(refusal, clear)`` the gate's selection transaction records.
+    """The refusal the gate's selection transaction records, or None.
 
     A passing full run that only undeclared gitignored paths kept from
-    publishing a baseline refuses (up to three paths and the total, never
-    content); a passing full run with a clean tree published one and
-    clears an older refusal. Everything else leaves the record alone.
+    publishing a baseline refuses: up to three paths the store accepts
+    (a monorepo child's ``../`` alias or a hostile name is left out, never
+    allowed to cost the run its records) and the total, never content.
+    Clearing is a separate step after history publishes a baseline
+    (``_clear_gate_refusal``); a clean tree alone proves nothing.
     """
     from . import selection_store
     if (plan.execution != "full" or status is not C.Status.PASSED
             or input_before is None or input_after is None
-            or input_before.digest != input_after.digest):
-        return None, False
-    if input_before.clean and input_after.clean:
-        return None, True
+            or input_before.digest != input_after.digest
+            or (input_before.clean and input_after.clean)):
+        return None
     paths = progress.ignored_input_paths(input_before, input_after)
-    if not paths:
-        return None, False
+    named = [path for path in paths or ()
+             if selection_store.refusal_path_ok(path)]
+    if not named:
+        return None
     return selection_store.GateRefusal(
-        code="unknown-input", paths=tuple(paths[:3]), total=len(paths)), False
+        code="unknown-input", paths=tuple(named[:3]), total=len(paths))
+
+
+def _clear_gate_refusal(domain: C.DomainPaths, config: C.Config,
+                        checkout: C.CheckoutIdentity, plan: C.Plan,
+                        published: bool) -> None:
+    """Delete the project's last-gate refusal once a full run actually
+    published a baseline (0.7.4 G3). Never raises."""
+    if (not published or plan.execution != "full"
+            or not _selection_records(config)):
+        return
+    try:
+        _selection_engine().clear_gate_refusal(domain, checkout.project_id)
+    except Exception:
+        pass
+
+
+def _selection_records(config: C.Config) -> bool:
+    """Whether a run of this project writes the selection store at all."""
+    return bool(config.selection.enabled
+                and config.runner.kind is C.RunnerKind.PYTEST)
 
 
 def _emit_last_gate_refusal(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
-                            request: C.RunRequest) -> None:
+                            request: C.RunRequest, config: C.Config) -> None:
     """Remind later runs of the project that its last gate recorded no
-    baseline (0.7.4 G3). Never raises, never changes the run."""
-    if request.setup_only or request.quiet:
+    baseline (0.7.4 G3). Printed only while a gate could still update the
+    record. Never raises, never changes the run."""
+    if request.setup_only or request.quiet or not _selection_records(config):
         return
     try:
         line = _selection_engine().gate_refusal_line(
@@ -480,8 +504,7 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                                               input_after) is None)
         argv_files = (None if plan.execution == "full"
                       else _selection_argv_files(request))
-        refusal, clear_refusal = _gate_refusal(
-            plan, status, input_before, input_after)
+        refusal = _gate_refusal(plan, status, input_before, input_after)
         return engine.after_run(
             domain=domain, config=config, project_id=checkout.project_id,
             run_id=run_id, report_path=report_binding.path,
@@ -492,8 +515,7 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
             guard_failed=guard_problem is not None,
             setup_failed=bool(setup_failed), argv_files=argv_files,
             verbose=bool(request.verbose), quiet=bool(request.quiet),
-            fingerprint=fingerprint, refusal=refusal,
-            clear_refusal=clear_refusal)
+            fingerprint=fingerprint, refusal=refusal)
     except Exception:
         return None
 
@@ -3256,6 +3278,11 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
     digest = snapshot.digest
     if not isinstance(digest, str) or not digest:
         return ("run", None, False)
+    if any(change.size is not None for change in snapshot.changes):
+        # A gitignored file over the size limit is left out of the digest
+        # (0.7.4 G10), so trees differing only in it share one: such a
+        # tree never coalesces, as before 0.7.4 when it had no digest.
+        return ("run", None, False)
     try:
         sequence = history.next_sequence(domain, checkout)
     except BaseException:
@@ -3570,7 +3597,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         _emit_start(checkout=checkout, config=config, request=request,
                     plan=plan, workers=requested_slots,
                     snapshot=planning_snapshot, history_view=history_view)
-        _emit_last_gate_refusal(domain, checkout, request)
+        _emit_last_gate_refusal(domain, checkout, request, config)
         return summary
 
     # With a pre-setup owed, the start line waits for the final worker count.
@@ -4484,6 +4511,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     baseline_published=publication.baseline_published,
                     reasons=_unique_reasons(result.reasons + publication.reasons),
                 )
+                _clear_gate_refusal(domain, config, checkout, plan,
+                                    publication.baseline_published)
             except (C.Problem, OSError) as exc:
                 # Name the cause (a store with the wrong mode names its
                 # path): "rerun once alone" cannot fix a state problem.

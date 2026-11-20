@@ -315,7 +315,8 @@ def test_no_baseline_recorded_names_undeclared_ignored_files(case):
         "ptest: no baseline recorded: gitignored files count as test "
         "inputs: .env (+2 more) · until fixed, --full always reruns and "
         "other checkouts cannot reuse this green · fix: ptest doctor --fix "
-        "or declare them in [selection] non_input_outputs")
+        "or declare them in [selection] non_input_outputs for files no test "
+        "reads (and .env files), ignored_inputs for files a test reads")
 
 
 def test_no_baseline_ignored_note_never_suggests_ignored_inputs(case):
@@ -327,6 +328,39 @@ def test_no_baseline_ignored_note_never_suggests_ignored_inputs(case):
         _result(case, input_before=dirty, input_after=dirty))
     assert "\n" not in note
     assert "cannot reuse this green" in note
+    assert "non_input_outputs" in note and "ignored_inputs" not in note
+
+
+def test_no_baseline_fix_for_files_a_test_may_read_names_both_tables(case):
+    """0.7.4 G2 (review): only .env-style files and symlinks belong in
+    non_input_outputs. Declaring a file a test reads (data/fixtures.json, a
+    17 MB data/blob.bin) as a non-input would make a later "already
+    verified" false, so the fix names ignored_inputs for those."""
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new="data/fixtures.json", kind="ignored"),))
+    note = progress.format_baseline_note(
+        _result(case, input_before=dirty, input_after=dirty))
+    assert "\n" not in note
+    assert "non_input_outputs for files no test reads" in note
+    assert "ignored_inputs for files a test reads" in note
+
+
+def test_no_baseline_fix_for_mixed_env_and_data_keeps_ignored_inputs(case):
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new=".env", kind="ignored"),
+        C.Change(old=None, new="data/fixtures.json", kind="ignored")))
+    note = progress.format_baseline_note(
+        _result(case, input_before=dirty, input_after=dirty))
+    assert "ignored_inputs for files a test reads" in note
+    assert ".env" in note
+
+
+def test_no_baseline_fix_for_env_family_stays_non_input_outputs(case):
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new="api/.env.local", kind="ignored"),
+        C.Change(old=None, new=".env", kind="ignored")))
+    note = progress.format_baseline_note(
+        _result(case, input_before=dirty, input_after=dirty))
     assert "non_input_outputs" in note and "ignored_inputs" not in note
 
 

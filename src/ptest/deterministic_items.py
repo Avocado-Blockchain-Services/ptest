@@ -178,11 +178,6 @@ _SAFE_NAME = re.compile(r"[A-Za-z0-9._/@+=,~-]+")
 _GITIGNORED_NAMED = 3
 
 
-def _env_style(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return name == ".env" or name.startswith(".env.")
-
-
 def _gitignored_answer(config: C.Config, cfg: str, evidence: tuple[str, ...],
                        answer: DeterministicAnswer) -> DeterministicAnswer:
     """Turn a satisfied SELECT-001 into a gap when gitignored files count as inputs.
@@ -200,7 +195,16 @@ def _gitignored_answer(config: C.Config, cfg: str, evidence: tuple[str, ...],
     if answer.status != "satisfied":
         return answer
     listing = source.undeclared_gitignored(config)
-    if listing is None or not listing.paths:
+    if listing is None:
+        return answer   # not a Git worktree: nothing to count
+    if listing.failed:
+        # Satisfied would claim a check that never happened.
+        return DeterministicAnswer(
+            item_id="SELECT-001", status="unknown",
+            reason=("gitignored files were not checked: Git could not list "
+                    "them, so whether a baseline can be recorded is unknown"),
+            evidence_paths=evidence)
+    if not listing.paths:
         return answer
     declare = selection_api.declarable(list(listing.paths),
                                        listing.as_snapshot())
@@ -213,9 +217,9 @@ def _gitignored_answer(config: C.Config, cfg: str, evidence: tuple[str, ...],
                "entries)" if listing.truncated else "")
     summary = (f"{C.plural(len(listing.paths), 'gitignored file')} count as "
                f"test inputs and no baseline can be recorded: {shown}{partial}.")
-    outputs = ("[selection] non_input_outputs" if any(
-        _env_style(path) for path in listing.paths)
-        else "[selection] non_input_outputs (or ignored_inputs for files a test reads)")
+    tables = source.declare_tables(list(listing.paths),
+                                     complete=not listing.truncated)
+    outputs = f"[selection] {tables}"
     fix = (f"Run ptest doctor --fix, or declare them in {cfg}: {outputs}. "
            ".env files and symlinks belong in non_input_outputs; "
            "ignored_inputs refuses a worktree's symlinked .env.")

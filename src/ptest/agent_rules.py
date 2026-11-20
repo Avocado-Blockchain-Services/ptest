@@ -391,6 +391,36 @@ def _pre_push_coverage_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_same_gate_provider_text(provider: str) -> bytes:
+    """Exact 0.7.4-dev skill bytes before "the same ``ptest --full``".
+
+    ``afc3e62``/``86163c9``: coverage at the push, unreleased. Recognised
+    as previous managed content so ``ptest rules --apply`` upgrades it.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches.\n"
+        "| Command | Runs |\n"
+        "|---|---|\n"
+        "| `ptest` | changed tests, whole repo |\n"
+        "| `ptest <folder>` | changed tests under that folder |\n"
+        "| `ptest <file>` | that file, always |\n"
+        "| `ptest --full <folder>` | all tests under that folder |\n"
+        "| `ptest --full` | integrated gate, once at the end of the spec or chain before a local merge, by the orchestrator |\n"
+        "| `ptest --full --cov` | once more before pushing to origin |\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.\n"
+        "Read ptest's whole output: never pipe it through grep, tail or head. Never edit, stash, check out or reset files in the checkout while a run is going.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus the five-command table.
 
@@ -417,7 +447,7 @@ def _provider_text(provider: str) -> bytes:
         "| `ptest --full <folder>` | all tests under that folder |\n"
         "| `ptest --full` | integrated gate, once at the end of the spec or chain before a local merge, by the orchestrator |\n"
         "| `ptest --full --cov` | once more before pushing to origin |\n"
-        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never pass `--cov` while iterating. Never rerun the same `ptest --full` without a change. Never run `ptest --full` during a task, not even to clear a `deferred N` count.\n"
         "Read ptest's whole output: never pipe it through grep, tail or head. Never edit, stash, check out or reset files in the checkout while a run is going.\n"
         "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
@@ -475,7 +505,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_coverage_provider_text(provider),
                    _pre_one_gate_provider_text(provider),
                    _pre_quiet_tree_provider_text(provider),
-                   _pre_push_coverage_provider_text(provider)):
+                   _pre_push_coverage_provider_text(provider),
+                   _pre_same_gate_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -1046,6 +1077,10 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 6671632 (0.7.4 dev tip): guide before the "same ptest --full" wording.
+    "bedaf0a8cdc35e462f263689457f5f9d36048132a872b23d0b5e786a6fe704a9",
+    # 86163c9 (0.7.4 dev): G7 wording before the G4 rows.
+    "6b667d94ed1e4144c5f3cd207c59a388aab54fcf133df72e0c0bd3a50c28dc33",
     # 262a1a6 (0.7.3): guide before 0.7.4 (coverage at push, dynamic reference, last-gate rows).
     "b7c666d8a87aab5bdb15ed55954ec45ee5ef2ae469323a0a9dc77702453c115e",
     # 2c1be1d (0.7.0-0.7.2): guide before the whole-output and quiet-checkout rules.
@@ -1189,6 +1224,7 @@ def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
         _pre_one_gate_provider_text(provider),
         _pre_quiet_tree_provider_text(provider),
         _pre_push_coverage_provider_text(provider),
+        _pre_same_gate_provider_text(provider),
     )
 
 

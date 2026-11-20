@@ -150,14 +150,14 @@ def test_a_declared_ignored_input_overrides_the_builtin(snap):
     assert after.digest != before.digest
 
 
-def test_a_nested_cache_below_the_project_root_is_not_exempt(snap):
+def test_a_nested_cache_below_the_project_root_is_exempt_too(snap):
+    """Oracle: 0.7.4 G10 (supersedes the 0.6 root-only pin): ``.mypy_cache``
+    and ``.ruff_cache`` are non-inputs by default anywhere."""
     domain, take = snap
     root = _domain_repo(domain, gitignore=".mypy_cache/\n")
     _write(root, "src/.mypy_cache/a.json")
     after = take(root)
-    assert not after.clean
-    assert {change.new for change in after.changes if change.kind == "ignored"} == {
-        "src/.mypy_cache/a.json"}
+    assert after.clean and after.changes == ()
 
 
 def test_a_symlinked_builtin_output_is_exempt_like_a_declared_one(snap, tmp_path):

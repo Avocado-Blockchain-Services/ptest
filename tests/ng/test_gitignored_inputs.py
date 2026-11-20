@@ -457,18 +457,49 @@ def test_issue5_root_mypy_cache_over_the_limit_is_a_non_input(snap):
     assert after.clean and after.changes == ()
 
 
-def test_nested_over_limit_cache_is_an_undeclared_input_not_a_scan_limit(snap):
-    """Oracle: G10. Outside the root built-ins the cache is an undeclared
-    input: the snapshot stays available and the tree is unclean."""
-    domain, take, _ = snap
-    root = _domain_repo(domain, gitignore=".mypy_cache/\n")
-    _sparse(root, "svc/.mypy_cache/3.12/cache.db")
+@pytest.mark.parametrize("path", [
+    "svc/.mypy_cache/3.12/cache.db",
+    "src/pkg/.ruff_cache/0.4/x.bin",
+    "a/b/c/.mypy_cache/deep/cache.db",
+])
+def test_nested_tool_caches_are_non_inputs_anywhere(snap, path):
+    """Oracle: G10 "`.mypy_cache` and `.ruff_cache` are non-inputs by
+    default": the spec names no root restriction, and a monorepo child or
+    package keeps its own cache. Over the file limit or not, the snapshot
+    stays clean and available."""
+    domain, take, listing = snap
+    root = _domain_repo(domain, gitignore=".mypy_cache/\n.ruff_cache/\n")
+    _sparse(root, path)
+    _write(root, path.rsplit("/", 1)[0] + "/small.json")
     after = take(root)
     assert after.digest is not None and after.limitations == ()
+    assert after.clean and after.changes == ()
+    assert not [item for item in after.files if "_cache" in item.path]
+    assert listing(root).paths == ()
+
+
+def test_a_tracked_file_under_a_nested_cache_name_stays_an_input(snap):
+    """Tracked files are never filtered as non-inputs (G10: tracked files
+    keep today's behaviour)."""
+    domain, take, _ = snap
+    root = _domain_repo(domain, gitignore="",
+                        files={"svc/.mypy_cache/keep.json": "v1\n"})
+    (root / "svc/.mypy_cache/keep.json").write_text("v2\n")
+    after = take(root)
     assert not after.clean
-    assert [(change.new, change.kind, change.size) for change in after.changes] == [
-        ("svc/.mypy_cache/3.12/cache.db", "ignored", _OVER_LIMIT)]
-    assert "svc/.mypy_cache/3.12/cache.db" not in {item.path for item in after.files}
+    assert [change.kind for change in after.changes] == ["modified"]
+
+
+def test_a_declared_input_inside_a_nested_cache_name_is_honoured(snap):
+    """The config wins, as for the root built-ins."""
+    domain, take, _ = snap
+    root = _domain_repo(domain, gitignore=".mypy_cache/\n")
+    _write(root, "svc/.mypy_cache/fixture.json")
+    policy = C.SelectionPolicy(enabled=True, closed_inputs=True,
+                               input_roots=("src", "tests"),
+                               ignored_inputs=("svc/.mypy_cache/fixture.json",))
+    after = take(root, policy)
+    assert "svc/.mypy_cache/fixture.json" in {item.path for item in after.files}
 
 
 def test_over_limit_undeclared_data_refuses_the_baseline_and_names_it(snap):
@@ -545,3 +576,85 @@ def test_change_size_must_be_a_bounded_non_negative_int():
     for bad in (-1, True, 1.5, "7"):
         with pytest.raises((TypeError, ValueError)):
             C.Change(old=None, new="x", kind="ignored", size=bad)
+
+
+# 0.7.4 review: the listing and the snapshot agree on __pycache__
+
+
+def test_listing_and_snapshot_agree_on_a_non_bytecode_file_in_pycache(snap):
+    """Oracle: G5 (only bytecode is exempt) + G6 (doctor must not report
+    clean while the gate refuses). ``src/__pycache__/notes.txt`` is no
+    bytecode: the snapshot counts it, so the listing must too."""
+    domain, take, listing = snap
+    root = _domain_repo(domain, gitignore="__pycache__/\n")
+    _write(root, "src/__pycache__/notes.txt")
+    _write(root, "src/__pycache__/gone.cpython-313.pyc")
+    assert _ignored(take(root)) == {"src/__pycache__/notes.txt"}
+    assert set(listing(root).paths) == {"src/__pycache__/notes.txt"}
+
+
+def test_listing_bytecode_does_not_use_up_the_entry_budget(snap, monkeypatch):
+    domain, _, listing = snap
+    root = _domain_repo(domain, gitignore="__pycache__/\ndata/\n")
+    for index in range(10):
+        _write(root, f"src/__pycache__/m{index}.cpython-313.pyc")
+    _write(root, "data/x")
+    monkeypatch.setattr(source, "LISTING_ENTRY_LIMIT", 4)
+    found = listing(root)
+    assert not found.truncated and found.paths == ("data/x",)
+
+
+# 0.7.4 review: doctor says when it could not check
+
+
+def _git_cannot_list(monkeypatch):
+    """Git answers rev-parse but fails on ls-files (its output limit)."""
+    real = source._git
+
+    def git(root, scan, *argv, **kwargs):
+        if argv and argv[0] == "ls-files":
+            raise source._Unavailable("git output limit exceeded", "scan-limit")
+        return real(root, scan, *argv, **kwargs)
+
+    monkeypatch.setattr(source, "_git", git)
+
+
+def test_fix_says_when_git_could_not_list_the_files(tmp_path, monkeypatch):
+    """Oracle: 0.6.6 behaviour restored. The listing is None (Git failed,
+    for instance over its output limit): doctor drafts nothing and names
+    the reason instead of staying silent."""
+    root = _repo(tmp_path, gitignore="data/\n")
+    _write(root, "data/x")
+    _git_cannot_list(monkeypatch)
+    plan = _plan(root)
+    assert plan.files == ()
+    assert "gitignored files not checked: Git could not list them" in _notes(plan)
+
+
+def test_offline_item_is_not_satisfied_when_the_listing_is_unavailable(
+        tmp_path, monkeypatch):
+    root = _repo(tmp_path, gitignore="build/\n")
+    _write(root, "build/out.o")
+    _git_cannot_list(monkeypatch)
+    answer = _answers(root)["SELECT-001"]
+    assert answer.status == "unknown"
+    assert "not checked" in answer.reason
+
+
+def test_offline_item_for_data_files_names_both_tables(tmp_path):
+    """Oracle: G2 (review). A file a test reads must not be steered into
+    non_input_outputs."""
+    root = _repo(tmp_path, gitignore="data/\n")
+    _write(root, "data/fixtures.json")
+    answer = _answers(root)["SELECT-001"]
+    assert answer.status == "gap"
+    assert "non_input_outputs for files no test reads" in answer.finding_change
+    assert "ignored_inputs for files a test reads" in answer.finding_change
+
+
+def test_offline_item_for_mixed_env_and_data_keeps_ignored_inputs(tmp_path):
+    root = _repo(tmp_path, gitignore="data/\n.env\n")
+    _write(root, "data/fixtures.json")
+    _write(root, ".env", b"A=1\n")
+    answer = _answers(root)["SELECT-001"]
+    assert "ignored_inputs for files a test reads" in answer.finding_change

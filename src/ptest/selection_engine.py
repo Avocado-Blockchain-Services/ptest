@@ -1225,6 +1225,21 @@ def gate_refusal_line(domain, project_id, *, now=None, color=False):
         return None
 
 
+def clear_gate_refusal(domain, project_id) -> None:
+    """Delete the project's refusal record once a gate published a
+    baseline. Opens an existing store only; never raises."""
+    try:
+        store = _open_store(domain, project_id, create=False)
+        if store is None:
+            return
+        try:
+            store.clear_refusal()
+        finally:
+            _close_quietly(store)
+    except Exception:
+        pass
+
+
 # --- after_run (operations seam) ----------------------------------------------
 
 def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
@@ -1232,8 +1247,7 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
               execution: str, valid_handoff: bool, unchanged_inputs: bool,
               cancelled: bool, guard_failed: bool, setup_failed: bool,
               argv_files, verbose: bool = False,
-              quiet: bool = False, fingerprint=None, refusal=None,
-              clear_refusal: bool = False):
+              quiet: bool = False, fingerprint=None, refusal=None):
     """Ingest one attempt's dependency files into the selection store.
 
     Records are written only for a valid handoff of a consumed report
@@ -1245,8 +1259,8 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
     transaction (R15, R27), and the gate report is returned (None for
     iteration runs and for anything not ingested). ``fingerprint`` is the
     run's ambient fingerprint, recorded on the run row (R43). ``refusal``
-    (a ``selection_store.GateRefusal``) and ``clear_refusal`` ride the gate
-    marker's transaction (0.7.4 G3). Prints the audit, gate and ``-v`` lines.
+    (a ``selection_store.GateRefusal``) rides the gate marker's
+    transaction (0.7.4 G3). Prints the audit, gate and ``-v`` lines.
     Never raises.
     """
     try:
@@ -1258,8 +1272,7 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
             unchanged_inputs=unchanged_inputs, cancelled=cancelled,
             guard_failed=guard_failed, setup_failed=setup_failed,
             argv_files=argv_files, verbose=verbose, quiet=quiet,
-            fingerprint=fingerprint, refusal=refusal,
-            clear_refusal=clear_refusal)
+            fingerprint=fingerprint, refusal=refusal)
     except Exception:
         return None
 
@@ -1267,8 +1280,7 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
 def _after_run(*, domain, config, project_id, run_id, report_path,
                project_root, expected_workers, execution, valid_handoff,
                unchanged_inputs, cancelled, guard_failed, setup_failed,
-               argv_files, verbose, quiet, fingerprint=None, refusal=None,
-               clear_refusal=False):
+               argv_files, verbose, quiet, fingerprint=None, refusal=None):
     try:
         ingest = _ingest()
     except Exception:
@@ -1314,8 +1326,7 @@ def _after_run(*, domain, config, project_id, run_id, report_path,
     if ingestible:
         return _ingest_run(run, domain, config, project_id, run_id, key,
                            project_root, execution, expected_workers,
-                           verbose, quiet, fingerprint, refusal,
-                           clear_refusal)
+                           verbose, quiet, fingerprint, refusal)
     _fallbacks(run, domain, config, project_id, argv_files,
                verbose, quiet,
                reason=_not_recorded_reason(
@@ -1504,8 +1515,7 @@ def _gate_marker(key, project_root):
 
 def _ingest_run(run, domain, config, project_id, run_id, key,
                 project_root, execution, expected_workers, verbose,
-                quiet, fingerprint=None, refusal=None,
-                clear_refusal=False):
+                quiet, fingerprint=None, refusal=None):
     """Audit, then record one run in a single store transaction.
 
     Returns the gate report for a full-mode (gate) ingest that landed,
@@ -1554,8 +1564,7 @@ def _ingest_run(run, domain, config, project_id, run_id, key,
                 compatibility=compatibility, digests=digests, full=gate,
                 fingerprint=_valid_fingerprint(fingerprint),
                 observers=rows or None, gate=marker, clear_gate=clear,
-                refusal=refusal if gate else None,
-                clear_refusal=bool(clear_refusal) and gate)
+                refusal=refusal if gate else None)
         except Exception:
             if verbose:
                 progress.emit(progress.format_selection_not_recorded(

@@ -27,7 +27,8 @@ from pathlib import Path
 from . import contracts as C
 from . import files as safe_files
 from .files import create_exclusive, read_regular, validate_private_file
-from .selection import _invalid_policy, _matches, non_input_outputs
+from .selection import (_invalid_policy, _matches, in_builtin_cache,
+                        non_input_outputs)
 
 _KEY = "input-hmac.key"
 _MAX_FILES = 100_000
@@ -82,6 +83,31 @@ def is_bytecode_entry(entry: str) -> bool:
     return parts[-1] == "__pycache__" or is_bytecode_path(entry)
 
 
+def is_env_style(path: str) -> bool:
+    """A ``.env`` or ``.env.*`` file: the one name shape whose declaration
+    is always ``non_input_outputs`` (a worktree's ``.env`` is a symlink that
+    ``ignored_inputs`` refuses). Every message that picks a table uses this."""
+    name = path.rsplit("/", 1)[-1]
+    return name == ".env" or name.startswith(".env.")
+
+
+#: Which ``[selection]`` table a declaration belongs in (one source of truth
+#: for the end line and doctor). Only ``.env`` files are known to be no test
+#: input; declaring a file a test reads as a non-input leads to a false
+#: "already verified" later, so everything else names both tables.
+_TABLES_ENV = "non_input_outputs"
+_TABLES_ANY = ("non_input_outputs for files no test reads (and .env files), "
+               "ignored_inputs for files a test reads")
+
+
+def declare_tables(paths: list[str], *, complete: bool = True) -> str:
+    """The table advice for these undeclared gitignored paths. ``complete``
+    says ``paths`` is every one of them (an unnamed rest may hold anything)."""
+    if complete and paths and all(is_env_style(path) for path in paths):
+        return _TABLES_ENV
+    return _TABLES_ANY
+
+
 def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
     return C.Reason(code=code, message=message, paths=paths)
 
@@ -102,6 +128,8 @@ def _is_non_input_output(config: C.Config, path: str) -> bool:
     """
     if _matches(path, non_input_outputs(config.selection,
                                         tuple(config.runner.test_roots))):
+        return True
+    if in_builtin_cache(config.selection, path):
         return True
     return (config.runner.kind is C.RunnerKind.VITEST
             and not path.startswith("../")
@@ -815,6 +843,9 @@ class IgnoredListing:
     other: tuple[str, ...]
     examined: int
     truncated: bool
+    #: Git is there but could not list (for instance its output went over
+    #: ``_MAX_GIT_BYTES``): nothing was checked, which is not "nothing found".
+    failed: bool = False
 
     def as_snapshot(self) -> C.InputSnapshot:
         """The listing in the shape ``selection.declarable`` reads."""
@@ -830,17 +861,25 @@ def undeclared_gitignored(config: C.Config) -> IgnoredListing | None:
 
     The snapshot names the same files but hashes every one of them under a
     wall clock; this lists names only, so the answer cannot depend on speed.
-    It prunes ``node_modules``, ``.venv``, ``__pycache__`` and every
-    declared ``non_input_outputs``/``ignored_inputs`` entry before walking,
-    drops bytecode and pytest byproducts like the snapshot does, and stops
+    It prunes ``node_modules``, ``.venv`` and every declared
+    ``non_input_outputs``/``ignored_inputs`` entry before walking, drops
+    bytecode (only ``*.pyc``/``*.pyo`` below ``__pycache__``) and pytest
+    byproducts like the snapshot does, and stops
     at ``LISTING_ENTRY_LIMIT`` examined entries (``truncated``). ``None``
-    means Git could not answer (not a repository, unreadable root).
+    means this is not a Git worktree; a listing with ``failed`` set means Git
+    could not answer.
     """
     root = (config.checkout.root if config.checkout
             else (config.config_path.parent if config.config_path else None))
     if root is None:
         return None
     scan = _Scan(None)
+    try:
+        if _git(root, scan, "rev-parse", "--git-dir", absent_ok=True) is None:
+            return None
+    except (_Unavailable, OSError, subprocess.TimeoutExpired):
+        return None
+
     def names(*argv: str) -> list[str]:
         # A name Git prints but ptest refuses (control bytes, bad UTF-8) is
         # skipped; a directory entry keeps its trailing slash.
@@ -859,7 +898,8 @@ def undeclared_gitignored(config: C.Config) -> IgnoredListing | None:
                         "--exclude-standard", "--directory", "-z")
     except (_Unavailable, OSError, UnicodeError, ValueError,
             subprocess.TimeoutExpired):
-        return None
+        return IgnoredListing(paths=(), other=(), examined=0, truncated=False,
+                              failed=True)
     declared = tuple(config.selection.ignored_inputs)
     pytest_tools = None
     if config.runner.kind is C.RunnerKind.PYTEST:
@@ -875,8 +915,6 @@ def undeclared_gitignored(config: C.Config) -> IgnoredListing | None:
         """Skip ``path`` and everything below it; a dependency install that
         nothing declares is recorded once, by its directory."""
         parts = path.split("/")
-        if "__pycache__" in parts:
-            return True
         for index, part in enumerate(parts):
             if part in LISTING_HEAVY:
                 heavy = "/".join(parts[:index + 1])
@@ -914,6 +952,9 @@ def undeclared_gitignored(config: C.Config) -> IgnoredListing | None:
             subdirs.sort()
             keep = []
             for name in sorted(names) + subdirs:
+                if name not in subdirs and is_bytecode_path(
+                        f"{relative}/{name}"):
+                    continue   # never an input, so not worth the budget
                 examined += 1
                 if examined > LISTING_ENTRY_LIMIT:
                     examined, truncated = LISTING_ENTRY_LIMIT, True

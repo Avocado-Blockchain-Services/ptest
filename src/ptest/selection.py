@@ -29,6 +29,33 @@ def _overlaps(left: str, right: str) -> bool:
 #: configuration: graphify's knowledge graph and the ruff and mypy caches.
 BUILTIN_OUTPUTS = ("graphify-out", ".ruff_cache", ".mypy_cache")
 
+#: The tool caches among them are non-inputs at any depth (a package or a
+#: monorepo child keeps its own); a path component names them (0.7.4 G10).
+BUILTIN_CACHE_DIRS = (".ruff_cache", ".mypy_cache")
+
+
+def in_builtin_cache(policy: C.SelectionPolicy, path: str) -> bool:
+    """A path below a ``.ruff_cache``/``.mypy_cache`` directory at any depth.
+
+    The config wins: a declared entry equal to or inside that cache
+    directory keeps the path an input, like the root built-ins above.
+    Child-scope ``../`` aliases never match (they name root-level files).
+    """
+    if path.startswith("../"):
+        return False
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if part not in BUILTIN_CACHE_DIRS:
+            continue
+        prefix = "/".join(parts[:index + 1])
+        claimed = (policy.input_roots + policy.full_triggers + policy.always
+                   + policy.ignored_inputs + policy.no_tests
+                   + tuple(p for group in policy.groups
+                           for p in group.sources + group.tests))
+        return not any(item == prefix or item.startswith(prefix + "/")
+                       for item in claimed)
+    return False
+
 
 @functools.lru_cache(maxsize=64)
 def non_input_outputs(policy: C.SelectionPolicy, test_roots: tuple = ()) -> tuple:
