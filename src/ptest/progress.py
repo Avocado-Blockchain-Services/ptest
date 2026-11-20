@@ -466,7 +466,15 @@ def _unclean_detail(before: C.InputSnapshot, after: C.InputSnapshot) -> str:
     paths = ignored_input_paths(before, after)
     if paths is None:
         return "uncommitted changes"
-    return (f"{ignored_inputs_reason(paths[0], len(paths))} · "
+    oversized = [change for change in (*before.changes, *after.changes)
+                 if change.size is not None]
+    big = ""
+    if oversized:
+        largest = max(oversized, key=lambda change: change.size or 0)
+        name = render.terminal_text(largest.new or largest.old or "")
+        big = (f" · too large to fingerprint: {name} "
+               f"({(largest.size or 0) / 1_000_000:.1f} MB)")
+    return (f"{ignored_inputs_reason(paths[0], len(paths))}{big} · "
             f"{BASELINE_REFUSED_COST} · {BASELINE_REFUSED_FIX}")
 
 

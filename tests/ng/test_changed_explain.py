@@ -330,6 +330,21 @@ def test_no_baseline_ignored_note_never_suggests_ignored_inputs(case):
     assert "non_input_outputs" in note and "ignored_inputs" not in note
 
 
+def test_no_baseline_names_oversized_gitignored_file_and_its_size(case):
+    """0.7.4 G10 (GitHub #5): a gitignored file too large to fingerprint no
+    longer aborts the run; the refusal names it and its size, even when it
+    is not the first ignored path, so nobody has to hunt for it."""
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new=".env", kind="ignored"),
+        C.Change(old=None, new="data/blob.bin", kind="ignored",
+                 size=17_000_000)))
+    note = progress.format_baseline_note(
+        _result(case, input_before=dirty, input_after=dirty))
+    assert "\n" not in note
+    assert ".env (+1 more)" in note
+    assert "too large to fingerprint: data/blob.bin (17.0 MB)" in note
+
+
 def test_no_baseline_recorded_real_changes_stay_uncommitted(case):
     dirty = case.snapshot(clean=False, changes=(
         C.Change(old=None, new=".env", kind="ignored"),
