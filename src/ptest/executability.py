@@ -174,6 +174,10 @@ class ParallelRequest:
     reason: str | None
     config_level: bool
     runs: bool
+    #: True when the serial fallback comes from the project environment
+    #: (xdist or pytest-cov pair missing, duplicated, unqualified) that a
+    #: declared setup can change; never for config or launcher reasons.
+    environment: bool = False
 
 
 def _cfg(project: str) -> str:
@@ -482,6 +486,9 @@ def _has_maxprocesses(tokens: tuple[str, ...]) -> bool:
     return any(token.split("=", 1)[0] == "--maxprocesses" for token in tokens)
 
 
+_UNVERIFIABLE = "ptest cannot verify"
+
+
 def _project_venv(config: C.Config, dist: str) -> tuple[Path | None, str | None]:
     """Resolve the project venv for native probes, else ``(None, reason)``.
 
@@ -491,7 +498,7 @@ def _project_venv(config: C.Config, dist: str) -> tuple[Path | None, str | None]
     launcher = tuple(config.runner.launcher)
     name = Path(launcher[-1]).name if launcher else ""
     reason = (
-        f"ptest cannot verify {dist} for launcher {name}; "
+        f"{_UNVERIFIABLE} {dist} for launcher {name}; "
         "use an absolute interpreter or a uv launcher to run in parallel")
     root = _project_root(config, ".")
     venv: Path | None = None
@@ -654,14 +661,15 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
         found, problem = coverage_environment_tuple(config)
         if problem is not None:
             return ParallelRequest(
-                active, workers, auto, dist, problem, False, True)
+                active, workers, auto, dist, problem, False, True,
+                not problem.startswith(_UNVERIFIABLE))
         if not coverage_pair_supported(*found):
             pytest_cov, coverage = found
             return ParallelRequest(
                 active, workers, auto, dist,
                 f"pytest-cov {pytest_cov}/coverage {coverage} is outside the "
                 f"supported range ({COVERAGE_SUPPORTED}); ptest runs serially",
-                False, True)
+                False, True, True)
     if _has_maxprocesses(tokens):
         return ParallelRequest(
             active, workers, auto, dist,
@@ -673,13 +681,15 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
             "your pytest config asks for 1 worker", False, True)
     version, problem = xdist_environment_version(config)
     if problem is not None:
-        return ParallelRequest(active, workers, auto, dist, problem, False, True)
+        return ParallelRequest(
+            active, workers, auto, dist, problem, False, True,
+            not problem.startswith(_UNVERIFIABLE))
     if not xdist_supported(version):
         return ParallelRequest(
             active, workers, auto, dist,
             f"pytest-xdist {version} is not qualified (ptest supports "
             f"{XDIST_SUPPORTED}); ptest runs serially",
-            False, True)
+            False, True, True)
     if _has_serial_spelling(runner_args):
         cfg = _cfg(project)
         return ParallelRequest(

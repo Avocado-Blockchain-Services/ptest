@@ -3259,8 +3259,13 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
     return ("join", joined, False)
 
 
+class _SetupAlreadyCurrent(Exception):
+    """A setup-only run found setup current once its admission was granted."""
+
+
 def execute(domain: C.DomainPaths, config: C.Config,
-            request: C.RunRequest) -> C.RunResult:
+            request: C.RunRequest, *,
+            _setup_recheck: Callable[[], bool] | None = None) -> C.RunResult:
     """Run one admitted command and return its typed outcome."""
     if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.Config):
         raise TypeError("execute requires DomainPaths and Config")
@@ -3437,6 +3442,26 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 args=tuple(tier_config.runner.args) + ("-v",)))
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
+    presetup_ran = False
+    if (tier is not None and tier.environment and tier.active
+            and config.setup is not None and not request.no_setup
+            and not request.setup_only
+            and _required_setup_state(config, checkout, domain) is not None):
+        # The serial fallback comes from an environment the declared setup
+        # may change (first run in a fresh checkout): set up first, then
+        # decide parallelism, so the grant is never resized afterwards.
+        setup_result = run_setup_only(
+            domain, config, queue_timeout_s=request.queue_timeout_s,
+            fixture_domain=request.fixture_domain)
+        if setup_result is not None:
+            if setup_result.status is not C.Status.PASSED:
+                if setup_result.exit_code != 130:
+                    progress.emit(progress.format_setup_failed(
+                        exit_code=setup_result.runner_exit_code),
+                        quiet=request.quiet)
+                return setup_result
+            presetup_ran = True
+        tier = executability.parallel_request(tier_config)
     # A non-native runner reserves the whole machine unless ptest can bound
     # it: today only Vitest 3+ with statically known worker settings. The
     # decision is made once, on the same effective args the adapter binds,
@@ -3625,6 +3650,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command,
                     signals.number, time.monotonic() - enqueued_at)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
+        if _setup_recheck is not None and _setup_recheck():
+            # Another run finished the same setup while this one queued.
+            scheduler.cancel_pending(domain, ticket, owner)
+            raise _SetupAlreadyCurrent
         if native_runner or vitest_candidate:
             # The queue can outlive edits to the command, resource locks, or
             # project identity. Never launch the previously resolved config
@@ -3813,7 +3842,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     "unknown-input",
                     "required pytest content identity is unavailable")
             invalidation = _source_invalidation(input_before, gate_snapshot)
-            if (invalidation is not None and setup_prepared is not None
+            if (invalidation is not None
+                    and (setup_prepared is not None or presetup_ran)
                     and invalidation.code == "changed-during-run"
                     and _changed_path_classes(input_before, gate_snapshot)
                     == ("ignored",)):
@@ -4442,11 +4472,16 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
             config.runner, kind=C.RunnerKind.COMMAND,
             launcher=tuple(config.setup.argv), args=(), full_args=()),
         setup=None)
-    result = execute(
-        domain, setup_config,
-        C.RunRequest(mode=C.Mode.SCOPED, argv=(),
-                     queue_timeout_s=queue_timeout_s,
-                     fixture_domain=fixture_domain, setup_only=True))
+    try:
+        result = execute(
+            domain, setup_config,
+            C.RunRequest(mode=C.Mode.SCOPED, argv=(),
+                         queue_timeout_s=queue_timeout_s,
+                         fixture_domain=fixture_domain, setup_only=True),
+            _setup_recheck=lambda: _required_setup_state(
+                config, checkout, domain) is None)
+    except _SetupAlreadyCurrent:
+        return None
     if result.status is C.Status.PASSED:
         setup_reason = _finish_setup(domain, config, checkout, before)
         if setup_reason is not None:
