@@ -680,8 +680,9 @@ def test_coverage_gate_line_is_owed_after_a_plain_full_run(case, capsys):
     on a project that declares coverage names the owed coverage gate."""
     request = C.RunRequest(mode=C.Mode.FULL)
     err = _end_line(case, capsys, request, coverage_declared=True)
-    assert "coverage gate still owed: ptest --full --cov" in err
-    assert progress.COVERAGE_OWED == "coverage gate still owed: ptest --full --cov"
+    assert "coverage gate still owed before pushing to origin: ptest --full --cov" in err
+    assert progress.COVERAGE_OWED == (
+        "coverage gate still owed before pushing to origin: ptest --full --cov")
     assert "before handoff" not in err
     # No coverage declared, or `--cov` requested: nothing is owed.
     assert "coverage gate" not in _end_line(case, capsys, request)
@@ -741,3 +742,16 @@ def test_tier_follows_the_coverage_declaration(args, coverage_args, qualified):
                          coverage_requested=requested and bool(coverage_args))
         profile = pytest_adapter.qualified_profile(replace(config, runner=runner))
         assert (profile is not None) is qualified
+
+
+def test_full_without_cov_reports_coverage_owed_before_push(case, capsys):
+    """A14 / G7: a plain green `--full` on a coverage project names the
+    coverage gate as owed before pushing to origin, never claims it, and
+    never turns `--cov` on by itself."""
+    request = C.RunRequest(mode=C.Mode.FULL)
+    err = _end_line(case, capsys, request, coverage_declared=True)
+    owed = "coverage gate still owed before pushing to origin: ptest --full --cov"
+    assert owed in err
+    assert progress.COVERAGE_OWED == owed
+    assert err.replace(owed, "").count("coverage gate") == 0
+    assert request.coverage is False

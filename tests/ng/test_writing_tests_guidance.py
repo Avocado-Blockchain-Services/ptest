@@ -105,7 +105,7 @@ def test_agent_guide_keeps_the_coverage_gate_and_never_pads_coverage():
     assert "test semantics and the existing coverage gate" in flat
     assert "never add tests only to raise coverage" in flat
     assert "test inventory, coverage," not in flat
-    assert flat.index("scoped `ptest` command") < flat.index("one `ptest --full --cov` final gate")
+    assert flat.index("scoped `ptest` command") < flat.index("one `ptest --full` final gate")
 
 
 # -- barrier guide (verified, not edited) ------------------------------------

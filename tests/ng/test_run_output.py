@@ -953,7 +953,7 @@ def test_gate_hint_strings_replace_next_full():
     # Oracle: spec R29 (the hint strings are exact).
     assert progress.GATE_HINT == "gate at spec end"
     assert progress.GATE_HINT_NO_GATE == "gate at spec end (no gate recorded)"
-    assert progress.COVERAGE_OWED == "coverage gate still owed: ptest --full --cov"
+    assert progress.COVERAGE_OWED == "coverage gate still owed before pushing to origin: ptest --full --cov"
     assert not hasattr(progress, "NEXT_FULL")
     assert not hasattr(progress, "NEXT_FULL_COV")
     assert "NEXT_FULL" not in progress.__all__
@@ -1357,5 +1357,5 @@ def test_plain_full_run_on_a_coverage_project_only_adds_the_owed_line(case):
     lines = _normalised(full, root)
     assert "ptest: <project> · pytest · full suite" in lines
     (end,) = [line for line in lines if line.startswith("ptest: passed")]
-    assert end.endswith(" · coverage gate still owed: ptest --full --cov"), lines
+    assert end.endswith(" · coverage gate still owed before pushing to origin: ptest --full --cov"), lines
     assert "before handoff" not in err

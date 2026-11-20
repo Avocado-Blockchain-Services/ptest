@@ -188,7 +188,7 @@ def test_local_repair_guide_has_no_repo_internal_workflow():
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
     assert "run the scoped `ptest` command" in guide
-    assert "run one `ptest --full --cov` final gate" in guide
+    assert "run one `ptest --full` final gate" in guide
 
 
 def test_provider_skill_unsafe_parent_is_rejected_before_any_rules_write(tmp_path):
@@ -1413,8 +1413,8 @@ def test_current_skill_names_the_end_of_spec_gate():
 
     for provider in ("claude", "codex", "opencode", "gemini"):
         text = rules_module._provider_text(provider).decode("utf-8")
-        assert ("| `ptest --full --cov` | integrated gate, once at the end of "
-                "the spec or chain, by the orchestrator |") in text
+        assert ("| `ptest --full` | integrated gate, once at the end of "
+                "the spec or chain before a local merge, by the orchestrator |") in text
         assert "Never run `ptest --full` during a task" in text
         assert "once before handoff" not in text
 
@@ -1428,14 +1428,14 @@ def test_repository_guides_are_byte_identical_and_state_one_gate():
     assert docs == resource
     text = docs.decode("utf-8")
     flat = " ".join(text.split())
-    assert "| When the whole spec or chain is finished (the orchestrator, once) |" in text
+    assert "| When the whole spec or chain is finished, before merging into a local branch (the orchestrator, once) |" in text
     assert "Before handoff or merge" not in text
-    assert ("only the spec's one `ptest --full --cov` gate completes it; it runs "
+    assert ("only the spec's one `ptest --full` gate completes it; it runs "
             "once, at the end of the chain, by the orchestrator, never per task "
             "or handoff") in flat
     assert "Never run `ptest --full` during a task to clear a deferred count" in flat
     assert "chain owner runs one bare `ptest` at the chain tip" in flat
-    assert "| 0 | pass | Done; the spec's one `--full --cov` gate completes it. |" in text
+    assert "| 0 | pass | Done; the spec's one `--full` gate completes it (`--full --cov` before a push). |" in text
     assert "writes no result document and leaves any existing file at that path untouched" in flat
     assert "next: ptest --full" not in text
 
@@ -1464,3 +1464,45 @@ def test_rules_forbid_filtered_output_and_mid_run_checkout_changes():
         previous = rules_module._pre_quiet_tree_provider_text(provider)
         assert previous in rules_module._previous_skill_bytes(provider)
         assert b"while a run is going" not in previous
+
+
+def test_rules_apply_refreshes_a_073_skill_to_the_push_time_coverage_text(tmp_path):
+    """Oracle: G7 (user policy 2026-11-20) + upgrade path. A skill generated
+    by 0.7.3 is a known previous version, so `ptest rules --apply` rewrites
+    it to text that puts `--full --cov` before pushing to origin and
+    `--full` at the end of the spec."""
+    import ptest.agent_rules as rules_module
+
+    for provider in ("claude", "codex", "opencode", "gemini"):
+        previous = rules_module._pre_push_coverage_provider_text(provider)
+        assert previous in rules_module._previous_skill_bytes(provider)
+        assert previous != rules_module._provider_text(provider)
+        root = tmp_path / provider
+        root.mkdir()
+        target = root / rules_module._PROVIDER_SKILLS[provider]
+        target.parent.mkdir(parents=True)
+        target.write_bytes(previous)
+        result = apply(root, agents=(provider,))
+        assert result.changed is True, provider
+        text = target.read_bytes()
+        assert text == rules_module._provider_text(provider)
+        flat = text.decode("utf-8")
+        assert "| `ptest --full` | integrated gate, once at the end of the spec or chain before a local merge, by the orchestrator |" in flat
+        assert "| `ptest --full --cov` | once more before pushing to origin |" in flat
+        assert b"before pushing to origin" not in previous
+
+
+def test_guides_state_coverage_only_before_pushing_to_origin():
+    """Oracle: G7. Both guides and the agent guide put `--cov` at the push."""
+    import ptest.agent_rules as rules_module
+
+    guide = " ".join(rules_module._guide().decode("utf-8").split())
+    assert "before pushing to origin" in guide
+    assert "`ptest --full --cov`" in guide
+    assert "`coverage gate still owed before pushing to origin: ptest --full --cov`" in guide
+    assert "the spec's one `--full --cov` gate completes it" not in guide
+    resource = (Path(__file__).resolve().parent.parent.parent / "src" / "ptest"
+                / "resources" / "agent-guide.md").read_text(encoding="utf-8")
+    flat = " ".join(resource.split())
+    assert "before pushing to origin" in flat
+    assert "run one `ptest --full --cov` final gate" not in flat

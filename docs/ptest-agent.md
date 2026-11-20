@@ -12,10 +12,10 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 | Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |
 | One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |
 | All tests under one folder | `ptest --full <folder>` |
-| When the whole spec or chain is finished (the orchestrator, once) | bring the base branch in first, then `ptest --full --cov` (adds the project's coverage and its gate; never pass `--cov` while iterating); fix and rerun until green |
+| When the whole spec or chain is finished, before merging into a local branch (the orchestrator, once) | bring the base branch in first, then `ptest --full` (no `--cov`); fix and rerun until green. Before pushing to origin, once more: `ptest --full --cov` (adds the project's coverage and its gate; never pass `--cov` while iterating) |
 
-A scoped or changed green, dynamic or static, is iteration only; only the spec's one `ptest --full --cov` gate
-completes it; it runs once, at the end of the chain, by the orchestrator, never per task or handoff. Rerun it only after a change (`--again` forces one). Fast-forward
+A scoped or changed green, dynamic or static, is iteration only; only the spec's one `ptest --full` gate
+completes it; it runs once, at the end of the chain, by the orchestrator, never per task or handoff. Coverage waits for the push: `ptest --full --cov` runs once before pushing to origin. Rerun it only after a change (`--again` forces one). Fast-forward
 the green tip and never rerun for the merge (`already verified … in <checkout>`). Keep notes
 and reports outside the repo, or in declared gitignored outputs. Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal. In a worktree branched off another unmerged branch (a task off a feature branch), run `ptest --base <that branch>` (optionally plus `<folder>`) so the parent branch's changes stay out; `--base` main or dev there selects them all. Running a few files with `ptest <file>` never replaces bare `ptest` after an edit: only bare `ptest` finds the tests your change reaches that you did not name. Leave the checkout alone while a run is going: no edits, `git stash`, `checkout`, `reset`, `pull`, `merge` or rebase in that worktree until the end line prints; a run during which files changed proves nothing, even if they were changed back before it ended, so do side comparisons in another worktree.
 
@@ -45,7 +45,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 | `· gate at spec end` / `· gate at spec end (no gate recorded)` | the one integrated gate runs at the end of the spec or chain; the second form means no gate has been recorded yet | Keep iterating with `ptest`; the orchestrator runs the gate once. |
 | `full suite (<reason>)` | this iteration run had to run everything; nothing to do | Nothing; it already ran the whole suite. |
 | `no tests needed · deferred N (<reason>)` | a conditional check found nothing to run; the runner was not launched (exit 0) | Nothing; the deferred tests run at the spec's gate. |
-| `coverage gate still owed: ptest --full --cov` / `coverage not configured …` | a full run passed without `--cov`, so the project's coverage gate is still to do / `--cov` had nothing to add there, so the run went ahead without it | Run the named command once at the end of the spec / nothing. |
+| `coverage gate still owed before pushing to origin: ptest --full --cov` / `coverage not configured …` | a full run passed without `--cov`, so the project's coverage gate is still to do / `--cov` had nothing to add there, so the run went ahead without it | Run the named command once before pushing to origin / nothing. |
 | `ptest: selection gate: ran N previously deferred tests · F failed · O observers learned` | a full run ran tests that earlier iteration runs had deferred and reports what it learned | Fix any failures; nothing else. |
 | `ptest: -v fingerprint: unchanged · K observers kept deferred` / `changed · K observers promoted` / `absent (<reason>) · treated as changed · K observers promoted` | the declared `ambient_fingerprint` output compared, per observer, with the output digest recorded by the run of its chosen record (every recorded run stores one, not only gates) | Nothing; it is detail for `-v`. |
 | `ptest: selection audit: N failing tests would not have been selected — they now run whenever a change statically reaches them` | a full run pinned failing tests to static reach | Nothing. |
@@ -67,7 +67,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 
 | Code | Meaning | Action |
 |---|---|---|
-| 0 | pass | Done; the spec's one `--full --cov` gate completes it. |
+| 0 | pass | Done; the spec's one `--full` gate completes it (`--full --cov` before a push). |
 | 1 | test failure | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | 2 | usage or config error | Fix the command or config. |
 | 70 | incomplete: ptest could not prove the result | Rerun once alone; report it if it repeats. |

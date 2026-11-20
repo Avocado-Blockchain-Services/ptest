@@ -200,7 +200,7 @@ GATE_HINT = "gate at spec end"
 #: The same hint when no usable gate marker is recorded yet.
 GATE_HINT_NO_GATE = "gate at spec end (no gate recorded)"
 #: A green plain ``--full`` on a project that measures coverage at the gate.
-COVERAGE_OWED = "coverage gate still owed: ptest --full --cov"
+COVERAGE_OWED = "coverage gate still owed before pushing to origin: ptest --full --cov"
 #: End-line hint after any changed-mode failure.
 NEXT_FIX = "fix the code under test, then rerun ptest"
 

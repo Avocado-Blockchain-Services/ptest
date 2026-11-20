@@ -117,7 +117,7 @@ ptest --full        # once, at the end of the spec or chain
 Bare `ptest` runs the tests your change reaches:
 changes since the last green run (or, before the first green run, since your
 branch left the default branch). No baseline or coverage step is needed.
-Run `ptest --full --cov` once, at the end of the spec or chain.
+Run `ptest --full` once, at the end of the spec or chain, before merging into a local branch. Run `ptest --full --cov` once, before pushing to origin.
 
 At the end of the spec or chain, before merging, bring the base branch into your branch, run `ptest --full`,
 fix and rerun until it is green, then fast-forward the base branch. For pytest
@@ -172,7 +172,8 @@ Always run ptest from the repository root.
 | The changed tests under one folder only | `ptest api/tests` |
 | One file or one test — always runs it | `ptest api/tests/test_billing.py` · `ptest api/tests/test_billing.py::test_tax` |
 | Every test under one folder | `ptest --full api/tests` |
-| The integrated gate, once at the end of the spec or chain | `ptest --full --cov` |
+| The integrated gate, once at the end of the spec or chain | `ptest --full` |
+| The coverage gate, once before pushing to origin | `ptest --full --cov` |
 
 Any path routes to the nearest `.ptest.toml`, so every sub-project works the
 same way: `ptest web/src`, `ptest --full launchpad`, `ptest server/tests/unit`.
@@ -189,7 +190,7 @@ coverage_args = ["--cov", "--cov-report", "term"]
 ```
 
 `--cov` adds them to one run, with the project's `fail_under` gate on a full
-run: `ptest --full --cov` is the gate, run once at the end of the spec or chain. `ptest` and `ptest <path>`
+run: `ptest --full --cov` is the coverage gate, run once before pushing to origin. `ptest` and `ptest <path>`
 never measure coverage unless you pass `--cov`; a partial run with `--cov`
 reports coverage but never applies the whole-suite gate. Only pytest-cov
 options are accepted there (`--cov`, `--cov-report`, `--cov-config`,
@@ -414,7 +415,7 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | `deferred N (<reason>)` · `nothing to run now` · `no tests needed` | the change may reach N tests this iteration run did not run; they stay deferred until the gate runs them, so never run `ptest --full` during a task to clear the count |
 | `gate at spec end` / `gate at spec end (no gate recorded)` | the one gate runs once, at the end of the spec or chain |
 | `full suite (<reason>)` | this iteration run had to run everything |
-| `coverage gate still owed: ptest --full --cov` | the full run passed without `--cov`; run it once at the end of the spec or chain |
+| `coverage gate still owed before pushing to origin: ptest --full --cov` | the full run passed without `--cov`; run it once before pushing to origin |
 | `selection gate: ran N previously deferred tests · F failed · O observers learned` | a full run ran tests earlier iteration runs deferred |
 | `coverage not configured — add [runner] coverage_args to …` | `--cov` had nothing to add there; the run went ahead without coverage |
 | `incomplete (exit 70)` + reason | ptest could not prove the result; rerun once, report if it repeats |
