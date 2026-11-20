@@ -313,8 +313,21 @@ def test_no_baseline_recorded_names_undeclared_ignored_files(case):
     result = _result(case, input_before=dirty, input_after=dirty)
     assert progress.format_baseline_note(result) == (
         "ptest: no baseline recorded: gitignored files count as test "
-        "inputs: .env (+2 more) · run ptest doctor --fix or declare them "
-        "in [selection] non_input_outputs or ignored_inputs")
+        "inputs: .env (+2 more) · until fixed, --full always reruns and "
+        "other checkouts cannot reuse this green · fix: ptest doctor --fix "
+        "or declare them in [selection] non_input_outputs")
+
+
+def test_no_baseline_ignored_note_never_suggests_ignored_inputs(case):
+    """0.7.4 G2/A13: the cost and the fix share the one line, and the fix
+    names non_input_outputs (ignored_inputs is refused for .env symlinks)."""
+    dirty = case.snapshot(clean=False, changes=(
+        C.Change(old=None, new=".env", kind="ignored"),))
+    note = progress.format_baseline_note(
+        _result(case, input_before=dirty, input_after=dirty))
+    assert "\n" not in note
+    assert "cannot reuse this green" in note
+    assert "non_input_outputs" in note and "ignored_inputs" not in note
 
 
 def test_no_baseline_recorded_real_changes_stay_uncommitted(case):

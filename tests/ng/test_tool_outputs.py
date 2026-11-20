@@ -356,7 +356,9 @@ def test_the_full_gate_reason_names_doctor_fix():
 def test_the_baseline_note_names_doctor_fix():
     before = C.InputSnapshot(digest="11" * 32, compatibility="22" * 32, head="a" * 40,
                              clean=False, changes=(C.Change(old=None, new=".env", kind="ignored"),))
-    assert "run ptest doctor --fix" in progress._unclean_detail(before, before)
+    detail = progress._unclean_detail(before, before)
+    assert "fix: ptest doctor --fix" in detail
+    assert "non_input_outputs" in detail and "ignored_inputs" not in detail
 
 
 def test_the_policy_digest_is_unchanged_by_builtins():

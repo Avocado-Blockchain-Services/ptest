@@ -183,7 +183,8 @@ def test_edit_function_body_runs_only_its_tests(recorded, case):
     result, err = _changed(case, domain, root)
 
     assert result.code == 0, err[-2000:]
-    assert "(dynamic · 1 function changed)" in err
+    assert "(dynamic · 1 function changed since recorded runs, newest " in err
+    assert ": pkg/core.py · last gate " in err
     # Node-level reach through recorded calls: the direct test plus the
     # transitive callers (helpers.helper_alpha, checked() by name). The
     # other four tests stay out; same-file test_beta is deselected.
@@ -198,7 +199,8 @@ def test_edit_constant_runs_referencing_tests(recorded, case):
     result, err = _changed(case, domain, root)
 
     assert result.code == 0, err[-2000:]
-    assert "(dynamic · 1 name changed)" in err
+    assert "(dynamic · 1 name changed since recorded runs, newest " in err
+    assert " · last gate " in err
     # Only the direct reader is selected; the getattr reader (test_glimit)
     # is the R2 blind spot the self-audit exists for (case 7).
     assert _markers(root) == {"limit"}

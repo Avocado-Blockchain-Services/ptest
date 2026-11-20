@@ -51,6 +51,9 @@ class Impact:
     reached: int = 0
     units: tuple[str, ...] = ()
     details: tuple[str, ...] = ()
+    # What a dynamic plan was measured against (0.7.4 G4), shown on the
+    # non-verbose changed line.
+    reference: str = ""
     selection: C.SelectionReport | None = field(
         default=None, compare=False, repr=False)
     # RunRequest.conditional entries: (node id, expected fingerprint | None).

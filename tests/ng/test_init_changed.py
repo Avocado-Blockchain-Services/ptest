@@ -94,7 +94,8 @@ def test_repository_guide_default_loop_is_changed():
             "never pass `--cov` while iterating) |") in guide
     lowered = guide.lower()
     assert "no baseline or coverage needed" not in lowered
-    assert "baseline" not in lowered
+    # 0.7.4 G3: the one literal output line that says it.
+    assert "baseline" not in lowered.replace("recorded no baseline", "")
     head, _, rest = lowered.partition("## writing tests")
     _, _, tail = rest.partition("## reporting")
     assert rest and tail

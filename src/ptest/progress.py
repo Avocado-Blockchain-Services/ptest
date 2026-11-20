@@ -430,17 +430,64 @@ def explain_changed_full_reason(reason: C.Reason | None, *,
     return "a full run is required"
 
 
+def ignored_input_paths(before: C.InputSnapshot,
+                        after: C.InputSnapshot) -> list[str] | None:
+    """Undeclared gitignored paths when they alone made the tree unclean.
+
+    None when there are no changes or any change is something else (that
+    stays "uncommitted changes"). Paths only, never file content.
+    """
+    changes = [*before.changes, *after.changes]
+    if not changes or any(change.kind != "ignored" for change in changes):
+        return None
+    return list(dict.fromkeys(change.new or change.old for change in changes))
+
+
+#: Why a refused baseline matters, and how to end the refusal. One line with
+#: the reason so nobody has to rerun to learn it (0.7.4 G2).
+BASELINE_REFUSED_COST = ("until fixed, --full always reruns and other "
+                         "checkouts cannot reuse this green")
+BASELINE_REFUSED_FIX = ("fix: ptest doctor --fix or declare them in "
+                        "[selection] non_input_outputs")
+#: The short fix of the later "last gate" line.
+LAST_GATE_FIX = "fix: ptest doctor --fix"
+
+
+def ignored_inputs_reason(first: str, total: int) -> str:
+    """The "gitignored files count as test inputs" reason text."""
+    more = f" (+{total - 1} more)" if total > 1 else ""
+    return (f"gitignored files count as test inputs: "
+            f"{render.terminal_text(first)}{more}")
+
+
 def _unclean_detail(before: C.InputSnapshot, after: C.InputSnapshot) -> str:
     """Name undeclared gitignored inputs when they alone made the tree
     unclean; any other change stays "uncommitted changes"."""
-    changes = [*before.changes, *after.changes]
-    if not changes or any(change.kind != "ignored" for change in changes):
+    paths = ignored_input_paths(before, after)
+    if paths is None:
         return "uncommitted changes"
-    paths = list(dict.fromkeys(change.new or change.old for change in changes))
-    more = f" (+{len(paths) - 1} more)" if len(paths) > 1 else ""
-    return (f"gitignored files count as test inputs: "
-            f"{render.terminal_text(paths[0])}{more} · run ptest doctor --fix "
-            f"or declare them in [selection] non_input_outputs or ignored_inputs")
+    return (f"{ignored_inputs_reason(paths[0], len(paths))} · "
+            f"{BASELINE_REFUSED_COST} · {BASELINE_REFUSED_FIX}")
+
+
+def format_age(seconds: float | None) -> str:
+    """Coarse age for status lines: ``40s``, ``12m``, ``5h``, ``3d``."""
+    try:
+        value = max(0, int(float(seconds)))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return "0s"
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if value >= size:
+            return f"{value // size}{unit}"
+    return f"{value}s"
+
+
+def format_last_gate_refusal(commit: str, age_s: float, paths: list[str],
+                             total: int, *, color: bool = False) -> str:
+    """The line later runs print while the last gate recorded no baseline."""
+    return (f"{_prefix(color=color)} last gate at {render.terminal_text(commit[:12])} "
+            f"({format_age(age_s)} ago) recorded no baseline: "
+            f"{ignored_inputs_reason(paths[0], total)} · {LAST_GATE_FIX}")
 
 
 def _no_baseline_detail(result: C.RunResult) -> str:
@@ -597,8 +644,11 @@ def format_workers_cap(workers: int, project_workers: int) -> str:
             f"so plain `ptest` needs no --workers")
 
 
-def summarize_units(units) -> str:
-    """Join changed-unit counts in design 2.8 order for the start line."""
+def summarize_units(units, reference: str = "") -> str:
+    """Join changed-unit counts in design 2.8 order for the start line.
+
+    ``reference`` (0.7.4 G4) says what the counts were measured against.
+    """
     words = (("function", "function", " changed"), ("name", "name", " changed"),
              ("module", "module", " changed"),
              ("data", "data file", " changed"),
@@ -613,7 +663,8 @@ def summarize_units(units) -> str:
         count = counts.get(kind, 0)
         if count:
             parts.append(f"{C.plural(count, word)}{suffix}")
-    return ", ".join(parts) if parts else "dependencies changed"
+    text = ", ".join(parts) if parts else "dependencies changed"
+    return f"{text} {reference}" if reference else text
 
 
 def _format_store_bytes(size: int) -> str:
@@ -702,7 +753,8 @@ __all__ = [
     "format_child_unchanged", "format_child_skip_inputs",
     "format_skipped_children", "format_joined_full_run",
     "explain_changed_full_reason",
-    "format_baseline_note",
+    "format_baseline_note", "format_last_gate_refusal", "format_age",
+    "ignored_input_paths",
     "format_setup_start", "format_setup_done", "format_setup_failed",
     "format_setup_run_start", "format_setup_run_done",
     "format_end", "format_timing", "holder_label", "emit",

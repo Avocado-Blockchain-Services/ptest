@@ -411,6 +411,45 @@ def _selection_argv_files(request: C.RunRequest) -> tuple[str, ...]:
     return tuple(files)
 
 
+def _gate_refusal(plan: C.Plan, status: C.Status,
+                  input_before: C.InputSnapshot | None,
+                  input_after: C.InputSnapshot | None):
+    """``(refusal, clear)`` the gate's selection transaction records.
+
+    A passing full run that only undeclared gitignored paths kept from
+    publishing a baseline refuses (up to three paths and the total, never
+    content); a passing full run with a clean tree published one and
+    clears an older refusal. Everything else leaves the record alone.
+    """
+    from . import selection_store
+    if (plan.execution != "full" or status is not C.Status.PASSED
+            or input_before is None or input_after is None
+            or input_before.digest != input_after.digest):
+        return None, False
+    if input_before.clean and input_after.clean:
+        return None, True
+    paths = progress.ignored_input_paths(input_before, input_after)
+    if not paths:
+        return None, False
+    return selection_store.GateRefusal(
+        code="unknown-input", paths=tuple(paths[:3]), total=len(paths)), False
+
+
+def _emit_last_gate_refusal(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                            request: C.RunRequest) -> None:
+    """Remind later runs of the project that its last gate recorded no
+    baseline (0.7.4 G3). Never raises, never changes the run."""
+    if request.setup_only or request.quiet:
+        return
+    try:
+        line = _selection_engine().gate_refusal_line(
+            domain, checkout.project_id, color=sys.stderr.isatty())
+    except Exception:
+        return
+    if line is not None:
+        progress.emit(line, quiet=request.quiet)
+
+
 def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                          checkout: C.CheckoutIdentity,
                          request: C.RunRequest, plan: C.Plan,
@@ -420,7 +459,8 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                          consumed_report: bool, report_reason,
                          cancelled: bool, guard_problem,
                          setup_failed: bool,
-                         fingerprint: str | None = None
+                         fingerprint: str | None = None,
+                         status: C.Status | None = None
                          ) -> C.SelectionGateReport | None:
     """Ingest one native pytest attempt into the selection store.
 
@@ -440,6 +480,8 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
                                               input_after) is None)
         argv_files = (None if plan.execution == "full"
                       else _selection_argv_files(request))
+        refusal, clear_refusal = _gate_refusal(
+            plan, status, input_before, input_after)
         return engine.after_run(
             domain=domain, config=config, project_id=checkout.project_id,
             run_id=run_id, report_path=report_binding.path,
@@ -450,7 +492,8 @@ def _selection_after_run(domain: C.DomainPaths, config: C.Config,
             guard_failed=guard_problem is not None,
             setup_failed=bool(setup_failed), argv_files=argv_files,
             verbose=bool(request.verbose), quiet=bool(request.quiet),
-            fingerprint=fingerprint)
+            fingerprint=fingerprint, refusal=refusal,
+            clear_refusal=clear_refusal)
     except Exception:
         return None
 
@@ -3526,6 +3569,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
     _emit_start(checkout=checkout, config=config, request=request,
                 plan=plan, workers=requested_slots,
                 snapshot=planning_snapshot, history_view=history_view)
+    _emit_last_gate_refusal(domain, checkout, request)
 
     def _finish(result: C.RunResult) -> C.RunResult:
         if vitest_candidate:
@@ -4353,7 +4397,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     or cancelled_handoff,
                     guard_problem=guard_problem,
                     setup_failed=setup_failed,
-                    fingerprint=ambient.digest if ambient.ran else None)
+                    fingerprint=ambient.digest if ambient.ran else None,
+                    status=result.status)
 
         # Every real advanced attempt is a private history event, including a
         # native failure or a refused/malformed report. Promotion is possible

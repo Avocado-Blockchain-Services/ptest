@@ -456,6 +456,37 @@ class _PlanFacts:
     learned: int
     since_count: int
     gate_age: float | None
+    gate_commit: str | None = None
+
+
+_REFERENCE_MODULES = 3
+
+
+def _reference_text(units, *, newest_age, gate_commit, gate_age) -> str:
+    """What a dynamic plan was measured against (0.7.4 G4), one segment.
+
+    Names the newest recorded run, up to three changed modules (paths, the
+    function units' files first by recorded reach) and the last gate.
+    """
+    modules = list(dict.fromkeys(
+        getattr(unit, "label", "").split("::", 1)[0]
+        for unit in units or ()
+        if getattr(unit, "kind", None) in ("function", "module")
+        and getattr(unit, "label", "")))
+    shown = ", ".join(render.terminal_text(path)
+                      for path in modules[:_REFERENCE_MODULES])
+    if len(modules) > _REFERENCE_MODULES:
+        shown += f", +{len(modules) - _REFERENCE_MODULES} more"
+    text = "since recorded runs"
+    if isinstance(newest_age, (int, float)) \
+            and not isinstance(newest_age, bool):
+        text += f", newest {progress.format_age(newest_age)} ago"
+    if shown:
+        text += f": {shown}"
+    if gate_age is None or not isinstance(gate_commit, str):
+        return f"{text} · no gate recorded"
+    return (f"{text} · last gate {render.terminal_text(gate_commit[:12])} "
+            f"{progress.format_age(gate_age)} ago")
 
 
 def _codes_text(counts: dict, order) -> str:
@@ -848,7 +879,8 @@ def _refine_with_store(store, key: bytes, top, project_root,
         age = max(0.0, time.time() - stamp) \
             if isinstance(stamp, (int, float)) else 0.0
     facts = _PlanFacts(declared=declared, learned=learned,
-                       since_count=len(since), gate_age=age)
+                       since_count=len(since), gate_age=age,
+                       gate_commit=getattr(gate, "commit", None))
     return _decision_impact(static, decision, meta, snapshot=snapshot,
                             observed=frozenset(observers),
                             gate_recorded=gate_recorded, facts=facts)
@@ -901,6 +933,14 @@ def _decision_impact(static, decision, meta, *, snapshot=None,
         units=tuple(getattr(decision, "units", ()) or ()), details=details,
         static_reason="", reason="", selection=report, decision=decision,
         observed=frozenset(observed))
+    if facts is not None:
+        newest = getattr(meta, "newest_recorded_at", None)
+        common["reference"] = _reference_text(
+            getattr(decision, "units", ()),
+            newest_age=(max(0.0, time.time() - newest)
+                        if isinstance(newest, (int, float))
+                        and not isinstance(newest, bool) else None),
+            gate_commit=facts.gate_commit, gate_age=facts.gate_age)
     if tally.run_now > 0:
         return _replace(static, kind="selected", files=files, deselect=kept,
                         tests=tally.run_now, conditional=tuple(conditional),
@@ -1160,6 +1200,31 @@ def cleanup(report_path) -> None:
         pass
 
 
+# --- last gate refusal line (0.7.4 G3) ---------------------------------------
+
+def gate_refusal_line(domain, project_id, *, now=None, color=False):
+    """The line a later run prints while the project's last gate recorded
+    no baseline, or None. Reads the project's store without creating it;
+    a missing, unreadable or tampered record gives None. Never raises."""
+    try:
+        store = _open_store(domain, project_id, create=False)
+        if store is None:
+            return None
+        try:
+            record = store.read_refusal()
+        finally:
+            _close_quietly(store)
+        if record is None:
+            return None
+        age = max(0.0, (time.time() if now is None else now)
+                  - record.recorded_at)
+        return progress.format_last_gate_refusal(
+            record.commit, age, list(record.paths), record.total,
+            color=color)
+    except Exception:
+        return None
+
+
 # --- after_run (operations seam) ----------------------------------------------
 
 def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
@@ -1167,7 +1232,8 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
               execution: str, valid_handoff: bool, unchanged_inputs: bool,
               cancelled: bool, guard_failed: bool, setup_failed: bool,
               argv_files, verbose: bool = False,
-              quiet: bool = False, fingerprint=None):
+              quiet: bool = False, fingerprint=None, refusal=None,
+              clear_refusal: bool = False):
     """Ingest one attempt's dependency files into the selection store.
 
     Records are written only for a valid handoff of a consumed report
@@ -1178,7 +1244,9 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
     are gates: they learn observers and write the gate marker in the same
     transaction (R15, R27), and the gate report is returned (None for
     iteration runs and for anything not ingested). ``fingerprint`` is the
-    run's ambient fingerprint, recorded on the run row (R43). Prints the audit, gate and ``-v`` lines.
+    run's ambient fingerprint, recorded on the run row (R43). ``refusal``
+    (a ``selection_store.GateRefusal``) and ``clear_refusal`` ride the gate
+    marker's transaction (0.7.4 G3). Prints the audit, gate and ``-v`` lines.
     Never raises.
     """
     try:
@@ -1190,7 +1258,8 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
             unchanged_inputs=unchanged_inputs, cancelled=cancelled,
             guard_failed=guard_failed, setup_failed=setup_failed,
             argv_files=argv_files, verbose=verbose, quiet=quiet,
-            fingerprint=fingerprint)
+            fingerprint=fingerprint, refusal=refusal,
+            clear_refusal=clear_refusal)
     except Exception:
         return None
 
@@ -1198,7 +1267,8 @@ def after_run(*, domain, config: C.Config, project_id: str, run_id: str,
 def _after_run(*, domain, config, project_id, run_id, report_path,
                project_root, expected_workers, execution, valid_handoff,
                unchanged_inputs, cancelled, guard_failed, setup_failed,
-               argv_files, verbose, quiet, fingerprint=None):
+               argv_files, verbose, quiet, fingerprint=None, refusal=None,
+               clear_refusal=False):
     try:
         ingest = _ingest()
     except Exception:
@@ -1244,7 +1314,8 @@ def _after_run(*, domain, config, project_id, run_id, report_path,
     if ingestible:
         return _ingest_run(run, domain, config, project_id, run_id, key,
                            project_root, execution, expected_workers,
-                           verbose, quiet, fingerprint)
+                           verbose, quiet, fingerprint, refusal,
+                           clear_refusal)
     _fallbacks(run, domain, config, project_id, argv_files,
                verbose, quiet,
                reason=_not_recorded_reason(
@@ -1433,7 +1504,8 @@ def _gate_marker(key, project_root):
 
 def _ingest_run(run, domain, config, project_id, run_id, key,
                 project_root, execution, expected_workers, verbose,
-                quiet, fingerprint=None):
+                quiet, fingerprint=None, refusal=None,
+                clear_refusal=False):
     """Audit, then record one run in a single store transaction.
 
     Returns the gate report for a full-mode (gate) ingest that landed,
@@ -1481,7 +1553,9 @@ def _ingest_run(run, domain, config, project_id, run_id, key,
                 run, run_id=run_id, recorded_at=time.time(),
                 compatibility=compatibility, digests=digests, full=gate,
                 fingerprint=_valid_fingerprint(fingerprint),
-                observers=rows or None, gate=marker, clear_gate=clear)
+                observers=rows or None, gate=marker, clear_gate=clear,
+                refusal=refusal if gate else None,
+                clear_refusal=bool(clear_refusal) and gate)
         except Exception:
             if verbose:
                 progress.emit(progress.format_selection_not_recorded(

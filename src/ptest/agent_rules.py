@@ -1046,7 +1046,7 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
-    # 262a1a6 (0.7.3): guide before coverage moved to the push to origin (G7).
+    # 262a1a6 (0.7.3): guide before 0.7.4 (coverage at push, dynamic reference, last-gate rows).
     "b7c666d8a87aab5bdb15ed55954ec45ee5ef2ae469323a0a9dc77702453c115e",
     # 2c1be1d (0.7.0-0.7.2): guide before the whole-output and quiet-checkout rules.
     "d100a12a27f0324ad734754526373989b34140cf9b052b40724078c473bde514",

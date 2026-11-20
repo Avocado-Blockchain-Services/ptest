@@ -3347,7 +3347,9 @@ def _impact_note(impact, label: str, *, reference: str) -> str:
     engine = getattr(impact, "engine", "")
     if engine == "dynamic":
         if impact.kind == "selected":
-            summary = progress.summarize_units(getattr(impact, "units", ()))
+            summary = progress.summarize_units(
+                getattr(impact, "units", ()),
+                getattr(impact, "reference", ""))
             files = tuple(getattr(impact, "files", ()) or ())
             return (f"{head} → {C.plural(getattr(impact, 'tests', 0), 'test')} "
                     f"in {len(files)} of "

@@ -102,7 +102,8 @@ from .contracts import (  # noqa: E402  re-exported for callers
 __all__ = [
     "DepVocabulary", "ContextDeps", "RunBaseline", "NodeRecord",
     "FixtureRecord", "DependencySnapshot", "GateMarker", "SelectionStoreMeta",
-    "RecordedNode", "RunDependencies", "SelectionStore",
+    "RecordedNode", "RunDependencies", "SelectionStore", "GateRefusal",
+    "RefusalRecord",
     "SELECTION_STORE_MAX_BYTES", "SELECTION_STORE_TARGET_BYTES",
     "open_store", "remove_store",
 ]
@@ -625,6 +626,82 @@ def _read_gate(kv: Mapping[str, str]) -> GateMarker | None:
                       recorded_at=recorded_at)
 
 
+_REFUSAL_KEY = "last_gate_refusal"
+_REFUSAL_VERSION = 1
+# Reason codes a refusal may carry (a subset of C.REASON_CODES; the record
+# never introduces a code of its own).
+_REFUSAL_CODES = frozenset({"unknown-input"})
+_REFUSAL_PATHS_MAX = 3
+_REFUSAL_TOTAL_MAX = 10 ** 9
+_REFUSAL_BYTES_MAX = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class GateRefusal:
+    """Why a passing gate recorded no baseline (paths only, never content)."""
+
+    code: str
+    paths: tuple
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class RefusalRecord:
+    """A stored refusal with the gate commit and time it belongs to."""
+
+    code: str
+    paths: tuple
+    total: int
+    commit: str
+    recorded_at: float
+
+
+def _refusal_fields(code, paths, total):
+    """The validated path tuple, or None for any malformed field."""
+    if code not in _REFUSAL_CODES:
+        return None
+    if not isinstance(paths, (list, tuple)) \
+            or not 1 <= len(paths) <= _REFUSAL_PATHS_MAX:
+        return None
+    for path in paths:
+        # Printable only: escape bytes and bidi controls never enter the
+        # record, so they can never reach a terminal.
+        if not (C.selection_relpath_safe(path) and path.isprintable()):
+            return None
+    if (isinstance(total, bool) or not isinstance(total, int)
+            or not len(paths) <= total <= _REFUSAL_TOTAL_MAX):
+        return None
+    return tuple(paths)
+
+
+def _read_refusal(raw) -> RefusalRecord | None:
+    """The refusal record from its kv text; anything unusable is None."""
+    import json
+    import math
+    if not isinstance(raw, str) or len(raw) > _REFUSAL_BYTES_MAX:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("v")
+    if isinstance(version, bool) or version != _REFUSAL_VERSION \
+            or not isinstance(version, int):
+        return None
+    paths = _refusal_fields(data.get("code"), data.get("paths"),
+                            data.get("total"))
+    commit, stamp = data.get("commit"), data.get("at")
+    if (paths is None or not isinstance(commit, str)
+            or not _COMMIT.fullmatch(commit) or isinstance(stamp, bool)
+            or not isinstance(stamp, (int, float))
+            or not math.isfinite(stamp)):
+        return None
+    return RefusalRecord(code=data["code"], paths=paths, total=data["total"],
+                         commit=commit, recorded_at=float(stamp))
+
+
 @dataclass(frozen=True, slots=True)
 class _PlannedUpdate:
     run_id: str
@@ -644,6 +721,8 @@ class _PlannedUpdate:
     observers: dict = field(default_factory=dict)
     gate: object = None
     clear_gate: bool = False
+    refusal: GateRefusal | None = None
+    clear_refusal: bool = False
 
 
 class SelectionStore:
@@ -947,6 +1026,14 @@ class SelectionStore:
                 audit_misses=int(kv.get("audit_misses", "0") or "0"),
                 demoted=int(demoted), observers=int(observing))
 
+    def read_refusal(self) -> RefusalRecord | None:
+        """The stored baseline refusal, or None (absent or unusable)."""
+        with self._lock:
+            conn = self._guard()
+            row = conn.execute("SELECT value FROM kv WHERE key = ?",
+                               (_REFUSAL_KEY,)).fetchone()
+        return None if row is None else _read_refusal(row[0])
+
     # -- update ------------------------------------------------------------
 
     def update(self, run, *, run_id: str, recorded_at: float,
@@ -954,7 +1041,9 @@ class SelectionStore:
                full: bool, fingerprint: str | None = None,
                observers: Mapping[str, frozenset[str]] | None = None,
                gate: GateMarker | None = None,
-               clear_gate: bool = False) -> int:
+               clear_gate: bool = False,
+               refusal: GateRefusal | None = None,
+               clear_refusal: bool = False) -> int:
         """Record one run: one transaction replacing only the tests it ran.
 
         The run's rows are inserted under the ``(nodeid, run_id)`` key and
@@ -963,7 +1052,10 @@ class SelectionStore:
         ``observers`` (node id -> learned paths) in the ``observers``
         table and ``gate`` (or, with ``clear_gate`` or more dirty files
         than ``MAX_GREEN_FILES``, a cleared marker) in kv, all in this one
-        transaction: a rejected update writes none of them. Returns the
+        transaction: a rejected update writes none of them. ``refusal``
+        (stored only beside a marker, which supplies its commit and time)
+        records why this gate published no baseline; ``clear_refusal``, or
+        a cleared marker, deletes it. Returns the
         observer rows the store cap evicted in it.
 
         Never fails for size: unreferenced cache goes first, then surplus
@@ -979,7 +1071,8 @@ class SelectionStore:
                                     digests=digests, full=full,
                                     fingerprint=fingerprint,
                                     observers=observers, gate=gate,
-                                    clear_gate=clear_gate)
+                                    clear_gate=clear_gate, refusal=refusal,
+                                    clear_refusal=clear_refusal)
         with self._lock:
             conn = self._guard()
             try:
@@ -1015,7 +1108,8 @@ class SelectionStore:
 
     def _plan_update(self, run, *, run_id, recorded_at, compatibility,
                      digests, full, fingerprint=None, observers=None,
-                     gate=None, clear_gate=False) -> _PlannedUpdate:
+                     gate=None, clear_gate=False, refusal=None,
+                     clear_refusal=False) -> _PlannedUpdate:
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
             raise ValueError("run_id must be a 32-hex string")
         if isinstance(recorded_at, bool) or not isinstance(
@@ -1044,6 +1138,14 @@ class SelectionStore:
         clear_gate = self._check_gate(gate, clear_gate)
         if clear_gate:
             gate = None
+        if not isinstance(clear_refusal, bool):
+            raise ValueError("clear_refusal must be bool")
+        if refusal is not None:
+            if clear_refusal:
+                raise ValueError("refusal and clear_refusal are exclusive")
+            if (not isinstance(refusal, GateRefusal) or _refusal_fields(
+                    refusal.code, refusal.paths, refusal.total) is None):
+                raise ValueError("refusal must be a valid GateRefusal")
         try:
             vocabulary = run.vocabulary
             nodes = dict(run.nodes)
@@ -1113,7 +1215,8 @@ class SelectionStore:
             vocab_fixtures=vocab_fixtures, fixture_keys=fixture_keys,
             nodes=nodes, fixtures=fixtures, ambient=ambient, bad=bad,
             fingerprint=fingerprint, observers=learned, gate=gate,
-            clear_gate=clear_gate)
+            clear_gate=clear_gate, refusal=refusal,
+            clear_refusal=clear_refusal)
 
     @staticmethod
     def _check_observers(observers) -> dict[str, frozenset[str]]:
@@ -1463,6 +1566,20 @@ class SelectionStore:
             conn.execute(
                 "DELETE FROM kv WHERE key IN (%s)"
                 % ",".join("?" * len(_GATE_KEYS)), _GATE_KEYS)
+        refusal = planned.refusal
+        if refusal is not None and gate is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)",
+                (_REFUSAL_KEY, json.dumps(
+                    {"v": _REFUSAL_VERSION, "code": refusal.code,
+                     "paths": list(refusal.paths), "total": refusal.total,
+                     "commit": gate.commit, "at": float(gate.recorded_at)},
+                    ensure_ascii=True, separators=(",", ":"))))
+        elif planned.clear_refusal or planned.clear_gate \
+                or refusal is not None:
+            # A refusal without a marker has no commit to name; a cleared
+            # marker leaves nothing for it to describe.
+            conn.execute("DELETE FROM kv WHERE key = ?", (_REFUSAL_KEY,))
 
     def _prune_cache(self, conn: sqlite3.Connection) -> None:
         cutoff = time.time() - _CACHE_PRUNE_AFTER_S

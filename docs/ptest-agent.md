@@ -33,7 +33,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `p
 | Line | Meaning | What to do |
 |---|---|---|
 | `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
-| `changed: <path> (+N files) → T tests in F of M files (dynamic · …)` | dependency records selected the tests your change reaches | Nothing; this is the normal loop. |
+| `changed: <path> (+N files) → T tests in F of M files (dynamic · … since recorded runs, newest 3d ago: <modules> · last gate <sha12> 2h ago)` / `ptest: last gate at <sha12> (<age> ago) recorded no baseline: <reason> · fix: ptest doctor --fix` | dependency records selected the tests your change reaches, and the text after `dynamic ·` names what they were compared with (an old `newest` age means stale records, not a big change) / the project's last gate left a cost: `--full` always reruns and other checkouts cannot reuse that green | Nothing for the first; for the second run the fix it names (`ptest doctor --fix`, or declare the paths in `[selection] non_input_outputs`) until the line is gone. |
 | `changed: <path> (+N files) → N of M test files (static: <reason> · D direct · V via importers)` | the static fallback selected the tests your change reaches | Nothing; this is the normal loop. |
 | `changed → full suite: <reason>` | this run IS the full suite: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing extra; do not start `ptest --full` because of this line. |
 | `changed: <path> → vitest changed delegation` | that child delegated its changed set to vitest | Nothing. |
