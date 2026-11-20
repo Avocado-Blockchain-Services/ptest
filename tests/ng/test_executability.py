@@ -1531,3 +1531,21 @@ def test_addopts_source_names_ini_family_file(tmp_path, name, text):
     """addopts_source reports the deciding INI-family file (DET3)."""
     write_file(tmp_path / name, text)
     assert E.addopts_source(tmp_path) == name
+
+
+def test_after_setup_texts_never_promise_an_install(tmp_path, venv_stub):
+    """Review 5: after a setup that ran, absent dists get a truthful reason."""
+    _, problem = E.xdist_environment_version(_uv(tmp_path), after_setup=True)
+    assert problem == ("pytest-xdist is not installed in the project "
+                       "environment after setup; ptest runs serially")
+    found, problem = E.coverage_environment_tuple(_uv(tmp_path), after_setup=True)
+    assert found == (None, None)
+    assert problem == ("pytest-cov is not installed in the project "
+                       "environment after setup; ptest runs serially")
+    write_file(tmp_path / "pyproject.toml",
+               "[tool.pytest.ini_options]\naddopts = \"-n 4\"\n")
+    req = E.parallel_request(_uv(tmp_path), project=".", after_setup=True)
+    assert req.reason == problem.replace("pytest-cov", "pytest-xdist")
+    # Default text stays pinned for runs where setup did not run.
+    assert "until setup installs it" in E.parallel_request(
+        _uv(tmp_path), project=".").reason

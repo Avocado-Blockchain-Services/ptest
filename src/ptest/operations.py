@@ -3308,8 +3308,13 @@ class _SetupAlreadyCurrent(Exception):
 
 def execute(domain: C.DomainPaths, config: C.Config,
             request: C.RunRequest, *,
-            _setup_recheck: Callable[[], bool] | None = None) -> C.RunResult:
-    """Run one admitted command and return its typed outcome."""
+            _setup_recheck: Callable[[], bool] | None = None,
+            _defer_failure_end: bool = False) -> C.RunResult:
+    """Run one admitted command and return its typed outcome.
+
+    ``_defer_failure_end`` (pre-setup only) leaves a non-passing run's end
+    line to the caller, which builds its own result and prints it last.
+    """
     if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.Config):
         raise TypeError("execute requires DomainPaths and Config")
     if not isinstance(request, C.RunRequest):
@@ -3485,26 +3490,15 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 args=tuple(tier_config.runner.args) + ("-v",)))
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
-    presetup_ran = False
-    if (tier is not None and tier.environment and tier.active
-            and config.setup is not None and not request.no_setup
-            and not request.setup_only
-            and _required_setup_state(config, checkout, domain) is not None):
-        # The serial fallback comes from an environment the declared setup
-        # may change (first run in a fresh checkout): set up first, then
-        # decide parallelism, so the grant is never resized afterwards.
-        setup_result = run_setup_only(
-            domain, config, queue_timeout_s=request.queue_timeout_s,
-            fixture_domain=request.fixture_domain)
-        if setup_result is not None:
-            if setup_result.status is not C.Status.PASSED:
-                if setup_result.exit_code != 130:
-                    progress.emit(progress.format_setup_failed(
-                        exit_code=setup_result.runner_exit_code),
-                        quiet=request.quiet)
-                return setup_result
-            presetup_ran = True
-        tier = executability.parallel_request(tier_config)
+    # The serial fallback may come from an environment the declared setup
+    # changes (first run in a fresh checkout): set up first, then decide
+    # parallelism, so the grant is never resized afterwards. The setup runs
+    # inside the admission try, after any --full skip/join decision.
+    presetup_pending = (
+        tier is not None and tier.environment and tier.active
+        and config.setup is not None and not request.no_setup
+        and not request.setup_only
+        and _required_setup_state(config, checkout, domain) is not None)
     # A non-native runner reserves the whole machine unless ptest can bound
     # it: today only Vitest 3+ with statically known worker settings. The
     # decision is made once, on the same effective args the adapter binds,
@@ -3520,69 +3514,81 @@ def execute(domain: C.DomainPaths, config: C.Config,
     # scoped verdict never depends on coverage completeness. An advanced
     # selected run without that consumed proof stays serial, as does any
     # advanced run the tier does not admit.
-    tier_admits = tier is not None and tier.active and tier.reason is None
-    if tier_admits and (not advanced or plan.execution in ("full", "scoped")
-                        or support.parallel_identity):
-        if tier.auto:
-            requested_slots = scheduler.effective_limits(domain).max_slots
-        elif tier.workers is not None:
-            requested_slots = tier.workers
+    def _slot_decision(tier_: executability.ParallelRequest | None
+                       ) -> tuple[int, int, bool]:
+        tier_admits = tier_ is not None and tier_.active and tier_.reason is None
+        if tier_admits and (not advanced or plan.execution in ("full", "scoped")
+                            or support.parallel_identity):
+            if tier_.auto:
+                requested_slots = scheduler.effective_limits(domain).max_slots
+            elif tier_.workers is not None:
+                requested_slots = tier_.workers
+            else:
+                requested_slots = 1
+            project_slots = min(requested_slots, 64)
+            if request.workers is not None:
+                requested_slots = min(requested_slots, request.workers)
+            requested_slots = min(requested_slots, 64)
+        elif bounded_runner:
+            # ptest caps a bounded runner at its grant, so the request is its
+            # parallelism: an explicit project worker count, else half the
+            # machine (init's default workers=1 is not a choice), never more
+            # than --workers.
+            requested_slots = (config.runner.workers if config.runner.workers > 1
+                               else max(1, (scheduler.effective_limits(domain).max_slots or 2) // 2))
+            if vitest_bound.limit is not None:
+                # Never raise a ceiling the project set itself.
+                requested_slots = min(requested_slots, vitest_bound.limit)
+            project_slots = min(requested_slots, 64)
+            if request.workers is not None:
+                requested_slots = min(requested_slots, request.workers)
+            requested_slots = min(requested_slots, 64)
         else:
-            requested_slots = 1
-        project_slots = min(requested_slots, 64)
-        if request.workers is not None:
-            requested_slots = min(requested_slots, request.workers)
-        requested_slots = min(requested_slots, 64)
-    elif bounded_runner:
-        # ptest caps a bounded runner at its grant, so the request is its
-        # parallelism: an explicit project worker count, else half the
-        # machine (init's default workers=1 is not a choice), never more
-        # than --workers.
-        requested_slots = (config.runner.workers if config.runner.workers > 1
-                           else max(1, (scheduler.effective_limits(domain).max_slots or 2) // 2))
-        if vitest_bound.limit is not None:
-            # Never raise a ceiling the project set itself.
-            requested_slots = min(requested_slots, vitest_bound.limit)
-        project_slots = min(requested_slots, 64)
-        if request.workers is not None:
-            requested_slots = min(requested_slots, request.workers)
-        requested_slots = min(requested_slots, 64)
-    else:
-        requested_slots = 1 if (native_pytest and not advanced) else min(
-            config.runner.workers,
-            config.runner.workers if request.workers is None else request.workers,
-        )
-        project_slots = 1 if (native_pytest and not advanced) else config.runner.workers
-    needs_parallel_baseline = (
-        advanced and plan.execution == "selected" and not support.parallel_identity
-        and tier_admits)
-    if needs_parallel_baseline or (advanced and not tier_admits):
-        requested_slots = project_slots = 1
-    if request.workers is not None and requested_slots < project_slots:
-        # Make a caller's cap visible: the queue already shares the machine,
-        # so a lower --workers only slows this run down.
-        progress.emit(progress.format_workers_cap(requested_slots, project_slots),
-                      quiet=request.quiet)
-    command = _summary(config, plan, request, requested_slots)
+            requested_slots = 1 if (native_pytest and not advanced) else min(
+                config.runner.workers,
+                config.runner.workers if request.workers is None else request.workers,
+            )
+            project_slots = 1 if (native_pytest and not advanced) else config.runner.workers
+        needs_parallel_baseline = (
+            advanced and plan.execution == "selected" and not support.parallel_identity
+            and tier_admits)
+        if needs_parallel_baseline or (advanced and not tier_admits):
+            requested_slots = project_slots = 1
+        return requested_slots, project_slots, needs_parallel_baseline
+
+    requested_slots, project_slots, needs_parallel_baseline = _slot_decision(tier)
     started = _iso_now()
     run_mono = time.monotonic()
-    _emit_start(checkout=checkout, config=config, request=request,
-                plan=plan, workers=requested_slots,
-                snapshot=planning_snapshot, history_view=history_view)
-    _emit_last_gate_refusal(domain, checkout, request)
+
+    def _announce() -> C.CommandSummary:
+        if request.workers is not None and requested_slots < project_slots:
+            # Make a caller's cap visible: the queue already shares the machine,
+            # so a lower --workers only slows this run down.
+            progress.emit(progress.format_workers_cap(requested_slots, project_slots),
+                          quiet=request.quiet)
+        summary = _summary(config, plan, request, requested_slots)
+        _emit_start(checkout=checkout, config=config, request=request,
+                    plan=plan, workers=requested_slots,
+                    snapshot=planning_snapshot, history_view=history_view)
+        _emit_last_gate_refusal(domain, checkout, request)
+        return summary
+
+    # With a pre-setup owed, the start line waits for the final worker count.
+    command = None if presetup_pending else _announce()
 
     def _finish(result: C.RunResult) -> C.RunResult:
         if vitest_candidate:
             # Include failed launch, protocol, quiescence and export/finalize
             # early exits; none may leave an older green reusable.
             history._withdraw_verified(domain, checkout, result)
-        _emit_end(request, result, run_mono,
-                  baseline_note=_baseline_note(
-                      plan=plan, advanced=advanced, result=result,
-                      color=sys.stderr.isatty()),
-                  coverage_declared=bool(config.runner.coverage_args),
-                  reuse_config=(_config_label(config)
-                                if _reuse_only(config) else None))
+        if not (_defer_failure_end and result.status is not C.Status.PASSED):
+            _emit_end(request, result, run_mono,
+                      baseline_note=_baseline_note(
+                          plan=plan, advanced=advanced, result=result,
+                          color=sys.stderr.isatty()),
+                      coverage_declared=bool(config.runner.coverage_args),
+                      reuse_config=(_config_label(config)
+                                    if _reuse_only(config) else None))
         return result
 
     signals = _Signals()
@@ -3609,6 +3615,43 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 return _export(domain, checkout, request, gated)
             if action == "join":
                 return _finish(_export(domain, checkout, request, gated))
+        if presetup_pending:
+            setup_result = run_setup_only(
+                domain, config, queue_timeout_s=request.queue_timeout_s,
+                fixture_domain=request.fixture_domain,
+                _defer_failure_end=True)
+            tier = executability.parallel_request(tier_config, after_setup=True)
+            requested_slots, project_slots, needs_parallel_baseline = (
+                _slot_decision(tier))
+            command = _announce()
+            if setup_result is not None and setup_result.status is not C.Status.PASSED:
+                # Reported exactly like a setup failure inside the guard:
+                # setup-failed line, then the single end line, under the
+                # caller's request (so --result-json is written).
+                if setup_result.exit_code == 130:
+                    failed = _cancel_result(
+                        run_id, checkout, request, plan, command, 2,
+                        time.monotonic() - run_mono)
+                else:
+                    progress.emit(progress.format_setup_failed(
+                        exit_code=setup_result.runner_exit_code),
+                        quiet=request.quiet)
+                    setup_s = setup_result.timings.execution_s
+                    failed = _result(
+                        run_id=run_id, checkout=checkout, request=request,
+                        plan=plan, command=command, status=setup_result.status,
+                        phase="complete", started=started, runner_code=None,
+                        exit_code=setup_result.exit_code, origin="setup",
+                        reasons=setup_result.reasons,
+                        attempt=C.AttemptResult(
+                            attempt_id="a001", phase="setup",
+                            status=setup_result.status,
+                            raw_exit_code=setup_result.runner_exit_code,
+                            final_exit_code=setup_result.exit_code,
+                            source_valid=False, inventory_complete=False,
+                            timings=C.Timings(setup_s=setup_s)),
+                        queue_s=setup_result.timings.queue_s, setup_s=setup_s)
+                return _finish(_export(domain, checkout, request, failed))
         owner = platform.process_identity(os.getpid())
         if owner is None:
             raise _problem("ownership-uncertain", "caller identity cannot be verified")
@@ -3694,7 +3737,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command,
                     signals.number, time.monotonic() - enqueued_at)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
-        if _setup_recheck is not None and _setup_recheck():
+        try:
+            setup_current = _setup_recheck is not None and _setup_recheck()
+        except BaseException:
+            # The grant exists but no guard does: release it, never hold it.
+            scheduler.cancel_pending(domain, ticket, owner)
+            raise
+        if setup_current:
             # Another run finished the same setup while this one queued.
             scheduler.cancel_pending(domain, ticket, owner)
             raise _SetupAlreadyCurrent
@@ -3887,7 +3936,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     "required pytest content identity is unavailable")
             invalidation = _source_invalidation(input_before, gate_snapshot)
             if (invalidation is not None
-                    and (setup_prepared is not None or presetup_ran)
+                    and setup_prepared is not None
                     and invalidation.code == "changed-during-run"
                     and _changed_path_classes(input_before, gate_snapshot)
                     == ("ignored",)):
@@ -4490,7 +4539,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
 
 def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
                    queue_timeout_s: float,
-                   fixture_domain: Path | None = None) -> C.RunResult | None:
+                   fixture_domain: Path | None = None,
+                   _defer_failure_end: bool = False) -> C.RunResult | None:
     """Run the declared setup once, without running any tests.
 
     The setup executes as a literal exclusive command through
@@ -4524,7 +4574,8 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
                          queue_timeout_s=queue_timeout_s,
                          fixture_domain=fixture_domain, setup_only=True),
             _setup_recheck=lambda: _required_setup_state(
-                config, checkout, domain) is None)
+                config, checkout, domain) is None,
+            _defer_failure_end=_defer_failure_end)
     except _SetupAlreadyCurrent:
         return None
     if result.status is C.Status.PASSED:

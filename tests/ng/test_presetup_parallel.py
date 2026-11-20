@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import stat
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -170,24 +172,60 @@ def test_config_reasons_never_presetup(case, spy, addopts):
     assert _lines(root, "setup.log") == ["setup"]  # the in-guard setup only
 
 
+def _end_lines(err):
+    return [line for line in err.splitlines()
+            if line.startswith(("ptest: failed", "ptest: passed",
+                                "ptest: cancelled", "ptest: incomplete"))]
+
+
+def _failure_tail(err):
+    """Lines from the setup-failed line on, with durations normalized."""
+    lines = err.splitlines()
+    start = next(i for i, line in enumerate(lines)
+                 if line.startswith("ptest: setup failed"))
+    # The one-time "run with ptest -v" hint belongs to whichever run is first.
+    return [re.sub(r"\d+(\.\d+)?m?s", "<t>", line).split(" · run with ptest -v")[0]
+            for line in lines[start:]]
+
+
 def test_presetup_failure_ends_with_setup_failed(case, spy, capsys):
-    """A10: a failed pre-run setup never runs the tests."""
+    """A10 + review 1: a failed pre-run setup never runs the tests, writes the
+    caller's --result-json, and ends exactly like an in-guard setup failure
+    (setup-failed line, then the single end line, last)."""
     domain = case.domain(slots=2, jobs=2)
     root, config = _project(case, domain)
     (root / "fail-setup").write_text("1", encoding="utf-8")
 
-    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+    result = operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.SCOPED, result_path="result.json"))
 
-    assert result.status is not C.Status.PASSED
-    assert result.exit_code != 0
-    assert "setup failed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert result.status is C.Status.FAILED
+    assert result.exit_code == 3
+    assert result.exit_origin == "setup"
+    assert len(_end_lines(err)) == 1
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert lines[-2] == "ptest: setup failed (exit 3)"
+    assert lines[-1].startswith("ptest: failed")
+    document = json.loads((root / "result.json").read_text(encoding="utf-8"))
+    assert document["data"]["status"] == "failed"
+    assert document["data"]["exit_code"] == 3
+    assert document["data"]["exit_origin"] == "setup"
     assert _lines(root, "ran.log") == []
     assert _lines(root, "setup.log") == ["setup"]
     assert operations._required_setup_state(
         config, operations._checkout(config), domain) is not None
 
+    # Twin: the same failure inside the guard (no pre-setup) ends the same way.
+    twin_domain = case.domain(slots=2, jobs=2)
+    twin_root, twin_config = _project(case, twin_domain, addopts="-n 1")
+    (twin_root / "fail-setup").write_text("1", encoding="utf-8")
+    operations.execute(twin_domain, twin_config, C.RunRequest(mode=C.Mode.SCOPED))
+    assert _failure_tail(err) == _failure_tail(capsys.readouterr().err)
 
-def test_cancel_during_presetup_records_nothing(case, spy):
+
+def test_cancel_during_presetup_records_nothing(case, spy, capsys):
     """A7: cancel while pre-setup runs: 130, no fingerprint, no held slot."""
     domain = case.domain(slots=1, jobs=1)
     root, config = _project(case, domain)
@@ -195,11 +233,17 @@ def test_cancel_during_presetup_records_nothing(case, spy):
     previous = signal.getsignal(signal.SIGINT)
     try:
         result = operations.execute(
-            domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+            domain, config,
+            C.RunRequest(mode=C.Mode.SCOPED, result_path="result.json"))
     finally:
         signal.signal(signal.SIGINT, previous)
 
     assert result.exit_code == 130
+    # Review 1: the caller's result document is written, one end line.
+    document = json.loads((root / "result.json").read_text(encoding="utf-8"))
+    assert document["data"]["status"] == "cancelled"
+    assert document["data"]["exit_code"] == 130
+    assert len(_end_lines(capsys.readouterr().err)) == 1
     assert _lines(root, "ran.log") == []
     assert operations._stored_setup_fingerprint(
         domain, operations._checkout(config)) is None
@@ -285,3 +329,66 @@ def test_concurrent_first_runs_set_up_once(case, monkeypatch):
     result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
     assert result.status is C.Status.PASSED
     assert _lines(root, "setup.log") == []
+
+
+def test_after_setup_serial_reason_is_truthful(case, spy):
+    """Review 5: setup ran yet xdist is still absent -> the reason must not
+    promise that setup will install it."""
+    domain = case.domain(slots=2, jobs=2)
+    root, config = _project(case, domain, dists=())
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert len(spy) == 1
+    assert _serial_reasons(result) == [
+        "serial: pytest-xdist is not installed in the project environment "
+        "after setup; ptest runs serially"]
+
+
+@pytest.mark.parametrize("route", ["elsewhere", "join"])
+def test_full_skip_or_join_never_presetups(case, spy, monkeypatch, route):
+    """Review 2: a --full that is already verified elsewhere, or joins a
+    running full run, never waits for the exclusive grant or runs setup."""
+    domain = case.domain(slots=2, jobs=2)
+    root, config = _project(case, domain)
+    if route == "elsewhere":
+        monkeypatch.setattr(
+            operations, "_full_verified_elsewhere",
+            lambda *args, **kwargs: ("abc1234", 5.0, "other-checkout"))
+    else:
+        def joined(domain_, config_, checkout_, request_, run_id_, signals_):
+            gated = operations._gated_full_result(
+                run_id_, checkout_, config_, request_, C.Status.PASSED, 0, None)
+            return ("join", gated, False)
+        monkeypatch.setattr(operations, "_full_pre_admission", joined)
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+
+    assert result.status is C.Status.PASSED
+    assert spy == []
+    assert _lines(root, "setup.log") == []
+
+
+def test_setup_recheck_failure_releases_the_grant(case):
+    """Review 3: a recheck that raises must not leave the exclusive grant held."""
+    domain = case.domain(slots=1, jobs=1)
+    root, config = _project(case, domain)
+    setup_config = replace(
+        config, runner=replace(
+            config.runner, kind=C.RunnerKind.COMMAND,
+            launcher=tuple(config.setup.argv), args=(), full_args=()),
+        setup=None)
+
+    def boom():
+        raise C.Problem(code="state-unavailable", message="recheck failed", phase="setup")
+
+    with pytest.raises(C.Problem):
+        operations.execute(
+            domain, setup_config,
+            C.RunRequest(mode=C.Mode.SCOPED, setup_only=True,
+                         queue_timeout_s=5),
+            _setup_recheck=boom)
+
+    follow = operations.execute(
+        domain, config, C.RunRequest(mode=C.Mode.SCOPED, queue_timeout_s=5))
+    assert follow.status is C.Status.PASSED

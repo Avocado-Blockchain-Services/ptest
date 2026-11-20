@@ -577,7 +577,18 @@ def _dist_info_versions(venv: Path | None, prefix: str) -> list[str] | None:
     return hits
 
 
-def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]:
+def _not_installed(dist: str, after_setup: bool) -> str:
+    """Serial reason for an absent dist; truthful once setup already ran."""
+    if after_setup:
+        return (f"{dist} is not installed in the project environment "
+                "after setup; ptest runs serially")
+    return (f"{dist} is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+
+
+def xdist_environment_version(
+        config: C.Config, *, after_setup: bool = False
+) -> tuple[str | None, str | None]:
     """Probe the qualified xdist install for ``config``'s launcher.
 
     Returns ``(version, None)`` when exactly one ``pytest_xdist`` dist-info
@@ -589,9 +600,7 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
         return None, reason
     hits = _dist_info_versions(venv, "pytest_xdist-")
     if not hits:
-        return None, (
-            "pytest-xdist is not installed in the project environment yet; "
-            "ptest runs serially until setup installs it")
+        return None, _not_installed("pytest-xdist", after_setup)
     if len(hits) > 1:
         return None, (
             "more than one pytest-xdist install in the project environment; "
@@ -600,7 +609,8 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
 
 
 def coverage_environment_tuple(
-        config: C.Config) -> tuple[tuple[str | None, str | None], str | None]:
+        config: C.Config, *, after_setup: bool = False
+) -> tuple[tuple[str | None, str | None], str | None]:
     """Probe the frozen pytest-cov/coverage pair for ``config``'s launcher.
 
     Returns ``((pytest_cov, coverage), None)`` when exactly one install of
@@ -615,9 +625,7 @@ def coverage_environment_tuple(
     cov_hits = _dist_info_versions(venv, "pytest_cov-")
     coverage_hits = _dist_info_versions(venv, "coverage-")
     if not cov_hits or not coverage_hits:
-        return (None, None), (
-            "pytest-cov is not installed in the project environment yet; "
-            "ptest runs serially until setup installs it")
+        return (None, None), _not_installed("pytest-cov", after_setup)
     if len(cov_hits) > 1 or len(coverage_hits) > 1:
         return (None, None), (
             "more than one pytest-cov install in the project environment; "
@@ -625,7 +633,8 @@ def coverage_environment_tuple(
     return (cov_hits[0], coverage_hits[0]), None
 
 
-def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest:
+def parallel_request(config: C.Config, *, project: str = ".",
+                     after_setup: bool = False) -> ParallelRequest:
     """Qualify ``config``'s checked-in pytest config for the parallel tier.
 
     Config-level reasons (unsupported ``--dist``, ``--maxprocesses``) can
@@ -658,7 +667,8 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
             f"--dist {declared} is not supported; ptest runs serially",
             True, True)
     if _has_cov(tokens) or _has_cov(runner_args):
-        found, problem = coverage_environment_tuple(config)
+        found, problem = coverage_environment_tuple(
+            config, after_setup=after_setup)
         if problem is not None:
             return ParallelRequest(
                 active, workers, auto, dist, problem, False, True,
@@ -679,7 +689,8 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
         return ParallelRequest(
             active, workers, auto, dist,
             "your pytest config asks for 1 worker", False, True)
-    version, problem = xdist_environment_version(config)
+    version, problem = xdist_environment_version(
+        config, after_setup=after_setup)
     if problem is not None:
         return ParallelRequest(
             active, workers, auto, dist, problem, False, True,
