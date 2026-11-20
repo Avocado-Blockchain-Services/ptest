@@ -358,3 +358,43 @@ def test_installed_ptest_package_exposes_doctor_checklist_resources():
         "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
         "SELECT-001", "TIMING-001", "PARALLEL-001",
     ]
+
+
+# --- bash 3.2 empty-array expansion (GitHub issue #3, spec G8) -----------------
+#
+# bash < 4.4 aborts `"${arr[@]}"` on an empty array under `set -u`. CI has only
+# bash >= 4.4, which tolerates it, so the static check is the real guard; the
+# behaviour test proves the guarded idiom expands to nothing (empty) and to the
+# quoted elements (non-empty) under `set -u`.
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SHIPPED_SHELL = ("install.sh", "get.sh")
+_BARE_ARRAY = __import__("re").compile(r'(?<!\+)"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"')
+
+
+@pytest.mark.parametrize("name", _SHIPPED_SHELL)
+def test_shipped_shell_has_no_unguarded_array_expansion(name):
+    offenders = []
+    for number, line in enumerate((_REPO_ROOT / name).read_text().splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if _BARE_ARRAY.search(line):
+            offenders.append(f"{name}:{number}: {line.strip()}")
+    assert not offenders, "bare array expansion aborts bash 3.2: " + "; ".join(offenders)
+
+
+def test_unguarded_array_lint_flags_bare_and_accepts_guarded():
+    assert _BARE_ARRAY.search('run "${forwarded[@]}"')
+    assert not _BARE_ARRAY.search('run ${forwarded[@]+"${forwarded[@]}"}')
+
+
+def test_guarded_expansion_survives_empty_array_under_nounset():
+    script = (
+        'set -euo pipefail\nforwarded=()\n'
+        'count() { printf "%s:" "$#"; }\n'
+        'count ${forwarded[@]+"${forwarded[@]}"}\n'
+        'forwarded=("a b" c)\n'
+        'count ${forwarded[@]+"${forwarded[@]}"}\n')
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "0:2:"

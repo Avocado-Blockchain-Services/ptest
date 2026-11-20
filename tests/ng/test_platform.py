@@ -655,3 +655,34 @@ def test_darwin_boot_identity_fails_closed_for_bad_boot_session_data(
 
     with pytest.raises(Problem, match="state-unavailable"):
         P.boot_identity()
+
+
+# --- macOS PID 0 in the group CPU scan (GitHub issue #4, spec G9) ---------------
+
+def _fake_pids(monkeypatch, pids, groups, live):
+    monkeypatch.setattr(P.psutil, "pids", lambda: list(pids))
+    monkeypatch.setattr(P.os, "getpgid", lambda pid: groups[pid])
+
+    def process(pid):
+        assert pid in live, f"PID {pid} must never be opened"
+        return SimpleNamespace(
+            status=lambda: psutil.STATUS_RUNNING,
+            create_time=lambda: 1.0,
+            cpu_times=lambda: SimpleNamespace(
+                user=1.0, system=0.5, children_user=0.0, children_system=0.0))
+
+    monkeypatch.setattr(P.psutil, "Process", process)
+
+
+def test_group_cpu_times_skips_pid_zero(monkeypatch):
+    # PID 0 reports the scanned group, as on macOS; it is not a member.
+    _fake_pids(monkeypatch, [0, 4242], {0: 4242, 4242: 4242}, live=set())
+
+    assert P.group_cpu_times(4242, exclude_pid=4242) == {}
+
+
+def test_group_cpu_times_still_sees_real_member_beside_pid_zero(monkeypatch):
+    _fake_pids(monkeypatch, [0, 4242, 4300],
+               {0: 4242, 4242: 4242, 4300: 4242}, live={4300})
+
+    assert P.group_cpu_times(4242, exclude_pid=4242) == {(4300, 1.0): 1.5}

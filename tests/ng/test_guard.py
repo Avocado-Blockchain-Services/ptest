@@ -2086,3 +2086,39 @@ def test_decision_budget_follows_manifest_and_is_capped_by_compound(harness):
         capped.manifest, attempt_decision_timeout_s=90.0,
         compound_timeout_s=C.MIN_COMPOUND_TIMEOUT_S)
     assert _ready_budget(capped) <= C.MIN_COMPOUND_TIMEOUT_S
+
+
+# --- macOS PID 0 in the process-group scan (GitHub issue #4, spec G9) ----------
+#
+# psutil yields PID 0 on macOS and os.getpgid(0) is the CALLER's group, so an
+# unfiltered scan always finds a "live member" and every run ends exit 70.
+
+def _fake_table(monkeypatch, entries, groups):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    procs = [SimpleNamespace(pid=pid, status=lambda: psutil.STATUS_RUNNING)
+             for pid in entries]
+    monkeypatch.setattr(guard_module.psutil, "process_iter", lambda: iter(procs))
+    monkeypatch.setattr(guard_module.os, "getpgid", lambda pid: groups[pid])
+    return guard_module
+
+
+def test_pid_zero_is_not_a_live_group_member(monkeypatch):
+    from types import SimpleNamespace
+
+    own = SimpleNamespace(pid=4242, pgid=4242)
+    # PID 0 reports the guard's own group, exactly as macOS does.
+    module = _fake_table(monkeypatch, [0, 4242], {0: 4242, 4242: 4242})
+
+    assert module._scan_group_once(own) is False
+
+
+def test_real_member_beside_pid_zero_is_still_detected(monkeypatch):
+    from types import SimpleNamespace
+
+    own = SimpleNamespace(pid=4242, pgid=4242)
+    module = _fake_table(
+        monkeypatch, [0, 4242, 4300], {0: 4242, 4242: 4242, 4300: 4242})
+
+    assert module._scan_group_once(own) is True

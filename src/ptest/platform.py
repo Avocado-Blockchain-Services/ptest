@@ -493,7 +493,8 @@ def group_cpu_times(
         for pid in psutil.pids():
             if time.monotonic() >= deadline:
                 return None
-            if pid == exclude_pid:
+            # macOS lists PID 0; getpgid(0) is the caller's own group.
+            if pid == exclude_pid or pid <= 0:
                 continue
             try:
                 if os.getpgid(pid) != pgid:

@@ -48,7 +48,7 @@ if [ "$destination" = "${HOME}/.local/ptest" ] && [ ! -e "${HOME}/.local" ]; the
     (umask 022 && mkdir -p "${HOME}/.local")
 fi
 "$python" "$source_dir/scripts/install.py" --dest "$destination" \
-    --wheelhouse "$wheelhouse" --manifest "$manifest" "${forwarded[@]}"
+    --wheelhouse "$wheelhouse" --manifest "$manifest" ${forwarded[@]+"${forwarded[@]}"}
 
 # The default installation is a user command, so publish its PATH entry only
 # after the immutable bundle itself has installed successfully.

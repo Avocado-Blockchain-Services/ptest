@@ -349,7 +349,8 @@ def _scan_group_once(identity) -> bool | None:
                 raise _ScanTruncated
             if time.monotonic() >= deadline:
                 return None
-            if proc.pid == identity.pid:
+            # macOS lists PID 0; getpgid(0) is the caller's own group.
+            if proc.pid == identity.pid or proc.pid <= 0:
                 continue
             try:
                 if os.getpgid(proc.pid) == identity.pgid and proc.status() != psutil.STATUS_ZOMBIE:
