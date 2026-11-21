@@ -392,3 +392,40 @@ def test_setup_recheck_failure_releases_the_grant(case):
     follow = operations.execute(
         domain, config, C.RunRequest(mode=C.Mode.SCOPED, queue_timeout_s=5))
     assert follow.status is C.Status.PASSED
+
+
+_COV_DISTS = ("pytest_xdist-3.8.0", "pytest_cov-6.0.0", "coverage-7.6.0")
+
+
+@pytest.mark.parametrize("runner_extra, coverage, dists, proof", [
+    ('coverage_args = ["--cov=tests"]\n', False, _COV_DISTS, True),
+    ('coverage_args = ["--cov=tests"]\n', True, _COV_DISTS, True),
+    # reuse also asks for native source identity, which this fake venv
+    # cannot give: the run ends incomplete, after setup and the tests ran.
+    ("reuse = true\n", False, ("pytest_xdist-3.8.0",), False),
+], ids=["coverage-declared", "cov-requested", "reuse"])
+def test_owed_setup_with_pytest_only_runner_options_runs(
+        case, spy, runner_extra, coverage, dists, proof):
+    """0.7.5 regression (bug report from a panaderia session on 0.7.4).
+
+    Setup is owed, and the project declares a pytest-only [runner]
+    option. Every run crashed before setup with ``runner.coverage_args is
+    supported for pytest only`` (or ``runner.reuse ...``): the setup
+    command config kept those options under the COMMAND kind.
+    """
+    domain = case.domain(slots=2, jobs=2)
+    root, _ = _project(case, domain, dists=dists)
+    toml = root / ".ptest.toml"
+    toml.write_text(toml.read_text(encoding="utf-8").replace(
+        "workers = 1\n", "workers = 1\n" + runner_extra), encoding="utf-8")
+    config = config_api.resolve_config(root).config
+    assert config is not None
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, coverage=coverage))
+
+    assert len(spy) == 1
+    assert _lines(root, "setup.log") == ["setup"]
+    assert (root / "ran.log").exists()
+    if proof:
+        assert result.status is C.Status.PASSED, _reasons(result)

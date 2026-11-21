@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.5
+
+- Fix: in 0.7.4, a run whose setup was owed (a fresh worktree with no
+  `.venv`) crashed before setup with `runner.coverage_args is supported for
+  pytest only` when the project declares `[runner] coverage_args` (or
+  `runner.reuse ...` with `reuse = true`). The setup-only command kept the
+  pytest-only runner options; it now drops them. `ptest init`'s setup smoke
+  had the same fault.
+
 ## 0.7.4
 
 - Fix: the first run in a fresh worktree is no longer serial. ptest used to

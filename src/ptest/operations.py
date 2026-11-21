@@ -4590,11 +4590,14 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
     if _required_setup_state(config, checkout, domain) is None:
         return None
     before = _setup_fingerprint(config, checkout)
+    # The setup is a literal command: pytest-only runner options
+    # (coverage, reuse) never apply to it, and the COMMAND kind rejects them.
     setup_config = replace(
         config,
         runner=replace(
             config.runner, kind=C.RunnerKind.COMMAND,
-            launcher=tuple(config.setup.argv), args=(), full_args=()),
+            launcher=tuple(config.setup.argv), args=(), full_args=(),
+            coverage_args=(), coverage_requested=False, reuse=False),
         setup=None)
     try:
         result = execute(
